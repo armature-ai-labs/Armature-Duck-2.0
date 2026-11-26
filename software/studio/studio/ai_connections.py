@@ -31,7 +31,7 @@ def local_host(host):
 
 def base_url(value):
     if not isinstance(value, str) or len(value) > 500 or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
-        raise AiError('validation', 'Base URL 格式不正确')
+        raise AiError('validation', 'Invalid Base URL format')
     if not value:
         return ''
     try:
@@ -42,13 +42,13 @@ def base_url(value):
                 or (u.scheme == 'http' and not local_host(u.hostname))):
             raise ValueError()
     except ValueError:
-        raise AiError('validation', 'Base URL 须为 HTTPS；仅本地服务可用 HTTP，且不能带账号、查询或片段') from None
+        raise AiError('validation', 'Base URL must use HTTPS (HTTP allowed for local hosts only) with no credentials, query, or fragment') from None
     return value.rstrip('/')
 
 
 def text(value, limit, field):
     if not isinstance(value, str) or len(value) > limit or any(ord(c) < 32 or ord(c) == 127 for c in value):
-        raise AiError('validation', f'{field} 格式或长度不正确')
+        raise AiError('validation', f'Invalid {field} format or length')
     return value.strip()
 
 
@@ -59,7 +59,7 @@ class Connections:
 
     def _read(self):
         if self.path is None:
-            raise AiError('state', 'AI 设置存储目录尚未配置', 503)
+            raise AiError('state', 'AI settings directory is not configured', 503)
         try:
             if not self.path.exists():
                 return {'version': 1, 'generation': 0, 'current_id': None, 'connections': []}
@@ -84,7 +84,7 @@ class Connections:
                 raise ValueError()
             return state
         except (OSError, ValueError, TypeError, KeyError, RecursionError):
-            raise AiError('state', 'AI 配置无法读取，原文件已保留；请检查私有配置文件', 503) from None
+            raise AiError('state', 'Unable to read AI configuration; original file preserved', 503) from None
 
     def _write(self, state):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +99,7 @@ class Connections:
             os.replace(tmp, self.path)
             tmp = None
         except OSError:
-            raise AiError('state', 'AI 配置未能保存', 503) from None
+            raise AiError('state', 'Failed to save AI configuration', 503) from None
         finally:
             if tmp is not None:
                 try:
@@ -109,20 +109,20 @@ class Connections:
 
     def _fields(self, value):
         if not isinstance(value, dict) or set(value) - {'id','name','provider','base_url','model','auth_mode','api_key','clear_key'}:
-            raise AiError('validation', 'AI 连接字段不正确')
+            raise AiError('validation', 'Invalid AI connection fields')
         provider = value.get('provider', 'doubao_ark')
         mode = value.get('auth_mode', 'bearer')
         if provider not in PROVIDERS or mode not in ('bearer', 'none'):
-            raise AiError('validation', '提供商或认证方式不支持')
+            raise AiError('validation', 'Unsupported AI provider or auth mode')
         url = base_url(value.get('base_url', ARK_URL if provider == 'doubao_ark' else ''))
         if mode == 'none' and (not url or not local_host(urlsplit(url).hostname)):
-            raise AiError('validation', '无需 API Key 仅适用于明确配置的本地服务')
+            raise AiError('validation', 'No-key auth is only permitted for local services')
         if 'clear_key' in value and type(value['clear_key']) is not bool:
-            raise AiError('validation', '清除 Key 参数不正确')
+            raise AiError('validation', 'Invalid clear_key parameter')
         key = text(value.get('api_key',''),4096,'API Key')
         if key and (not key.isascii() or any(c.isspace() for c in key)):
-            raise AiError('validation','API Key 不能含空白或非 ASCII 字符')
-        return {'name':text(value.get('name',''),80,'连接名称'), 'provider':provider,
+            raise AiError('validation','API Key must contain ASCII characters without whitespace')
+        return {'name':text(value.get('name',''),80,'Connection name'), 'provider':provider,
                 'base_url':url, 'model':text(value.get('model',''),200,'Model ID'),
                 'auth_mode':mode, 'api_key':key}
 
@@ -131,7 +131,7 @@ class Connections:
         if isinstance(value, str):
             for item in state['connections']:
                 if item['api_key']:
-                    value = value.replace(item['api_key'], '[已隐藏]')
+                    value = value.replace(item['api_key'], '[REDACTED]')
             return value
         if isinstance(value, list):
             return [Connections.redact(item,state) for item in value]
@@ -162,9 +162,9 @@ class Connections:
             ident = values.get('id')
             old = next((i for i in state['connections'] if i['id'] == ident), None)
             if ident is not None and old is None:
-                raise AiError('missing', '连接不存在', 404)
+                raise AiError('missing', 'Connection not found', 404)
             if old is None and len(state['connections']) >= 10:
-                raise AiError('limit', '最多保存 10 个连接')
+                raise AiError('limit', 'Maximum of 10 saved connections allowed')
             if (old and not fields['api_key'] and not values.get('clear_key')
                     and fields['provider'] == old['provider'] and fields['base_url'] == old['base_url']
                     and fields['auth_mode'] == 'bearer'):
@@ -184,7 +184,7 @@ class Connections:
         with self._lock:
             state = self._read()
             if ident is not None and not any(i['id'] == ident for i in state['connections']):
-                raise AiError('missing', '连接不存在', 404)
+                raise AiError('missing', 'Connection not found', 404)
             if delete:
                 state['connections'] = [i for i in state['connections'] if i['id'] != ident]
                 if state['current_id'] == ident:
@@ -200,7 +200,7 @@ class Connections:
                 state = self._read()
                 item = next((i for i in state['connections'] if i['id'] == ident),None)
                 if item and not self._public(item,state)['ready']:
-                    raise AiError('incomplete','请先补齐并保存配置，再设为当前连接')
+                    raise AiError('incomplete','Complete and save all required fields before selecting')
             self._mutate(ident, False)
 
     def delete(self, ident):
@@ -212,14 +212,14 @@ class Connections:
             state = self._read()
             item = next((i for i in state['connections'] if i['id'] == ident), None)
             if not item:
-                raise AiError('missing', '连接不存在', 404)
+                raise AiError('missing', 'Connection not found', 404)
             if type(revision) is not int or item['revision'] != revision:
-                raise AiError('stale', '连接已更改，请重新读取设置', 409)
+                raise AiError('stale', 'Connection changed; reload settings', 409)
             return copy.deepcopy(item), state['generation']
 
     def finish(self, generation, value):
         with self._lock:
             state = self._read()
             if state['generation'] != generation:
-                raise AiError('stale','连接已更改，本次旧配置的回复已丢弃；请刷新设置',409)
+                raise AiError('stale','Connection changed while request was in flight; reload settings',409)
             return self.redact(value,state)

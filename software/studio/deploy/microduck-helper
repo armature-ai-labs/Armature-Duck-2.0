@@ -71,15 +71,18 @@ import time
 import tomllib
 import types
 
-VERSION = "0.7.2"
+VERSION = "0.8.2"
 VERBS = ("bus-take", "bus-give-back", "bus-abort", "pad-pair", "pad-forget",
          "wifi-hotspot-down", "wifi-hotspot-up", "calib-read", "calib-commit", "ssh-status", "ssh-password",
-         "imu-recalibrate", "robotd-update")
+         "imu-recalibrate", "robotd-update", "sensors-apply", "phone-tls",
+         "maintenance-export", "maintenance-preview", "maintenance-restore", "maintenance-shutdown",
+         "skill-table")
 
 EXIT_OK, EXIT_ARGS, EXIT_STATE, EXIT_BUSY, EXIT_FAIL, EXIT_RETAKE = 0, 2, 3, 4, 5, 6
 
 SELF_PATH = "/usr/local/sbin/microduck-helper"
 HELPER_DIR = "/run/microduck-helper"
+SKILL_TABLE_LOCK = HELPER_DIR + "/skill-table.lock"
 FLAG = HELPER_DIR + "/bus-held"
 ABORT = HELPER_DIR + "/abort"
 LAST = HELPER_DIR + "/last-result.json"
@@ -109,6 +112,7 @@ IMU_REDO_DIR = OPLOG_DIR + "/imu-recalibrate"
 IMU_REDO_MANIFEST = IMU_REDO_DIR + "/manifest.json"
 IMU_REDO_DROPIN = "/etc/systemd/system/robotd.service.d/zzzzzz-studio-imu-recalibrate.conf"
 IMU_REDO_SCHEMA = "microduck-imu-recalibrate/1"
+IMU_CONFIG_DIR = "/etc/robot/feetech-ft5"
 IMU_CONFIG = "/etc/robot/feetech-ft5/robotd.toml"
 IMU_CONFIG_SAVED = "/etc/robot/feetech-ft5/robotd.saved.toml"
 CALIB_RESTART_WAIT = 40.0
@@ -125,6 +129,11 @@ HOTSPOT = "Microduck-Hotspot"
 PAD_TIMEOUT_DEFAULT, PAD_TIMEOUT_MIN, PAD_TIMEOUT_MAX = 60, 10, 120
 PAD_EXTRA_S = 30          # 子进程总超时 = robotctl 自己的 timeout + 这 30 秒
 FORGET_TIMEOUT_S = 60
+MEDIA_CONFIG = "/etc/robot/robotd.toml"
+SENSORS_LOCK = HELPER_DIR + "/sensors.lock"
+SOFTWARE_MARKER = "/run/microduck-updater/installing"
+MEDIA_SETTLE_S = 3.0      # 重启视频服务以后先等这么久
+MEDIA_STABLE_S = 6.0      # 再看这么久：一直在跑、主进程没换才算起来了（起不来的话它每 5 秒重启一次）
 WIFI_DOWN_WAIT = 10.0
 WIFI_UP_WAIT = 30.0
 WIFI_POLL = 0.2
@@ -747,7 +756,7 @@ def _bool_text(v):
     return "true" if v else "false"
 
 
-def build_calibration(current, joints, imu):
+def build_calibration(current, joints, imu, joint_mode="recorded"):
     """按现在文件里的 name / id，加这次的方向和 IMU 方向，组一份完整的标定。
 
     current：现在文件的字典（calibration-status 里的 calibration，或者 tomllib 读出来的）；
@@ -776,27 +785,38 @@ def build_calibration(current, joints, imu):
     if not isinstance(joints, list) or len(joints) != 15:
         raise CalibError("joints 要正好 15 个 {id, direction}")
     dirs = {}
+    centered_ids = set()
     for row in joints:
         if not isinstance(row, dict) or not _is_int(row.get("id")) or row.get("direction") not in (-1, 1):
             raise CalibError("joints 的每一行要是 {id: 整数, direction: 1 或 -1}")
         if row["id"] in dirs:
             raise CalibError(f"joints 里 id {row['id']} 出现了两次")
         dirs[row["id"]] = row["direction"]
+        if joint_mode == "recorded" and row.get("centered") is True:
+            centered_ids.add(row["id"])
     file_ids = {row.get("id") for row in by_name.values()}
     if set(dirs) != file_ids:
         raise CalibError(f"这次的 15 颗（{sorted(dirs)}）跟主程序文件里的（{sorted(file_ids, key=str)}）对不上")
 
+    if joint_mode not in ("recorded", "keep", "imu_only"):
+        raise CalibError("不认识的舵机标定写入方式")
     out_joints = []
     for name in JOINT_ORDER:
         src = by_name[name]
         jid = src.get("id")
         if not _is_int(jid):
             raise CalibError(f"{name} 的 id 不是整数")
-        lo, hi = LIMITS_DEG[name]
-        out_joints.append({
-            "name": name, "id": jid, "zero_raw": 2048, "direction": dirs[jid], "calibrated": True,
-            "min_rad": math.radians(lo), "max_rad": math.radians(hi),
-        })
+        row = dict(src)
+        if joint_mode == "recorded":
+            row["direction"] = dirs[jid]
+            if jid in centered_ids:
+                row["zero_raw"] = 2048
+        if joint_mode != "imu_only":
+            if row.get("min_rad") is None and row.get("max_rad") is None and row.get("calibrated") is False:
+                lo, hi = LIMITS_DEG[name]
+                row.update(min_rad=math.radians(lo), max_rad=math.radians(hi))
+            row["calibrated"] = True
+        out_joints.append(row)
 
     out = {
         "motion_enabled": True,
@@ -831,6 +851,8 @@ def build_calibration(current, joints, imu):
             out["imu_mounts"][kind] = {"quat": _quat(mount.get("quat"), f"imu_mounts.{kind}.quat"),
                                        "verified": bool(mount.get("verified", False))}
 
+    if joint_mode == "imu_only":
+        out = {**current, "imu_mounts": dict(current.get("imu_mounts") or {})}
     if not isinstance(imu, dict):
         raise CalibError("imu 要是一个对象")
     source = imu.get("source")
@@ -1310,7 +1332,10 @@ def calib_gate(op, mode):
 
 
 def check_calib_commit_args(args):
-    check_keys(args, ("by", "joints", "imu", "dry_run"), "calib-commit 的参数")
+    check_keys(args, ("by", "joints", "imu", "dry_run", "joint_mode"), "calib-commit 的参数")
+    joint_mode = args.get("joint_mode", "recorded")
+    if joint_mode not in ("recorded", "keep", "imu_only"):
+        raise Stop(EXIT_ARGS, "bad_args", "joint_mode 不受支持")
     by = check_by(args)
     joints = args.get("joints")
     if not isinstance(joints, list) or len(joints) != 15:
@@ -1319,10 +1344,12 @@ def check_calib_commit_args(args):
     for row in joints:
         if not isinstance(row, dict):
             raise Stop(EXIT_ARGS, "bad_args", "joints 的每一行要是对象")
-        check_keys(row, ("id", "direction"), "joints 的一行")
+        check_keys(row, ("id", "direction", "centered") if joint_mode == "recorded" else ("id", "direction"), "joints 的一行")
+        if "centered" in row and row["centered"] is not True:
+            raise Stop(EXIT_ARGS, "bad_args", "centered 只能标记已实际校准的舵机")
         if not is_int(row.get("id")) or row.get("direction") not in (-1, 1):
             raise Stop(EXIT_ARGS, "bad_args", "joints 的每一行要是 {id: 整数, direction: 1 或 -1}")
-        rows.append({"id": row["id"], "direction": row["direction"]})
+        rows.append(dict(row))
     imu = args.get("imu")
     if not isinstance(imu, dict):
         raise Stop(EXIT_ARGS, "bad_args", "imu 要是一个对象")
@@ -1542,10 +1569,11 @@ def readback_mismatches(expected, calibration):
     return out
 
 
-def wait_motion(op, expected):
-    """重启后每 0.5 秒看一次，最多 30 秒。成功 = motion + control + 标定逐项读回一致。
+def wait_motion(op, expected, expected_mode="motion"):
+    """重启后每 0.5 秒看一次，最多 30 秒。预期模式、阶段和逐项标定读回都一致才成功。
     waiting_for_bus 带标定校验的错误立刻判失败（重试也一样）；带别的错误（总线打不开）
     可能只是刚启动那一下，主程序每秒重试，等到 30 秒还这样才判失败。回一个可写进 last-result 的判定字典。"""
+    expected_phase = "control" if expected_mode == "motion" else "ready"
     deadline = op.ctx.now() + CALIB_MOTION_WAIT
     last, why = {}, None
     mismatches = []
@@ -1558,7 +1586,7 @@ def wait_motion(op, expected):
         if phase == "waiting_for_bus" and error and CALIB_ERR.search(str(error)):
             return {"ok": False, "kind": "calib_rejected", "bus": last, "readback_ok": False,
                     "mismatches": [], "error": str(error)}
-        if mode == "motion" and phase == "control":
+        if mode == expected_mode and phase == expected_phase:
             status, cs_err = calibration_status(op)
             if status is not None:
                 mismatches = readback_mismatches(expected, status.get("calibration"))
@@ -1566,25 +1594,25 @@ def wait_motion(op, expected):
                 if status.get("imu_source") in (None, "bus") and metadata_error:
                     mismatches.append(metadata_error)
                 if not mismatches:
-                    op.emit("wait", "info", "主程序进了运动模式，标定读回来逐项一致",
+                    op.emit("wait", "info", "主程序已回到预期模式，标定读回来逐项一致",
                             {"busStatus": status_summary(last), "readback_ok": True})
                     return {"ok": True, "kind": "committed", "bus": last, "status": status,
                             "readback_ok": True, "mismatches": []}
                 op.emit("wait", "warn", f"标定读回来跟写进去的不一致（{len(mismatches)} 处）",
                         {"mismatches": mismatches[:20]})
             else:
-                op.emit("wait", "info", f"已进控制阶段，标定还没读回来：{cs_err}", {"busStatus": status_summary(last)})
+                op.emit("wait", "info", f"已进预期模式，标定还没读回来：{cs_err}", {"busStatus": status_summary(last)})
         if op.ctx.now() >= deadline:
             break
         if op.ctx.now() - last_emit >= 5.0:
             last_emit = op.ctx.now()
             op.emit("wait", "info",
-                    f"等主程序进运动模式并读回标定（mode={mode or '?'}，phase={phase or '?'}）",
+                    f"等主程序进入 {expected_mode} 并读回标定（mode={mode or '?'}，phase={phase or '?'}）",
                     {"busStatus": status_summary(last), "mismatches": mismatches[:20]})
         op.ctx.sleep(CALIB_STATUS_INTERVAL)
     if not last and why:
         last = {"error": why}
-    if mode == "motion" and phase == "control":
+    if mode == expected_mode and phase == expected_phase:
         kind = "readback_mismatch"
     elif phase == "waiting_for_bus" and last.get("error"):
         kind = "bus_unavailable"
@@ -1755,11 +1783,12 @@ def verb_calib_commit(op, args, raw):
     op.emit("read", "info", f"读了主程序的标定：{len(rows)} 颗，id 对得上")
 
     try:
-        built = build_calibration(data, joints, imu)
+        joint_mode = args.get("joint_mode", "recorded")
+        built = build_calibration(data, joints, imu, joint_mode)
         validate_calibration(built, imu["source"])
     except CalibError as e:
         raise Stop(EXIT_ARGS, "invalid", f"要写的内容没过校验：{e}") from e
-    op.emit("build", "info", "按标准限位、这次的方向和 IMU 方向组好了新内容")
+    op.emit("build", "info", "已生成待写标定", {"joint_mode": joint_mode})
     text = render_calibration(built)
     back = tomllib.loads(text)
     if not same_calibration(normalized_calibration(back), normalized_calibration(built)):
@@ -1791,7 +1820,7 @@ def verb_calib_commit(op, args, raw):
     try:
         install_calibration(op, text, old, main_meta, saved_meta)
         verify_calibration_file(op, built, imu["source"])
-        if mode == "commissioning":
+        if mode == "commissioning" and joint_mode != "imu_only":
             if not remove(op.ctx, COMMISSIONING_DROPIN):
                 raise OSError(f"commissioning 文件不见了：{COMMISSIONING_DROPIN}")
             op.ctx.run(["systemctl", "daemon-reload"])
@@ -1803,10 +1832,11 @@ def verb_calib_commit(op, args, raw):
         if not up:
             return _commit_fail(op, "restart_failed", "写进去了，但主程序没在 40 秒内起来（没连上 hello）",
                                 base, {"bus": None, "readback_ok": False, "mismatches": []}, journal)
-        judged = wait_motion(op, built)
+        judged = wait_motion(op, built, mode if joint_mode == "imu_only" else "motion")
         if judged.get("ok"):
             detail = _commit_detail(base, judged, None, journal)
             return op.finish(EXIT_OK, "committed",
+                             "IMU 方向已写入，15 颗舵机的原标定已逐颗读回" if joint_mode == "imu_only" else
                              "写进主程序了：主程序进了运动模式，15 颗和 IMU 方向读回来都一致", detail)
         bus = status_summary(judged.get("bus"))
         if judged.get("kind") == "calib_rejected":
@@ -1815,10 +1845,11 @@ def verb_calib_commit(op, args, raw):
             why = f"主程序打不开舵机总线：{judged.get('error')}。舵机电源开了吗？"
         elif judged.get("kind") == "readback_mismatch":
             first = (judged.get("mismatches") or ["没读到 calibration-status"])[0]
-            why = f"主程序进了运动模式，但标定读回来跟写进去的不一致：{first}"
+            why = f"主程序已重启，但标定读回来跟写进去的不一致：{first}"
         else:
             stuck = bus.get("error") or f"mode={bus.get('mode') or '?'}，phase={bus.get('phase') or '?'}"
-            why = f"等 30 秒主程序还没进运动模式：{stuck}"
+            target_mode = "标定模式" if joint_mode == "imu_only" and mode == "commissioning" else "运动模式"
+            why = f"等 30 秒主程序还没进{target_mode}：{stuck}"
         return _commit_fail(op, judged.get("kind") or "not_motion", why, base, judged, journal)
     except Stop as e:
         rb = rollback(op, backup_path)
@@ -3155,6 +3186,110 @@ def verb_ssh_status(op, args):
     return op.finish(EXIT_OK, "ssh_status", "读到了 SSH 的状态", detail, record=False)
 
 
+# ---------------------------------------------------------------------------
+# 摄像头 / ToF（用户 11-17：接了就自动用，不用 SSH 改配置）
+
+def media_source_text(text, source):
+    """只换 [media] 里 source 那一行（官方配置里它可能是注释掉的），别的原样。找不到这一行回 None。"""
+    lines, section, done = text.split("\n"), None, False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped
+        elif section == "[media]" and not done and re.match(r"#?\s*source\s*=", stripped):
+            lines[index] = f'source = "{source}"'
+            done = True
+    return "\n".join(lines) if done else None
+
+
+def read_media_source(op):
+    """回 (整份配置的文字, 现在的 source)。配置读不了、不是 root 的普通文件就停。"""
+    try:
+        text = imu_profile_safe_file(op, MEDIA_CONFIG).decode("utf-8")
+        media = tomllib.loads(text).get("media")
+    except (OSError, ValueError) as e:
+        raise Stop(EXIT_STATE, "bad_config", f"读不了 {MEDIA_CONFIG}：{type(e).__name__}: {e}") from e
+    return text, media.get("source") if isinstance(media, dict) else None
+
+
+def write_media_source(op, text, source):
+    new = media_source_text(text, source)
+    try:
+        ok = new is not None and tomllib.loads(new).get("media", {}).get("source") == source
+    except ValueError:
+        ok = False
+    if not ok:
+        raise Stop(EXIT_STATE, "bad_config", f"{MEDIA_CONFIG} 的 [media] 里找不到能改的 source 这一行，没动它")
+    mode = stat.S_IMODE(os.lstat(op.ctx.p(MEDIA_CONFIG)).st_mode)
+    write_atomic(op.ctx, MEDIA_CONFIG, new.encode("utf-8"), mode)
+    return new
+
+
+def restart_mediad(op):
+    rc, out, err = op.ctx.run(["systemctl", "restart", "mediad"], timeout=30.0)
+    return None if rc == 0 else ((err or out or "").strip()[:300] or f"systemctl 退出码 {rc}")
+
+
+def mediad_stable(op):
+    """视频服务真起来了没有：隔几秒看两次，都在跑、主进程没换才算。"""
+    op.ctx.sleep(MEDIA_SETTLE_S)
+    first = show(op, "mediad", ["ActiveState", "MainPID"])
+    op.ctx.sleep(MEDIA_STABLE_S)
+    second = show(op, "mediad", ["ActiveState", "MainPID"])
+    ok = (first.get("ActiveState") == "active" and second.get("ActiveState") == "active"
+          and first.get("MainPID") not in (None, "", "0") and first.get("MainPID") == second.get("MainPID"))
+    return ok, {"first": first, "second": second}
+
+
+def verb_sensors_apply(op, args):
+    """camera："camera" = 视频用真实画面，"test" = 用测试画面；改了才重启视频服务。
+    切成真实画面以后视频服务起不来（没接好、识别错了）就退回测试画面：网页上的视频和遥控不能跟着没了。
+    tof：true = ToF 服务设成开机启动并马上起（没接传感器它自己安静地等，官方就是这么设计的）。"""
+    check_keys(args, ("by", "camera", "tof"), "sensors-apply 的参数")
+    op.by = check_by(args)
+    camera, tof = args.get("camera"), args.get("tof")
+    if camera not in (None, "camera", "test"):
+        raise Stop(EXIT_ARGS, "bad_args", 'camera 只能是 "camera" 或 "test"')
+    if tof not in (None, True):
+        raise Stop(EXIT_ARGS, "bad_args", "tof 只能是 true")
+    if camera is None and tof is None:
+        raise Stop(EXIT_ARGS, "bad_args", "camera 和 tof 至少给一个")
+    if exists(op.ctx, SOFTWARE_MARKER):
+        raise Stop(EXIT_BUSY, "busy", "软件正在更新：等它装完再设传感器")
+    native_update_conflict(op)
+    op.take_lock("传感器设置", SENSORS_LOCK)
+    detail = {}
+    if tof:
+        rc, out, err = op.ctx.run(["systemctl", "enable", "--now", "tofd.service"], timeout=30.0)
+        if rc != 0:
+            why = (err or out or "").strip()[:300] or f"systemctl 退出码 {rc}"
+            return op.finish(EXIT_FAIL, "tof_failed", f"ToF 服务没设成开机启动：{why}", {"rc": rc})
+        op.emit("tof", "info", "ToF 服务设成开机启动，已启动")
+        detail["tof"] = "enabled"
+    if camera:
+        text, current = read_media_source(op)
+        if current == camera:
+            op.emit("camera", "info", f"视频来源本来就是 {camera}，没动")
+            detail["camera"] = "unchanged"
+        else:
+            write_media_source(op, text, camera)
+            op.emit("camera", "info", f"视频来源 {current} → {camera}，重启视频服务")
+            why = restart_mediad(op)
+            stable, seen = (False, {}) if why else mediad_stable(op) if camera == "camera" else (True, {})
+            if why or not stable:
+                # 退回去：原文整份写回，别让视频服务一直起不来
+                write_atomic(op.ctx, MEDIA_CONFIG, text.encode("utf-8"),
+                             stat.S_IMODE(os.lstat(op.ctx.p(MEDIA_CONFIG)).st_mode))
+                back = restart_mediad(op)
+                op.emit("camera", "warn", "视频服务没起来，视频来源已退回原来的", {"restart": back, **seen})
+                return op.finish(EXIT_FAIL, "camera_unstable" if not why else "restart_failed",
+                                 (f"视频服务重启没成功：{why}" if why else "切到真实画面以后视频服务起不来")
+                                 + f"，已退回 {current}" + (f"（退回后重启也没成功：{back}）" if back else ""),
+                                 {**detail, "camera": "reverted", "source": current, **seen})
+            detail["camera"] = camera
+    return op.finish(EXIT_OK, "sensors_applied", "传感器设置好了", detail)
+
+
 def check_ssh_password(pw):
     if not isinstance(pw, str):
         raise Stop(EXIT_ARGS, "bad_args", "password 要是字符串")
@@ -3172,6 +3307,140 @@ def ssh_reload(op):
     if rc != 0:
         return (err or out or "").strip()[:400] or f"systemctl 退出码 {rc}"
     return None
+
+
+# ── skill-table：把主程序配置里写成一整行的动作表，改写成主程序自己认的「一条一条」格式 ──────────
+#
+# 镜像带的 robotd.toml 里，动作表是 `"skill" = [{...}, {...}]` 这样一整行（内联数组）。主程序自己改配置
+# （robot.setSkill / robot.removeSkill，也就是 Studio 装动作、换踢腿翻滚模型）只认 `[[policy.skill]]`，
+# 碰到内联写法就拒：「[[policy.skill]] is not a table array」。这里只改写格式：改前改后用 tomllib 读出来
+# 必须逐项相等，不等就一个字都不写。跟主程序拿同一把锁（配置旁边的 robotd.lock），不跟它同时写。
+SKILL_TABLE_LOCK_WAIT = 5.0
+SKILL_TABLE_HEADER_RE = re.compile(r'^\s*\[\[\s*"?policy"?\s*\.\s*"?skill"?\s*\]\]', re.M)
+POLICY_HEADER_RE = re.compile(r'^\s*\[\s*"?policy"?\s*\]\s*(#.*)?$')
+ANY_TABLE_HEADER_RE = re.compile(r'^\s*\[')
+SKILL_KEY_RE = re.compile(r'^\s*"?skill"?\s*=\s*')
+BARE_KEY_RE = re.compile(r'^[A-Za-z0-9_-]+$')
+
+
+def _toml_key(key):
+    return key if BARE_KEY_RE.match(key) else json.dumps(key, ensure_ascii=False)
+
+
+def _toml_scalar(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise Stop(EXIT_STATE, "unsupported_config", "动作表里有无穷大或非数，未修改")
+        text = repr(value)
+        return text if any(c in text for c in ".eE") else text + ".0"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_scalar(v) for v in value) + "]"
+    raise Stop(EXIT_STATE, "unsupported_config", f"动作表里有认不出的值：{type(value).__name__}，未修改")
+
+
+def _skill_blocks(skills):
+    out = []
+    for row in skills:
+        if not isinstance(row, dict):
+            raise Stop(EXIT_STATE, "unsupported_config", "动作表里有一项不是表，未修改")
+        lines = ["[[policy.skill]]"]
+        subtables = []
+        for key, value in row.items():
+            if isinstance(value, dict):
+                subtables.append((key, value))
+            elif isinstance(value, list) and any(isinstance(v, (dict, list)) for v in value):
+                raise Stop(EXIT_STATE, "unsupported_config", "动作表里有嵌套数组，未修改")
+            else:
+                lines.append(f"{_toml_key(key)} = {_toml_scalar(value)}")
+        for key, table in subtables:
+            lines.append(f"[policy.skill.{_toml_key(key)}]")
+            for k, v in table.items():
+                if isinstance(v, dict):
+                    raise Stop(EXIT_STATE, "unsupported_config", "动作表里有多层嵌套，未修改")
+                lines.append(f"{_toml_key(k)} = {_toml_scalar(v)}")
+        out.append("\n".join(lines))
+    return "\n\n".join(out) + "\n"
+
+
+def skill_table_rewrite(text):
+    """回改写后的文字；本来就是一条一条的（或没有动作表）回 None。"""
+    data = tomllib.loads(text)
+    policy = data.get("policy")
+    skills = policy.get("skill") if isinstance(policy, dict) else None
+    if not isinstance(skills, list) or not skills or SKILL_TABLE_HEADER_RE.search(text):
+        return None
+    lines = text.splitlines(keepends=True)
+    start = end = None
+    in_policy = False
+    for i, line in enumerate(lines):
+        bare = line.rstrip("\r\n")
+        if ANY_TABLE_HEADER_RE.match(bare):
+            in_policy = bool(POLICY_HEADER_RE.match(bare))
+            continue
+        if in_policy and SKILL_KEY_RE.match(bare):
+            start = i
+            break
+    if start is None:
+        raise Stop(EXIT_STATE, "unsupported_config", "找不到 [policy] 里的 skill 那一行，未修改")
+    # 内联数组可能跨好几行：一行一行往下加，直到能单独读通为止
+    for j in range(start, len(lines)):
+        chunk = "".join(lines[start:j + 1])
+        try:
+            tomllib.loads(chunk)
+        except ValueError:
+            continue
+        end = j + 1
+        break
+    if end is None:
+        raise Stop(EXIT_STATE, "unsupported_config", "skill 那一段读不通，未修改")
+    rest = "".join(lines[:start] + lines[end:]).rstrip("\n")
+    new = rest + "\n\n" + _skill_blocks(skills)
+    if tomllib.loads(new) != data:
+        raise Stop(EXIT_STATE, "unsupported_config", "改写后内容对不上，未修改")
+    return new
+
+
+def verb_skill_table(op, args):
+    check_keys(args, ("by",), "skill-table 的参数")
+    op.by = check_by(args)
+    if exists(op.ctx, SOFTWARE_MARKER):
+        raise Stop(EXIT_BUSY, "busy", "软件正在更新：等它装完再改")
+    native_update_conflict(op)
+    op.take_lock("改写动作表格式", SKILL_TABLE_LOCK)
+    handle, deadline = None, op.ctx.now() + SKILL_TABLE_LOCK_WAIT
+    while handle is None:
+        handle = op.ctx.lock(IMU_CONFIG_DIR + "/robotd.lock")
+        if handle is None:
+            if op.ctx.now() >= deadline:
+                raise Stop(EXIT_BUSY, "busy", "主程序正在改配置，等一下再试")
+            op.ctx.sleep(0.1)
+    converted = []
+    try:
+        for path in (IMU_CONFIG, IMU_CONFIG_SAVED):
+            if not exists(op.ctx, path):
+                continue
+            try:
+                raw = imu_profile_safe_file(op, path)
+                text = raw.decode("utf-8")
+                new = skill_table_rewrite(text)
+            except (UnicodeError, ValueError) as e:
+                raise Stop(EXIT_STATE, "bad_config", f"读不了 {path}：{type(e).__name__}: {e}") from e
+            if new is None:
+                continue
+            st = os.lstat(op.ctx.p(path))
+            write_atomic(op.ctx, path, new.encode("utf-8"), stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid)
+            converted.append(path)
+            op.emit("skill-table", "info", f"动作表改成一条一条的格式：{path}")
+    finally:
+        op.ctx.unlock(handle)
+    return op.finish(EXIT_OK, "ok", "动作表格式已经是主程序认的" if not converted else "动作表格式改好了",
+                     {"converted": converted})
 
 
 def verb_ssh_password(op, args):
@@ -3343,6 +3612,44 @@ def run(argv, ctx):
             raise Stop(EXIT_ARGS, "bad_verb", f"只认这几个动词：{', '.join(VERBS)}（参数走 stdin 的 JSON）")
         if not ctx.is_root():
             raise Stop(EXIT_STATE, "not_root", "要用 root 跑（sudo -n /usr/local/sbin/microduck-helper …）")
+        if verb == "phone-tls" or verb.startswith("maintenance-"):
+            # The installed launcher points into a root-owned signed release. Resolve
+            # once so a concurrent switch cannot mix helpers from different releases.
+            if verb in ("maintenance-restore", "maintenance-shutdown"):
+                # The same locks also guard software/native updates and calibration.
+                # Keep them across exec and release them when the bounded child exits.
+                # Restore restarts Studio itself. A separate transient unit owns this
+                # transaction so stopping Studio's cgroup cannot interrupt rollback.
+                if ctx.env.get("MICRODUCK_MAINTENANCE_WORKER") != "1":
+                    runner = "/usr/bin/systemd-run"
+                    os.execve(runner, [runner, "--quiet", "--pipe", "--wait", "--collect",
+                                       "--service-type=exec", "--setenv=MICRODUCK_MAINTENANCE_WORKER=1",
+                                       SELF_PATH, verb], CHILD_ENV)
+                import fcntl
+                op.take_lock("维护")
+                os.set_inheritable(op.lock_handle, True)
+                service_fd = ctx.lock(SERVICE_LOCK)
+                if service_fd is None:
+                    raise Stop(EXIT_BUSY, "maintenance_busy", "标定或总线操作进行中")
+                os.set_inheritable(service_fd, True)
+                # Never create a substitute for the updater's fixed motion gate.
+                fd = os.open(ctx.p("/run/microduck-updater/motion.lock"), os.O_RDWR | os.O_NOFOLLOW)
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise Stop(EXIT_STATE, "maintenance_busy", "运动锁身份未确认")
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise Stop(EXIT_BUSY, "maintenance_busy", "更新或语音动作进行中")
+                os.set_inheritable(fd, True)
+                if exists(ctx, SOFTWARE_MARKER) or exists(ctx, FLAG) or exists(ctx, MARKER):
+                    raise Stop(EXIT_BUSY, "maintenance_busy", "更新或舵机总线交接进行中")
+                native_update_conflict(op)
+                imu_redo_conflict(op)
+            deploy = os.path.dirname(os.path.realpath(__file__))
+            script = "phone_tls.py" if verb == "phone-tls" else "microduck-maintenance"
+            args = [] if verb == "phone-tls" else [verb.removeprefix("maintenance-")]
+            os.execve("/usr/bin/python3", ["/usr/bin/python3", "-IS", os.path.join(deploy, script), *args], CHILD_ENV)
         raw = ctx.stdin.read(STDIN_LIMIT + 1)
         if len(raw) > STDIN_LIMIT:
             raise Stop(EXIT_ARGS, "bad_args", "stdin 太长")
@@ -3378,6 +3685,10 @@ def run(argv, ctx):
             return verb_ssh_status(op, args)
         if verb == "ssh-password":
             return verb_ssh_password(op, args)
+        if verb == "sensors-apply":
+            return verb_sensors_apply(op, args)
+        if verb == "skill-table":
+            return verb_skill_table(op, args)
         return verb_abort(op, args)
     except Stop as s:
         # bad_verb 是 Studio 探测小助手可用性用的：不能把上一次真正的结果覆盖成 bad_verb

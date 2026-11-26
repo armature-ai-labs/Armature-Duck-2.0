@@ -1,8 +1,14 @@
-# Microduck 复刻
+# Armature Duck 2.0 (Indie Duck)
+
+[![快速上手指南](https://img.shields.io/badge/指南-快速上手-blue)](GETTING_STARTED.md)
+[![硬件 BOM](https://img.shields.io/badge/硬件-电子物料BOM-brightgreen)](BOM/Microduck_Replica_Electronics_BOM.xlsx)
 
 **简体中文** · [English](README.en.md)
 
-基于 [Pollen Robotics Microduck](https://pollen-robotics.com/microduck/) 的第三方整机复刻项目，提供从采购、打印、装配到标定、控制和训练的资料。
+基于 [Pollen Robotics Microduck](https://pollen-robotics.com/microduck/) 的第三方整机复刻项目，提供从采购、打印、装配到标定、控制和训练的资料。配备全新的英文/国际化 Web 中控控制台与完整电子物料清单。
+
+> 🚀 **新手指南：查看 [快速上手指南 (GETTING_STARTED.md)](GETTING_STARTED.md) 了解从零组装与配置 Indie Duck 的完整流程！**
+
 
 ## 按主板下载镜像
 

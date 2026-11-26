@@ -1,20 +1,21 @@
-"""把 robotd / configd 的原始数据汇总成推给页面的一个小对象（一律用数组，字段缺了就当不知道）。
+"""Summarize raw robotd / configd data into a compact payload pushed to the UI (all arrays; missing fields are treated as unknown).
 
-姿势判定照 review-impl-plan I2 的表，先看 mode，再看 phase：
-    absent         robotd 的 socket 不在 / 拒绝连接
-    starting       phase 是 configuring_bus / waiting_for_bus / configuration_error（标定模式第一次读成功之前的启动报告也是；
-                   旧 fork 永远停在这里，连续 30 秒以上页面改口「一直报启动中」：starting_secs）
-    commissioning  mode == "commissioning" 的实时快照（ready / moving / read_error / stop_unconfirmed / power_pending：
-                   主程序起来了；这时 robotd 只读，init/enable/do 都拒绝）
+Posture determination checks mode first, then phase:
+    absent         robotd socket missing / connection refused
+    starting       phase is configuring_bus / waiting_for_bus / configuration_error (also startup reports before first
+                   commissioning read succeeds; older forks stay here indefinitely, so after 30s the UI switches to
+                   'stuck starting' via starting_secs)
+    commissioning  live snapshot when mode == "commissioning" (ready / moving / read_error / stop_unconfirmed / power_pending:
+                   robotd is up, read-only; init/enable/do are rejected)
     sitting        robot.policies.sitting
     limp           native.torque_state_confirmed == False
-    walking        policy_enabled，且 move.applied 不为 0
-    policy         policy_enabled（站着、策略在跑）
-    holding        扭矩开、homed、home_start_guard.ready、策略没开（init 之后保持 HOME；关节实际位置也到位了）
-    homing         扭矩开、还没到 HOME
-    unknown        数据不够
+    walking        policy_enabled and move.applied is non-zero
+    policy         policy_enabled (standing with policy running)
+    holding        torque on, homed, home_start_guard.ready, policy off (holding HOME after init; joints are in position)
+    homing         torque on, still moving to HOME
+    unknown        insufficient data
 
-只出文案用的状态，不出按钮（按钮在 S1b）。
+Outputs status fields only (action buttons are computed separately).
 """
 import math
 import time
@@ -26,14 +27,13 @@ from .startup_status import imu_context_current, imu_diagnostic, servo_observati
 JOINT_NAMES = ["left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
                "neck_pitch", "head_pitch", "head_yaw", "head_roll", "mouth",
                "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle"]
-JOINT_CN = {"left_hip_yaw": "左髋转向", "left_hip_roll": "左髋横滚", "left_hip_pitch": "左髋俯仰", "left_knee": "左膝",
-            "left_ankle": "左踝", "neck_pitch": "脖子", "head_pitch": "头俯仰", "head_yaw": "头转向", "head_roll": "头横滚",
-            "mouth": "嘴", "right_hip_yaw": "右髋转向", "right_hip_roll": "右髋横滚", "right_hip_pitch": "右髋俯仰",
-            "right_knee": "右膝", "right_ankle": "右踝"}
+JOINT_CN = {"left_hip_yaw": "Left Hip Yaw", "left_hip_roll": "Left Hip Roll", "left_hip_pitch": "Left Hip Pitch", "left_knee": "Left Knee",
+            "left_ankle": "Left Ankle", "neck_pitch": "Neck Pitch", "head_pitch": "Head Pitch", "head_yaw": "Head Yaw", "head_roll": "Head Roll",
+            "mouth": "Mouth", "right_hip_yaw": "Right Hip Yaw", "right_hip_roll": "Right Hip Roll", "right_hip_pitch": "Right Hip Pitch",
+            "right_knee": "Right Knee", "right_ankle": "Right Ankle"}
 STALE_S = 3.0
-# 各项数据最多用多旧的（代码审查 #18：查询失败后不能一直沿用旧值判断「坐着 / 在走」、电量和温度）
 MAX_AGE = {"health": 8.0, "policies": 6.0, "state": 1.5, "pad": 15.0}
-CPU_WARN_C = 80          # 这块板待机就 78 °C，75 °C 提醒会常亮，久了就没人看了
+CPU_WARN_C = 80
 
 
 def _fresh(sample, key, now):
@@ -46,15 +46,15 @@ def _ms(age):
 
 
 def starting_secs(rd, bus, now=None):
-    """主程序从这次连上起、连续报启动阶段多少秒（robotd.Robotd.starting_since，轮询里记）。不在启动阶段 / 不知道回 None。
-    超过 STARTING_LONG_S 页面就不再说「通常 10 秒内完成」（10-20 真机：旧 fork 的标定模式永远报 configuring_bus）。"""
+    """Seconds robotd has continuously reported a starting phase since this connection (tracked in polling).
+    Returns None when not in a starting phase or unknown. Past STARTING_LONG_S, UI stops saying 'usually finishes within 10s'."""
     since = getattr(rd, "starting_since", None)
     if since is None or not isinstance(bus, dict) or bus.get("phase") not in STARTING_PHASES:
         return None
     return max(0, int((time.monotonic() if now is None else now) - since))
 
 
-STILL_STARTING = "主程序可能其实起来了、只是状态没更新（旧版主程序的毛病），也可能卡在启动：去日志页看主程序最后说了什么"
+STILL_STARTING = "Controller may already be up with stale status, or stuck in startup; check Logs"
 
 
 def posture(present, bus, policies, state):
@@ -83,9 +83,9 @@ def posture(present, bus, policies, state):
     if confirmed is True:
         if bus.get("homed") is not True:
             return "homing"
-        # homed 只是「控制环认为到 HOME 了」，关节实际位置还会落后一点：主程序自己的 home_start_guard
-        # 才同时看关节实际位置（≤ joint_tolerance_deg）和机身倾角，并且要连续几拍稳定。
-        # robotd 没给这个字段（老版本）时，才退回只看 homed。
+        # homed only means the control loop thinks it reached HOME; actual joint positions may lag slightly.
+        # robotd's own home_start_guard checks both actual joint positions (<= joint_tolerance_deg) and body tilt,
+        # and requires stability across several ticks. Only fall back to homed when robotd omits this field (older builds).
         guard = bus.get("home_start_guard")
         if isinstance(guard, dict) and isinstance(guard.get("ready"), bool):
             return "holding" if guard["ready"] else "homing"
@@ -94,7 +94,7 @@ def posture(present, bus, policies, state):
 
 
 def tilt_deg(gravity):
-    """跟 robotd home_start.rs 同一个算法：重力跟竖直向下（0,0,-1）的夹角。"""
+    """Matches robotd home_start.rs: angle between gravity vector and straight down (0, 0, -1)."""
     if not isinstance(gravity, (list, tuple)) or len(gravity) != 3:
         return None
     n = math.sqrt(sum(g * g for g in gravity))
@@ -105,15 +105,15 @@ def tilt_deg(gravity):
 
 
 def cpu_view(health, health_age, bus, present, servo=None, ob=None):
-    """主板温度格（总览重排审查 O8、O5）。字段：
-        c          °C：所有 thermal zone 里最热的那个（robotd health 的 cpu_temp_c，fork soc.rs:25-64）；读不到 None
-        throttled  内核的温控在压频（cooling device 的 level > 0）→ 页面红字「降频了 x / y MHz」；None = 读不到，**不是「正常」**
-        limited    level 是 0、但允许的频率比最高的低：被限频了，多半不是热的（fork lib.rs:3615-3651 的原意）
-        khz / max_khz / level / max_level   原样给（khz 是「允许跑到多少」，不是瞬时频率）
-        hot        ≥ 80 °C（带回差：降到 77 °C 以下才收，回差记在 onboard.Onboarding.cpu_hot；没有它就不带回差）
-        src        robotd / studio（robotd 不报时 Studio 自己读 /sys/class/thermal：鸭子上才有，电脑上开发时没有就算了）
-        why        读不到的原因（主程序没报 / 在调舵机 / 调试模式不报 / 等总线时不报 / 健康检查过期）
-    robotd 只在运动模式的控制循环里每秒采一次（fork main.rs:117-120、4148-4154），调试模式、等总线时都不采。"""
+    """Board temperature card fields:
+        c          °C: hottest thermal zone (robotd health cpu_temp_c); None if unavailable
+        throttled  kernel thermal throttling active (cooling device level > 0) -> UI 'Throttled x / y MHz'; None = unknown (not 'normal')
+        limited    level == 0, but allowed frequency is below max: frequency-capped, likely non-thermal
+        khz / max_khz / level / max_level   raw values (khz is max allowed, not instantaneous clock)
+        hot        >= 80 °C (with hysteresis: clears below 77 °C, tracked in onboard.Onboarding.cpu_hot)
+        src        robotd / studio (Studio reads /sys/class/thermal when robotd does not report it)
+        why        reason unavailable (not reported / servo tuning / commissioning / waiting for bus / health stale)
+    robotd only samples once per second in motion mode control loop, not in commissioning or bus-wait phases."""
     out = {"c": None, "throttled": None, "limited": None, "khz": None, "max_khz": None, "level": None, "max_level": None,
            "hot": False, "src": None, "why": None}
     h = health if isinstance(health, dict) else None
@@ -128,18 +128,18 @@ def cpu_view(health, health_age, bus, present, servo=None, ob=None):
         out["hot"] = bool(ob.cpu_hot) if ob is not None else c >= CPU_WARN_C
     else:
         if servo is not None and getattr(servo, "state", None) in ("open", "opening"):
-            why = "在调舵机：主程序按计划停着，不报温度"
+            why = "Servo tuning active: robotd is paused and not reporting temperature"
         elif present is False:
-            why = "主程序没在跑"
+            why = "robotd is not running"
         elif (bus or {}).get("mode") == "commissioning":
-            why = "调试模式下主程序不报温度"
+            why = "robotd does not report temperature in commissioning mode"
         elif (bus or {}).get("phase") in STARTING_PHASES:
             wait = startup_wait(bus)
-            why = f"主程序{wait['text'] if wait else '还在启动'}，这时不报温度"
+            why = f"robotd {wait['text'] if wait else 'is still starting'}; temperature not reported yet"
         elif h is None:
-            why = f"健康检查 {health_age:.0f} 秒没更新" if health_age is not None else "还没读到健康检查"
+            why = f"Health check not updated for {health_age:.0f}s" if health_age is not None else "Health check not received yet"
         else:
-            why = "主程序没报温度"
+            why = "robotd did not report temperature"
         out["why"] = why
     if isinstance(thr, dict):
         lv, mx, khz, mk = thr.get("level"), thr.get("max_level"), thr.get("khz"), thr.get("max_khz")
@@ -149,24 +149,25 @@ def cpu_view(health, health_age, bus, present, servo=None, ob=None):
             out["throttled"] = lv > 0
             out["limited"] = lv == 0 and mk > 0 and khz < mk
     elif out["c"] is not None:
-        out["throttled"] = None          # 有温度、没降频数据：不知道，不写「正常」
+        out["throttled"] = None          # Temperature present without throttle data: unknown, do not report normal
     return out
 
 
 def servo_session_view(servo):
-    """舵机会话的几个字（提示条用）；没开回 None。unknown = 扭矩读不到的颗数（可能也在保持：审查 D3c）；
-    restored = Studio 重启以后接着管的（审查 D1）。"""
+    """Short status summary for the servo session (used in banners); returns None when closed.
+    unknown = servos whose torque state cannot be read (may still be holding);
+    restored = session resumed after Studio restart."""
     if servo is None or getattr(servo, "state", None) not in ("open", "opening"):
         return None
     holding = servo.holding() if hasattr(servo, "holding") else None
     return {"state": servo.state, "holding": holding, "latched": bool(getattr(servo, "latched", False)),
             "unknown": servo.unknown() if hasattr(servo, "unknown") else 0,
             "restored": bool(getattr(servo, "restored", False)), "closing": bool(getattr(servo, "closing", False)),
-            "port": "演示（没接舵机）" if getattr(servo, "sim", False) else getattr(servo, "port", None)}
+            "port": "Demo (no servos connected)" if getattr(servo, "sim", False) else getattr(servo, "port", None)}
 
 
 def servo_orphan_view(servo):
-    """上次 Studio 退出时舵机会话开着、这次没接管上（审查 D1）：可能还有舵机保持着，卸力要先去舵机页接管。"""
+    """Previous Studio exit left a servo session open that was not reclaimed: servos may still be holding; reclaim on Servo page before releasing torque."""
     o = getattr(servo, "orphan", None) if servo is not None else None
     if not o or getattr(servo, "state", None) in ("open", "opening"):
         return None
@@ -174,18 +175,18 @@ def servo_orphan_view(servo):
 
 
 def summarize(rd, duck, servo=None, now=None, ob=None, bat=None, net=None, commit=None, auth=None):
-    """bat：电量估算（studio/battery_svc.BatteryService，1 Hz 循环里喂）；这里只读它的结果。没给就按 robotd 的直线（老样子）。"""
+    """bat: battery estimator (studio/battery_svc.BatteryService, fed in 1 Hz loop); read-only here. Falls back to robotd linear if omitted."""
     now = time.monotonic() if now is None else now
     bus = rd.bus.value
     health, pol, st = _fresh(rd.health, "health", now), _fresh(rd.policies, "policies", now), _fresh(rd.state, "state", now)
     bus_age, st_age = rd.bus.age(now), rd.state.age(now)
     native = (bus or {}).get("native") if isinstance((bus or {}).get("native"), dict) else {}
 
-    # 新鲜度：Studio 自己多久没拿到新数据（浏览器那边再加上传输的年龄）
+    # Freshness: how long since Studio received new telemetry (browser adds transport age on top)
     freshest = min([a for a in (bus_age, st_age) if a is not None], default=None)
     robotd_ok = rd.present is True and bus_age is not None and bus_age < STALE_S
 
-    # 仪表带
+    # Telemetry strip
     b = (health or {}).get("battery") or {}
     battery = {"pct": b.get("percent"), "volts": b.get("volts")}
     joints = native.get("joints") if isinstance(native.get("joints"), list) else []
@@ -212,7 +213,7 @@ def summarize(rd, duck, servo=None, now=None, ob=None, bat=None, net=None, commi
     elif (imu_h.get("consecutive_stale_blocks") or 0) >= 25:
         imu_status = "frozen"
     elif native.get("imu_mount_verified") is False:
-        imu_status = "unverified"      # 方向没确认：装歪了走路会往前冲（10-12 猛冲的根因）
+        imu_status = "unverified"      # Orientation unverified: misaligned IMU causes forward drift
     elif imu_h.get("ready") is True:
         imu_status = "ok"
     else:
@@ -227,8 +228,8 @@ def summarize(rd, duck, servo=None, now=None, ob=None, bat=None, net=None, commi
     cpu = cpu_view(health, rd.health.age(now), bus, rd.present, servo, ob)
     loop = (health or {}).get("control_loop") or {}
 
-    # 3D：关节弧度按 JOINT_NAMES 原样给（不乘方向），重力用 safety.gravity。
-    # 旧的也照给（页面按 joints_age_ms 去色），姿势判定只用新鲜的 st
+    # 3D: joint angles in JOINT_NAMES order (raw, without direction multiplier); gravity from safety.gravity.
+    # Keep stale joints too (UI dims by joints_age_ms); posture still requires fresh st.
     st_any = rd.state.value if isinstance(rd.state.value, dict) else {}
     js = st_any.get("joints")
     grav = (st_any.get("safety") or {}).get("gravity")
@@ -237,8 +238,8 @@ def summarize(rd, duck, servo=None, now=None, ob=None, bat=None, net=None, commi
     state_t_ns = st_any.get("t_ns")
     hold = (bus or {}).get("hold") if isinstance((bus or {}).get("hold"), dict) else None
     if (bus or {}).get("mode") == "commissioning":
-        # 标定模式没有 robot.state：IMU 读数从 busStatus.last_sample 拿（标定模式 10 Hz 轮询），
-        # IMU 页的「现在」和站着校准就都有实时数据了（用户 10-21：标定模式也能站姿、站着校）
+        # Commissioning mode has no robot.state: read IMU from busStatus.last_sample (polled at 10 Hz)
+        # so the IMU page and standing calibration have live readings.
         ls = (bus or {}).get("last_sample") if isinstance((bus or {}).get("last_sample"), dict) else {}
         s_imu = ls.get("imu") if isinstance(ls.get("imu"), dict) else {}
         g = s_imu.get("gravity")
@@ -249,20 +250,20 @@ def summarize(rd, duck, servo=None, now=None, ob=None, bat=None, net=None, commi
     pose = posture(rd.present, bus, pol, st)
     est = rd.estop.status(present=rd.present is not False, bus=bus, bus_age_s=bus_age, now=now)
     if servo_orphan_view(servo) is not None and rd.present is not True:
-        # 上次退出时会话开着、这次没接管上（审查 D1）：robotd 不在，总线上又没接管——卸力要先去舵机页接管
-        est = {"state": "unavailable", "why": "上次 Studio 退出时可能还有舵机保持着：去舵机页接管后才能卸力"}
+        # Previous exit left a session open and it was not reclaimed: robotd is absent and bus is not held; reclaim on Servo page first
+        est = {"state": "unavailable", "why": "Servos may still be holding from the previous Studio session; reclaim on the Servo page before releasing torque"}
     if servo is not None and servo.state in ("open", "opening"):
-        # 调舵机：robotd 按计划停着。卸力以总线回读为准，电量用 15 颗舵机电压的平均（官方同一个算法）
+        # Servo tuning: robotd is intentionally paused. E-Stop uses bus readback; battery uses average of 15 servo voltages.
         pose = "servo_session"
         robotd_ok = True
-        freshest = 0.0                  # 主程序轮询按计划暂停了：新鲜度看舵机总线（它 50 Hz 在读）
+        freshest = 0.0                  # robotd polling is paused: freshness comes from the servo bus (50 Hz)
         est = servo.estop_status()
         snap = servo.snapshot()
         if snap.get("avg_volts"):
             battery = {"pct": snap.get("battery_pct"), "volts": snap.get("avg_volts")}
         servos = {"online": snap.get("online"), "total": snap.get("total"), "hottest": None, "stale": []}
     if bat is not None:
-        battery = bat.view(now)         # 电压查表的估算（调舵机时它自己从 Studio 的总线读数取）：battery-plan.md v2
+        battery = bat.view(now)         # Voltage-lookup estimate (reads from Studio's bus during servo tuning)
     starting_s = starting_secs(rd, bus, now) if pose == "starting" else None
     return {
         "t": "state",
@@ -276,7 +277,7 @@ def summarize(rd, duck, servo=None, now=None, ob=None, bat=None, net=None, commi
         "posture": pose,
         "start_error": (bus or {}).get("error") if pose == "starting" else None,
         "start_wait": startup_wait(bus) if pose == "starting" else None,
-        # 连续报启动阶段多少秒（这次连上算）、超没超过 30 秒：总览头图、顶栏、待办改口「一直报启动中」
+        # Seconds continuously in a starting phase since this connection, and whether > 30s (UI switches to stuck-starting message)
         "starting_s": starting_s,
         "starting_long": starting_s is not None and starting_s >= STARTING_LONG_S,
         "battery": battery,
@@ -291,37 +292,37 @@ def summarize(rd, duck, servo=None, now=None, ob=None, bat=None, net=None, commi
         "loop": {"hz": loop.get("achieved_hz"), "target": loop.get("target_hz"), "missed": loop.get("missed")},
         "joints": js if isinstance(js, list) and len(js) == 15 else None,
         "joints_age_ms": _ms(st_age_live),
-        "state_t_ns": state_t_ns,   # robotd 这一帧的时间戳：IMU 页靠它去重（同一帧别当两个读数）
+        "state_t_ns": state_t_ns,   # robotd frame timestamp: IMU page uses this to deduplicate frames
         "gravity": grav if isinstance(grav, list) and len(grav) == 3 else None,
         "tilt_deg": tilt_deg(grav),
         "guard": (bus or {}).get("home_start_guard"),
-        "hold": hold,                  # 标定模式站姿使能：{stage: ramping|holding, max_error_deg, directions}
+        "hold": hold,                  # Commissioning stand hold: {stage: ramping|holding, max_error_deg, directions}
         "estop": est,
-        # startup_todo（调参方案 T1）：「还在启动」换成第几步的原话、补「走路模型没加载」
+        # startup_todo: replace generic starting message with step detail and add missing walk model hint
         "todo": startup_todo(rd, todo(health, bus, servos, imu_status, cpu, loop, battery, pose, rd.health.age(now),
                      battery_shutdown=getattr(ob, "battery_shutdown", None) if ob is not None else None,
                      starting_s=starting_s), pol, bus),
-        # 上手清单：后端 0.5 秒判一次（onboard.Onboarding.tick），这里只拿缓存（审查 O6：这里每秒跑 10 次 × 每个页面）
+        # Onboarding checklist: evaluated at 0.5 Hz in background (onboard.Onboarding.tick); read cached view here
         "onboarding": ob.view() if ob is not None else None,
-        # 写进主程序：准备情况 + 后台任务的进度（CommitService；没有这个后端时是 None）
+        # Write to robotd: readiness + background job progress (CommitService; None if unavailable)
         "commit": (commit.view(rd, servo) if commit is not None else None),
-        # 舵机会话（每一页顶上的提示条用）：开着就带；离开舵机页、有舵机保持着时不交还，会话会一直开着（用户 10-18）
+        # Servo session (banner on every page): stays open when navigating away if any servo is holding
         "servo_session": servo_session_view(servo),
-        # 交还了多久：主程序如果是手动停的，要在鸭子上起来，页面一直提示到主程序连上为止（app 的 servo_watch 连上后清掉：审查 D12）
+        # Seconds since handback: shown until robotd reconnects
         "servo_handback_s": (int(now - servo.handed_back_at) if servo is not None and servo.state == "closed"
                              and getattr(servo, "handed_back_at", None) is not None else None),
-        "servo_helper": bool(getattr(servo, "helper_available", False)),   # root 小助手可用：交还提示「正在把主程序起回来…」（审查 D12）
-        # 交还成功但没确认卸力 / 基线没应答的颗（F6）；交还后主程序没起来的原因和恢复办法（F7）
+        "servo_helper": bool(getattr(servo, "helper_available", False)),   # Root helper available: banner shows "Restarting robotd..."
+        # Handback warnings (unconfirmed limp / unresponsive servos / restart failure reason & hint)
         "servo_handback_note": getattr(servo, "handback_note", None) if servo is not None else None,
         "servo_giveback_error": getattr(servo, "giveback_error", None) if servo is not None else None,
         "servo_giveback_hint": getattr(servo, "giveback_hint", None) if servo is not None else None,
-        # 会话标记没写进去（F10）：Studio 重启后会不知道这里还开着
+        # Session marker write failure: Studio would not know session was open after restart
         "servo_marker_error": getattr(servo, "marker_error", None) if servo is not None else None,
-        # 上次退出时会话开着、这次没接管上（审查 D1）；会话期间主程序被手动起来了（审查 D9，10 分钟内）
+        # Orphaned session from previous exit; or robotd manually started during session (shown for 10 min)
         "servo_orphan": servo_orphan_view(servo),
         "servo_conflict_s": (int(now - servo.conflict_at) if servo is not None and getattr(servo, "conflict_at", None) is not None
                              and servo.state == "closed" and now - servo.conflict_at < 600 else None),
-        # 配网（studio/net.py）：net.json 不在 = known False，页面整块 WiFi 隐藏
+        # Networking (studio/net.py): missing net.json -> known False, Wi-Fi UI hidden
         "net": net.view(now) if net is not None else {"known": False},
         "auth": {"has_password": auth.has_password() if auth is not None else None},
         "duck": duck,
@@ -330,85 +331,82 @@ def summarize(rd, duck, servo=None, now=None, ob=None, bat=None, net=None, commi
 
 
 def todo(health, bus, servos, imu_status, cpu, loop, battery, pose, health_age=None, battery_shutdown=None, starting_s=None):
-    """把 health 结论翻成人话，最要紧的在前。只放「要处理的事」，正常的不放。
-    每条带 key：总览上手清单已经说了的（卡片头的「连上鸭子」、IMU 方向）页面按 key 去重，同一件事只说一次（审查 O15）。
-    starting_s：连续报启动阶段多少秒；超过 30 秒「还在启动」那条改口「一直报启动中」，不再说「通常 10 秒内完成」。"""
+    """Translate health status into plain actionable items, most urgent first. Only include issues; omit normal states.
+    Each item carries a key so the overview checklist can deduplicate items already shown in card headers.
+    starting_s: seconds spent continuously in a starting phase; past 30s, switch to 'stuck starting' instead of 'usually finishes within 10s'."""
     items = []
-    # 电量：battery 是估算器的结果（有 mode）就用 battery.todo_items；电压很低 / 红线放最前面，调舵机时也出（审查 B-R6）。
-    # 没接估算器（battery 只有 pct / volts）还按下面 robotd 直线的老写法
+    # Battery: if battery comes from the estimator (has mode), use battery.todo_items; critical/red-line items go first even during servo tuning.
+    # Without estimator (battery only has pct / volts), fall back to the direct robotd checks below.
     bat_items = None
     if isinstance(battery, dict) and "mode" in battery:
         from .battery import todo_items as battery_todo
         bat_items = battery_todo(battery)
         items += [i for i in bat_items if i["level"] == "error"]
-    if health is None and pose not in ("absent", "unknown", "servo_session"):   # 调舵机时主程序按计划停着，不算读不到
-        # 健康检查过期或读不到：不能显示「没有要处理的事」，那是假的放心
-        when = f"{health_age:.0f} 秒没更新" if health_age is not None else "一直没读到"
-        items.append({"key": "health", "level": "warn", "msg": "读不到健康检查",
-                      "hint": f"电量、温度、IMU 这些{when}；看日志里的 robotd 那几行"})
+    if health is None and pose not in ("absent", "unknown", "servo_session"):   # During servo tuning, robotd is intentionally stopped
+        # Stale or missing health check: never show "all clear" when telemetry is missing
+        when = f"not updated for {health_age:.0f}s" if health_age is not None else "never received"
+        items.append({"key": "health", "level": "warn", "msg": "Health check unavailable",
+                      "hint": f"Battery, temperature, and IMU readings {when}; check robotd lines in Logs"})
     if pose == "starting":
         raw = (bus or {}).get("error")
         wait = startup_wait(bus)
         if wait:
             items.append({"key": "starting", "level": "warn", "msg": wait["text"],
-                          "hint": f"原文：{raw}" if raw else "去日志页看主程序最后说了什么"})
+                          "hint": f"Raw: {raw}" if raw else "Check the last robotd lines in Logs"})
         elif starting_s is not None and starting_s >= STARTING_LONG_S:
-            items.append({"key": "starting", "level": "warn", "msg": "主程序一直报「启动中」",
-                          "hint": f"已经 {starting_s} 秒了。" + (f"原文：{raw}。去日志页看主程序最后说了什么" if raw
+            items.append({"key": "starting", "level": "warn", "msg": "robotd stuck in starting state",
+                          "hint": f"Elapsed {starting_s}s. " + (f"Raw: {raw}. Check robotd lines in Logs" if raw
                                                                   else STILL_STARTING)})
         else:
-            items.append({"key": "starting", "level": "warn", "msg": "鸭子主程序还在启动",
-                          "hint": f"原文：{raw}" if raw else "通常 10 秒内完成"})
+            items.append({"key": "starting", "level": "warn", "msg": "Duck robotd is still starting",
+                          "hint": f"Raw: {raw}" if raw else "Usually finishes within 10s"})
     if pose == "servo_session":
-        items.append({"key": "servo_session", "level": "warn", "msg": "正在调舵机",
-                      "hint": "主程序停着，手柄、遥控、站走都不能用；离开舵机页舵机照样保持，点「交还主程序」才交还"})
+        items.append({"key": "servo_session", "level": "warn", "msg": "Servo tuning active",
+                      "hint": "robotd is paused so gamepad, remote, and walk are disabled; servos stay held until you click 'Hand back to robotd'"})
         if bat_items is not None:
             items += [i for i in bat_items if i["level"] != "error"]
         else:
-            # 没接估算器：调舵机时也出电量待办（审查 D8），电压是 Studio 自己总线上 15 颗读数的平均（summarize 里换好了）。
-            # 这时 robotd 停着，配置里开没开自动关机都不管用
+            # Without estimator: show battery todo during servo session using the average across 15 servos.
+            # robotd is stopped here, so auto-shutdown on empty battery is inactive.
             pct = battery.get("pct") if isinstance(battery, dict) else None
             if isinstance(pct, (int, float)) and pct < 15:
-                items.append({"key": "battery", "level": "error", "msg": f"电量只剩 {pct:.0f}%",
-                              "hint": "该充电了；robotd 停着，没电它不会自己坐下"})
+                items.append({"key": "battery", "level": "error", "msg": f"Battery low: {pct:.0f}%",
+                              "hint": "Charge soon; robotd is paused so it will not sit down automatically when empty"})
             elif isinstance(pct, (int, float)) and pct < 30:
-                items.append({"key": "battery", "level": "warn", "msg": f"电量 {pct:.0f}%",
-                              "hint": "快没电了；robotd 停着，没电它不会自己坐下"})
+                items.append({"key": "battery", "level": "warn", "msg": f"Battery at {pct:.0f}%",
+                              "hint": "Running low; robotd is paused so it will not sit down automatically when empty"})
         return items
     if pose == "absent":
-        items.append({"key": "absent", "level": "error", "msg": "鸭子主程序没在跑", "hint": "停掉 robotd 不会卸力，舵机可能还顶着"})
+        items.append({"key": "absent", "level": "error", "msg": "Duck robotd is not running", "hint": "Stopping robotd does not release torque; servos may still be holding"})
     items += [i for i in bat_items or () if i["level"] != "error"]
     pct = battery.get("pct") if bat_items is None else None
     if isinstance(pct, (int, float)):
         if pct < 15:
-            # 没电了会不会自己坐下关机，看 robotd 配置的 [safety] battery_empty_shutdown（onboard.py 在线程里读）：
-            # 二号鸭真机配置是 false——没电时没有任何东西让它停。读不到就按「不会」说（宁可让人先停下）
-            empty = ("到 6.6 V 它会自己坐下关机" if battery_shutdown is True
-                     else "没电时它不会自己坐下，先停下、坐下再充")
-            items.append({"key": "battery", "level": "error", "msg": f"电量只剩 {pct:.0f}%", "hint": f"该充电了；{empty}"})
+            empty = ("At 6.6 V it will sit down and shut off automatically" if battery_shutdown is True
+                     else "It will not sit down automatically when empty; stop, sit it down, and charge")
+            items.append({"key": "battery", "level": "error", "msg": f"Battery low: {pct:.0f}%", "hint": f"Charge soon; {empty}"})
         elif pct < 30:
-            items.append({"key": "battery", "level": "warn", "msg": f"电量 {pct:.0f}%", "hint": "快没电了"})
+            items.append({"key": "battery", "level": "warn", "msg": f"Battery at {pct:.0f}%", "hint": "Running low"})
     if imu_status == "frozen":
-        items.append({"key": "imu_frozen", "level": "error", "msg": "IMU 读数冻住了", "hint": "姿态数据不更新，别走路；检查 IMU 的线"})
+        items.append({"key": "imu_frozen", "level": "error", "msg": "IMU readings frozen", "hint": "Attitude telemetry is not updating; do not walk and check IMU wiring"})
     elif imu_status == "missing":
-        items.append({"key": "imu_missing", "level": "error", "msg": "读不到 IMU", "hint": "检查 IMU 模块的接线"})
+        items.append({"key": "imu_missing", "level": "error", "msg": "IMU not detected", "hint": "Check IMU module wiring"})
     elif imu_status == "unverified":
-        items.append({"key": "imu_unverified", "level": "warn", "msg": "IMU 的安装方向还没确认",
-                      "hint": "装歪了走路会往前冲；先去「IMU」页校准（fork 上没确认连站都不让）"})
+        items.append({"key": "imu_unverified", "level": "warn", "msg": "IMU orientation not verified",
+                      "hint": "Misaligned IMU causes forward drift; verify on the IMU page first"})
     if servos.get("stale"):
-        items.append({"key": "servo_stale", "level": "warn", "msg": f"{'、'.join(servos['stale'][:3])} 读数没更新",
-                      "hint": "多半是线松了或者没电"})
+        items.append({"key": "servo_stale", "level": "warn", "msg": f"{', '.join(servos['stale'][:3])} telemetry stale",
+                      "hint": "Usually a loose cable or power issue"})
     khz, mk = cpu.get("khz"), cpu.get("max_khz")
     if cpu.get("throttled"):
-        mhz = f"：{khz // 1000} / {mk // 1000} MHz" if isinstance(khz, int) and isinstance(mk, int) and mk else ""
-        items.append({"key": "cpu", "level": "warn", "msg": f"主板过热降频了{mhz}", "hint": "控制会变慢；加散热片或小风扇"})
+        mhz = f": {khz // 1000} / {mk // 1000} MHz" if isinstance(khz, int) and isinstance(mk, int) and mk else ""
+        items.append({"key": "cpu", "level": "warn", "msg": f"Board thermal throttling{mhz}", "hint": "Control loop may slow down; add a heatsink or small fan"})
     elif cpu.get("hot") and isinstance(cpu.get("c"), (int, float)):
-        # 用跟主板格同一个带回差的 hot（≥ 80 °C 亮、77 °C 以下才收：审查 O8），不然待机 78–80 °C 时会来回跳
-        items.append({"key": "cpu", "level": "warn", "msg": f"主板 {cpu['c']:.0f} °C，有点热", "hint": "再热就会降频，控制会变慢；加散热片或小风扇"})
+        items.append({"key": "cpu", "level": "warn", "msg": f"Board {cpu['c']:.0f} °C, running hot", "hint": "Further heating will throttle CPU; add a heatsink or small fan"})
     elif cpu.get("limited") and isinstance(khz, int):
-        items.append({"key": "cpu", "level": "warn", "msg": f"主板被限频到 {khz // 1000} MHz（不是热的）",
-                      "hint": "有程序（或系统设置）把 CPU 最高频率压低了；控制可能变慢"})
+        items.append({"key": "cpu", "level": "warn", "msg": f"Board clock capped at {khz // 1000} MHz (not thermal)",
+                      "hint": "A process or system setting is limiting max CPU frequency; control may slow down"})
     hz, target = loop.get("achieved_hz") or loop.get("hz"), loop.get("target_hz") or loop.get("target")
     if isinstance(hz, (int, float)) and isinstance(target, (int, float)) and target and hz < 0.95 * target:
-        items.append({"key": "loop", "level": "warn", "msg": f"控制频率只有 {hz:.1f} Hz", "hint": f"目标 {target:.0f} Hz；看主板温度和负载"})
+        items.append({"key": "loop", "level": "warn", "msg": f"Control rate only {hz:.1f} Hz", "hint": f"Target {target:.0f} Hz; check board temperature and load"})
     return items

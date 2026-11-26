@@ -1,3 +1,4 @@
+import { ShutdownButton } from '../shutdown-button.js';
 // 手机中控的外壳：会话 → 连接 → 顶栏（鸭名 + 卸力）→ 页面 → 底栏。
 //
 // 跟桌面版的关系：同一个 Studio 进程、同一个 /ws、同一套 pad.op 命令，只是换了一副为竖屏手机做的壳。
@@ -11,6 +12,7 @@ import { CameraPage } from './camera.js';
 import { MorePage } from './more.js';
 // 模型页不另写一套：直接内嵌桌面版的 ModelsPage，只把外壳换成手机底栏。
 import { ModelsPage } from '../models.js';
+import { ActionsPage } from '../actions.js';
 
 const STALE_MS = 1500;      // 超过 1.5 秒没有状态帧：算「读不到」了
 const GREY_MS = 1000;       // 超过 1 秒：数值变灰
@@ -19,7 +21,7 @@ const ICONS = {
   '/': html`<svg viewBox="0 0 24 24"><path d="M3 10.5 12 4l9 6.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>`,
   '/voice': html`<svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="10" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg>`,
   '/pad': html`<svg viewBox="0 0 24 24"><path d="M7 8h10a5 5 0 0 1 4.9 6l-.6 2.4A2.6 2.6 0 0 1 16 17.6L14.5 16h-5L8 17.6a2.6 2.6 0 0 1-5.3-1.2L2.1 14A5 5 0 0 1 7 8Z"/><path d="M7.5 12.5v2M6.5 13.5h2M16 12.5h.01M17.5 14h.01"/></svg>`,
-  '/models': html`<svg viewBox="0 0 24 24"><path d="M12 3 3 7.5v9L12 21l9-4.5v-9z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/></svg>`,
+  '/actions': html`<svg viewBox="0 0 24 24"><path d="M12 3 3 7.5v9L12 21l9-4.5v-9z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/></svg>`,
   '/more': html`<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>`,
 };
 
@@ -29,11 +31,11 @@ const TABS = [
   { href: '/', label: '总览' },
   { href: '/voice', label: '语音' },
   { href: '/pad', label: '手柄' },
-  { href: '/models', label: '模型' },
+  { href: '/actions', label: '动作' },
   { href: '/more', label: '更多' },
 ];
 
-const KNOWN = new Set([...TABS.map((t) => t.href), '/pad', '/more/camera']);
+const KNOWN = new Set([...TABS.map((t) => t.href), '/pad', '/more/camera', '/models']);
 const routeOf = () => {
   const r = '/' + location.hash.replace(/^#\/?/, '');
   return KNOWN.has(r) ? r : '/';
@@ -51,16 +53,18 @@ function nickStored() {
 
 // ---------------- 顶栏 ----------------
 
-function Head({ name, dot, onEstop, busy }) {
+function Head({ name, dot, onEstop, busy, onNotice }) {
   return html`<header class="m-head">
     <div class="m-head-in">
+      <${ShutdownButton} api=${api} onNotice=${onNotice} />
       <div class="m-duck">
         <span class=${'m-dot ' + dot} aria-hidden="true"></span>
         <span class="m-duck-name">${name}</span>
       </div>
       <span class="m-head-gap"></span>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
       <button class="m-estop" onClick=${onEstop} disabled=${busy}
-        aria-label="卸力：让所有舵机松掉力气">卸力</button>
+        aria-label="卸力：让所有舵机松掉力气">卸力</button></div>
     </div>
   </header>`;
 }
@@ -188,13 +192,14 @@ function App() {
   else if (route === '/voice') page = html`<${VoicePage} st=${st} pad=${pad} live=${live} name=${name} say=${say} />`;
   else if (route === '/pad') page = html`<${GamepadPage} st=${st} live=${live} say=${say} />`;
   else if (route === '/models') page = html`<${ModelsPage} api=${api} csrf=${csrfToken()} link=${link} live=${live} />`;
+  else if (route === '/actions') page = html`<${ActionsPage} api=${api} csrf=${csrfToken()} link=${link} plazaUrl="https://fanhao375.github.io/microduck-replica/motion-plaza/" />`;
   else if (route === '/more/camera') page = html`<${CameraPage} live=${live} say=${say} />`;
   else page = html`<${MorePage} hello=${hello} st=${st} conn=${conn} say=${say} nick=${name} rename=${rename} />`;
 
   const go = (href) => { location.hash = '#' + href; };
 
   return html`<div class="m-app">
-    <${Head} name=${name} dot=${dot} onEstop=${doEstop} busy=${estopBusy} />
+    <${Head} name=${name} dot=${dot} onEstop=${doEstop} busy=${estopBusy} onNotice=${say} />
     <main class="m-main">
       ${conn !== 'open' ? html`<div class="m-banner bad">
         <span>${conn === 'closed' ? '和鸭子的连接断了' : '正在连鸭子…'}</span>

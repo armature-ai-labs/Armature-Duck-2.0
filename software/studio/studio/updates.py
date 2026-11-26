@@ -7,8 +7,9 @@ from pathlib import Path
 from . import helper
 
 MAX_UPLOAD=160*1024*1024
-OPS={'check','download','validate','install','rollback'}
+OPS={'check','check_auto','download','validate','install','rollback'}
 NATIVE_OPS={'native_status','native_install','native_recover','native_restore'}
+STABLE_VERSION=re.compile(r'(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}')
 
 def safe_during_update(name,args):
     if name in {'relax','servo.ports'}:return True
@@ -46,7 +47,21 @@ class Updates:
         self.native_gate=asyncio.Lock()
         self.native_error=None
 
-    def installing(self): return self.marker.exists() or self.native_state().get('active') is True
+    def motion_locked(self):
+        if os.name != 'posix':
+            return False
+        import fcntl
+        try:
+            with (self.marker.parent/'motion.lock').open('rb') as gate:
+                fcntl.flock(gate, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return False
+
+    def installing(self):
+        return self.marker.exists() or self.motion_locked() or self.native_state().get('active') is True
 
     def native_preparing(self): return self.native_gate.locked() or (self.native_task is not None and not self.native_task.done())
 
@@ -78,7 +93,7 @@ class Updates:
         value['submitting']=self.native_preparing()
         value['request_error']=self.native_error
         if not ok and not value.get('reason'):
-            value['reason']='当前小助手未提供受信任的主程序更新服务，请先安装匹配的网页 / 语音软件包'
+            value['reason']='Helper does not provide trusted controller updates yet; install matching Studio/voice package first'
         return value
 
     async def snapshot(self):
@@ -88,9 +103,9 @@ class Updates:
     async def native_request(self,action,*,confirmed=None):
         if action=='status': return {'ok':True,'native':await self.native_status()}
         if action not in {'install','recover','restore'} or confirmed is not True:
-            raise UpdateError('validation','主程序更新需要明确确认：已扶稳并卸力')
+            raise UpdateError('validation','Controller update requires explicit confirmation that the robot is supported and relaxed')
         if self.native_preparing() or self.marker.exists():
-            raise UpdateError('busy','已有更新任务，请等待或重新读取状态',409)
+            raise UpdateError('busy','Another update task is active; wait or refresh status',409)
         # Do not add this task to readiness or to the motion guard. Root first
         # queries app readiness, then writes the persistent exclusion itself.
         async def run():
@@ -98,13 +113,13 @@ class Updates:
                 ok,code,detail=await asyncio.to_thread(self.native_call,'Studio',action,confirmed=True)
                 if not ok:
                     reason=(detail or {}).get('reason') or (detail or {}).get('note') or str(code)
-                    self.native_error=('请求未取得最终结果；请重新读取实际状态：'+str(reason))[:500]
+                    self.native_error=('Request did not reach final status; refresh actual state: '+str(reason))[:500]
             except Exception:
-                self.native_error='请求连接中断；独立主程序任务可能仍在运行，请重新读取实际状态'
+                self.native_error='Request connection interrupted; controller update task may still be running, refresh status'
         async with self.native_gate:
             software=await self.request()
             if software.get('busy') is True:
-                raise UpdateError('busy','网页 / 语音更新任务尚未结束',409)
+                raise UpdateError('busy','Web / voice software update is still running',409)
             self.native_error=None
             self.native_task=asyncio.create_task(run())
         return {'ok':True,'native':await self.native_status()}
@@ -112,25 +127,36 @@ class Updates:
     async def connect(self):
         from .rpc import open_conn
         try: return await asyncio.wait_for(open_conn(self.address),2)
-        except Exception: raise UpdateError('unavailable','软件更新服务尚未安装或暂时不可用',503) from None
+        except Exception: raise UpdateError('unavailable','Software update service is not installed or unavailable',503) from None
 
     async def reply(self,reader):
         raw=await asyncio.wait_for(reader.readline(),20)
-        if len(raw)>1024*1024 or not raw.endswith(b'\n'): raise UpdateError('service','更新服务回包中断',503)
+        if len(raw)>1024*1024 or not raw.endswith(b'\n'): raise UpdateError('service','Update service response interrupted',503)
         result=json.loads(raw)
         if result.get('ok') is not True:
             code=result.get('code','service')
-            raise UpdateError(code,str(result.get('error','更新请求失败'))[:500],409 if code in {'busy','preflight','cache'} else 400)
+            raise UpdateError(code,str(result.get('error','Update request failed'))[:500],409 if code in {'busy','preflight','cache'} else 400)
         return result
 
-    async def request(self,operation='status'):
-        if operation not in OPS|{'status'}: raise UpdateError('validation','不支持的更新操作')
-        if operation in {'install','rollback'} and (self.native_preparing() or self.native_state().get('active') is True):
-            raise UpdateError('busy','主程序更新尚未结束：先完成或恢复主程序更新',409)
-        if operation=='rollback' and self.native_state().get('bundle_schema'):
-            native=await self.native_status()
-            if native.get('restorable') or native.get('phase')!='restored':
-                raise UpdateError('busy','退回旧网页 / 语音前，请先恢复旧配套驱动并核验',409)
+    async def request(self,operation='status',*,version=None):
+        if operation=='online':
+            if not isinstance(version,str) or len(version)>80 or not STABLE_VERSION.fullmatch(version):
+                raise UpdateError('validation','Select a released software version')
+        elif operation not in OPS|{'status'} or version is not None:
+            raise UpdateError('validation','Unsupported update operation')
+        if operation not in {'online','install','rollback'}:
+            return await self._send(operation)
+        if self.native_preparing() or self.native_state().get('active') is True:
+            raise UpdateError('busy','Controller update in progress; finish or recover it first',409)
+        # Serialize software admission with the native helper's async idle check.
+        async with self.native_gate:
+            if operation=='rollback' and self.native_state().get('bundle_schema'):
+                native=await self.native_status()
+                if native.get('restorable') or native.get('phase')!='restored':
+                    raise UpdateError('busy','Restore matching controller drivers and verify before rolling back Studio',409)
+            return await self._send('online:'+version if operation=='online' else operation)
+
+    async def _send(self,operation):
         writer=None
         try:
             reader,writer=await self.connect()
@@ -140,13 +166,13 @@ class Updates:
             if operation=='status' and error.code=='unavailable':
                 return {'ok':True,'available':False,'installed':None,'ready':False,'busy':False,'error':str(error)}
             raise
-        except (OSError,ValueError,asyncio.TimeoutError): raise UpdateError('service','更新服务暂时没有回应，请稍后重试',503) from None
+        except (OSError,ValueError,asyncio.TimeoutError): raise UpdateError('service','Update service did not respond; retry shortly',503) from None
         finally:
             if writer: writer.close()
 
     async def upload(self,request):
         length=request.headers.get('content-length','')
-        if not length.isdigit() or not 0<int(length)<=MAX_UPLOAD: raise UpdateError('oversize','更新包必须为 1 至 160 MiB 的完整文件',413)
+        if not length.isdigit() or not 0<int(length)<=MAX_UPLOAD: raise UpdateError('oversize','Update package must be 1 to 160 MiB',413)
         reader,writer=await self.connect()
         try:
             writer.write(json.dumps({'op':'upload','size':int(length)}).encode()+b'\n'); await writer.drain()
@@ -154,11 +180,11 @@ class Updates:
             async with asyncio.timeout(180):
                 async for chunk in request.stream():
                     received+=len(chunk)
-                    if received>int(length): raise UpdateError('oversize','更新文件大小超限',413)
+                    if received>int(length): raise UpdateError('oversize','Uploaded file exceeded declared size',413)
                     writer.write(chunk); await writer.drain()
-                if received!=int(length): raise UpdateError('upload','更新文件上传不完整')
+                if received!=int(length): raise UpdateError('upload','Incomplete update package upload')
                 return await self.reply(reader)
-        except (OSError,ValueError,asyncio.TimeoutError): raise UpdateError('service','上传中断，请重新选择文件',503) from None
+        except (OSError,ValueError,asyncio.TimeoutError): raise UpdateError('service','Upload interrupted; reselect package file',503) from None
         finally: writer.close()
 
     async def start_readiness(self,snapshot):
@@ -171,11 +197,13 @@ class Updates:
                 request=json.loads(raw)
                 if request=={'op':'readiness'}:
                     result=snapshot()
+                elif request=={'op':'software-readiness'}:
+                    result=snapshot(software=True)
                 elif (isinstance(request,dict) and set(request)=={'op','transaction_id'}
                         and request['op']=='native-recovery-readiness' and isinstance(request['transaction_id'],str)
                         and re.fullmatch('[0-9a-f]{32}',request['transaction_id'])):
                     result=snapshot(native_transaction=request['transaction_id'])
-                else: result={'ready':False,'error':'不支持的内部请求'}
+                else: result={'ready':False,'error':'Unsupported internal request'}
                 writer.write(json.dumps(result,ensure_ascii=False).encode()+b'\n'); await writer.drain()
             except Exception: pass
             finally: writer.close()
@@ -187,25 +215,27 @@ class Updates:
             self.server.close(); await self.server.wait_closed(); self.readiness.unlink(missing_ok=True)
 
 async def handle(request,updates,session,has_password,local_dev,origin_ok):
-    if not has_password and not local_dev: raise UpdateError('password_required','请先在设置中配置网页密码，再使用软件更新',403)
-    if not session: raise UpdateError('unauthorized','请先登录',401)
+    if not has_password and not local_dev: raise UpdateError('password_required','Set a Studio web password in Settings before running software updates',403)
+    if not session: raise UpdateError('unauthorized','Sign in first',401)
     if request.method=='POST' and (not origin_ok or request.headers.get('x-csrf')!=session['csrf']):
-        raise UpdateError('csrf','请求来源或登录令牌不正确',403)
+        raise UpdateError('csrf','Invalid request origin or session token',403)
     if request.url.path.endswith('/upload'): return await updates.upload(request)
     if request.method=='GET': return await updates.snapshot()
     data=bytearray()
     async for chunk in request.stream():
         data.extend(chunk)
-        if len(data)>8192: raise UpdateError('oversize','更新请求过大',413)
+        if len(data)>8192: raise UpdateError('oversize','Update request too large',413)
     try: body=json.loads(data)
-    except (ValueError,RecursionError): raise UpdateError('validation','更新请求不是有效 JSON') from None
+    except (ValueError,RecursionError): raise UpdateError('validation','Update request is not valid JSON') from None
     if not isinstance(body,dict) or not isinstance(body.get('op'),str):
-        raise UpdateError('validation','不支持的更新操作或字段')
+        raise UpdateError('validation','Unsupported update operation or fields')
     if body['op'] in NATIVE_OPS:
         expected={'op'} if body['op']=='native_status' else {'op','confirmed'}
         if set(body)!=expected or (body['op']!='native_status' and body.get('confirmed') is not True):
-            raise UpdateError('validation','主程序更新需要明确确认，且不接受额外字段')
+            raise UpdateError('validation','Controller update requires explicit confirmation and no extra fields')
         return await updates.native_request(body['op'][7:],confirmed=body.get('confirmed'))
+    if body['op']=='online' and set(body)=={'op','version'}:
+        return await updates.request('online',version=body['version'])
     if set(body)!={'op'} or body['op'] not in OPS:
-        raise UpdateError('validation','不支持的更新操作或字段')
+        raise UpdateError('validation','Unsupported update operation or fields')
     return await updates.request(body['op'])

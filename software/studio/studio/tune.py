@@ -1,24 +1,12 @@
-"""总览下面「运行和调参」那一块、设置 › 这只鸭子 › 模型 的后端（调参方案 v2 T1–T3：全部只读）。
+"""Backend for the Overview Run & Tune section and Settings > Duck > Models (read-only).
 
-方案：scratchpad console/tuning-plan.md（v2 定稿）。三张卡：
-    卡 1 运行状态   robotd 阶段、启动四步（startup.py）、控制、能不能走、硬件
-    卡 2 调手感     走路模型自己的幅度 / 头腿平滑（文件 vs 主程序在用 vs 这一拍）、P/D/限力、手柄嘴 / 头幅度
-    卡 3 模型       每个槽一行（只看）；设置页的模型卡片、滑轮模型、导出鸭子档案（给训练用）
+Three cards:
+    1. Runtime Status  robotd phase, 4-step startup, control rate, walk readiness, hardware health
+    2. Tuning & Feel   walk model action_scale / head & legs lowpass, servo P/D/torque limit, pad mouth/head scale
+    3. Models          per-slot summary, roller models, and duck profile export (for training)
 
-**这一版不往鸭子写任何东西**：改动要等 root 小助手（方案 T4）。唯一的写是 Studio 自己 state 目录里的
-duck-body.json（导出档案用的重量，用户在设置页填的）。
-
-关键事实（方案 §0、§2）：
-- 联合 Walk 的幅度和头腿平滑写在**模型自己目录的 deployment-execution.json**（fork control.rs:622-632），
-  robotd.toml [policy] 的 action_scale 谁都不用；全局平滑只有起坐用（control.rs:722-733）。
-- 「主程序在用」一律看 busStatus.loaded_models.walk.runtime_execution_profile（审查 T-R14）；
-  active_action_scale / active_target_filters 只在策略开着时有，是「这一拍实际用的（× 电压补偿）」。
-- 舵机参数文件 servo-test-parameters.json 没有 = V167 原版（上力 P = 走路合同的 kp_fw、D 0、限力 1000）。
-  主程序读到的是 native.hd1910.servo_parameters；这个键不存在 = 原版板端固件的 robotd（不支持改，D6c）。
-  **不用 state.safety.gain**：飞特后端根本不写它（审查 T-R4，feetech.rs:1825-1834）。
-
-读文件全在线程里（io()，2 秒一次，按 mtime 缓存；走路合同 431 KB 只在变了时才解析），view() 只拼内存里的东西。
-文件路径都相对 root（鸭子上是 /；测试、电脑上截图用一个假文件树：dev/duckfs.py）。
+Only writes Studio's own state_dir/duck-body.json; robot config files are read-only here.
+File reads run in a background thread every 2s, cached by (mtime_ns, size).
 """
 import asyncio
 import json
@@ -43,33 +31,33 @@ CONFIG, SAVED = f"{ETC}/robotd.toml", f"{ETC}/robotd.saved.toml"
 SERVO_FILE = f"{ETC}/servo-test-parameters.json"
 PAD_FILE = f"{ETC}/pad-settings.json"
 PAD_PREV = f"{ETC}/pad-settings.json.previous"
-PAD_LIVE = "run/padd/input-settings.json"      # padd 实际在用的（padd:padd 0644，fork padd/src/input_settings.rs）
-PROFILE = f"{BASE}/management-profile.json"     # 随包模型的名字（builtin_models）
+PAD_LIVE = "run/padd/input-settings.json"      # Live settings used by padd
+PROFILE = f"{BASE}/management-profile.json"     # Builtin model names
 ROLLER = f"{BASE}/roller"
-ROLLERS = (("swizzle", "滑轮 · 对称滑"), ("crouch", "滑轮 · 蹲下"), ("spin", "滑轮 · 原地转"), ("standup", "滑轮 · 倒地起身"))
+ROLLERS = (("swizzle", "Roller · Swizzle"), ("crouch", "Roller · Crouch"), ("spin", "Roller · Spin"), ("standup", "Roller · Stand Up"))
 BODY_FILE = "duck-body.json"
 EXEC = "deployment-execution.json"
 SLOTS = ("walk", "sitstand", "ground_pick", "kick_left", "kick_right", "roulade", "stand")
-SLOT_CN = {"walk": "走路 / 保持", "sitstand": "坐下 / 站起", "ground_pick": "低头捡东西", "kick_left": "左脚踢",
-           "kick_right": "右脚踢", "roulade": "前滚翻", "stand": "站立（独立）"}
+SLOT_CN = {"walk": "Walk / Hold", "sitstand": "Sit / Stand", "ground_pick": "Ground Pick", "kick_left": "Left Kick",
+           "kick_right": "Right Kick", "roulade": "Roulade", "stand": "Stand (Standalone)"}
 SLOT_SKILL = {"sitstand": "sit_toggle", "ground_pick": "ground_pick", "kick_left": "kick_left", "kick_right": "kick_right",
               "roulade": "roulade"}
-BUTTON_CN = {"a": "A", "b": "B", "x": "X", "y": "Y", "lb": "LB", "rb": "RB", "dpad_down": "十字下", "dpad_up": "十字上",
-             "dpad_left": "十字左", "dpad_right": "十字右", "ls": "L3", "rs": "R3"}
-# 随包联合 Walk（只有它有硬写的默认值，审查 T-R17：别的模型要看 .orig）
+BUTTON_CN = {"a": "A", "b": "B", "x": "X", "y": "Y", "lb": "LB", "rb": "RB", "dpad_down": "D-Pad Down", "dpad_up": "D-Pad Up",
+             "dpad_left": "D-Pad Left", "dpad_right": "D-Pad Right", "ls": "L3", "rs": "R3"}
+# Bundled joint walk model (only this has hardcoded defaults; others use .orig)
 BUNDLED_WALK = "1cbf8730eadd75a5704332c9f3c10f60"
 BUNDLED_WALK_DEFAULT = {"action_scale": 1.0, "head_lowpass": 0.5, "legs_lowpass": 0.7}
-V167_SERVO = {"kd": 0, "torque_limit": 1000}    # 没参数文件：D 0、限力 1000，P 取走路合同（hd1910.rs:121-155, 257-267）
+V167_SERVO = {"kd": 0, "torque_limit": 1000}    # Without servo-test-parameters.json: D=0, torque_limit=1000, P from walk contract
 PAD_DEFAULT = {"mouth_percent": 100.0, "head_rad": 2.5}
-MOUTH_WARN = 10                                  # 嘴巴最大开度 ≤ 10%：几乎张不开，标黄（D6e：改回按钮先不做）
-SCALE_USE_CN = {"joint_uniform": "走路（联合模型自己的参数）", "walking": "走路", "hold": "原地保持", "held": "没在推理",
-                "homing": "回站姿", "sit": "坐着", "rise": "站起来", "ground_pick": "低头捡东西", "roulade": "前滚翻",
-                "kick_left": "左脚踢", "kick_right": "右脚踢", "stand": "站立网络", "walk": "走路"}
-PHASE_CN = {"control": ("控制中", "ok"), "configuring_bus": ("在配置舵机总线", "warn"), "waiting_for_bus": ("等待总线设备响应", "warn"),
-            "configuration_error": ("配置错了", "bad"), "configuring_uart": ("在配置串口", "warn"), "ready": ("调试模式", "warn"),
-            "read_error": ("调试模式 · 读舵机出错", "bad")}
-MAX_JSON = 2 << 20            # 普通 json / toml 最大 2 MB
-MAX_CONTRACT = 8 << 20        # 合同 431 KB 左右，留够
+MOUTH_WARN = 10                                  # Warn when max mouth opening <= 10%
+SCALE_USE_CN = {"joint_uniform": "Walk (joint model params)", "walking": "Walking", "hold": "Holding", "held": "Idle",
+                "homing": "Homing", "sit": "Sitting", "rise": "Standing up", "ground_pick": "Ground Pick", "roulade": "Roulade",
+                "kick_left": "Left Kick", "kick_right": "Right Kick", "stand": "Stand Network", "walk": "Walking"}
+PHASE_CN = {"control": ("Control", "ok"), "configuring_bus": ("Configuring Bus", "warn"), "waiting_for_bus": ("Waiting for Bus", "warn"),
+            "configuration_error": ("Config Error", "bad"), "configuring_uart": ("Configuring UART", "warn"), "ready": ("Commissioning", "warn"),
+            "read_error": ("Commissioning · Read Error", "bad")}
+MAX_JSON = 2 << 20            # Max 2 MB for regular JSON / TOML
+MAX_CONTRACT = 8 << 20        # Contracts are ~431 KB; allow plenty of headroom
 IO_EVERY_S = 2.0
 MISSED_WINDOW_S = 60.0
 AGE = {"health": 8.0, "policies": 6.0, "state": 1.5}
@@ -78,7 +66,7 @@ BODY_MAX_G = 5000
 
 
 class Refused(Exception):
-    """这个操作现在不能做，原因直接给页面看。"""
+    """Operation cannot be performed right now; message is user-facing."""
 
 
 def num(x):
@@ -96,8 +84,7 @@ def _fresh(sample, key, now):
 
 
 def rounds_of(checkpoint):
-    """训练轮数：检查点 9599 → 9600 轮、9999 → 10000 轮、11000 → 11000 轮（凑整的规律跟随包模型的名字一样）。
-    字符串（老模型的 manifest 写的是检查点文件路径，比如 …/model_9999.pt）取最后一个数字。"""
+    """Training steps/rounds: 9599 -> 9600, 9999 -> 10000, 11000 -> 11000."""
     n = None
     if isinstance(checkpoint, bool):
         return None
@@ -114,7 +101,7 @@ def rounds_of(checkpoint):
 
 
 class FileCache:
-    """按 (mtime_ns, size) 缓存解析结果。读不到 = {"missing": True}；坏了 = {"error": "原因"}。"""
+    """Cache parsed files by (mtime_ns, size). Missing -> {"missing": True}; error -> {"error": reason}."""
 
     def __init__(self):
         self._c = {}
@@ -126,13 +113,13 @@ class FileCache:
             self._c.pop(path, None)
             return {"missing": True}
         except OSError as e:
-            return {"error": f"读不了：{type(e).__name__}: {e}"}
+            return {"error": f"Cannot read: {type(e).__name__}: {e}"}
         key = (stt.st_mtime_ns, stt.st_size)
         hit = self._c.get(path)
         if hit and hit[0] == key:
             return hit[1]
         if stt.st_size > limit:
-            out = {"error": f"文件太大（{stt.st_size} 字节）"}
+            out = {"error": f"File too large ({stt.st_size} bytes)"}
         else:
             try:
                 with open(path, "rb") as f:
@@ -153,7 +140,7 @@ def _toml(data):
 
 
 def _contract_summary(data):
-    """走路 / 动作合同只留几个字段（整份 431 KB 不留在内存里）。"""
+    """Extract key fields from deployment-contract.json without keeping the full 431 KB file in memory."""
     c = json.loads(data.decode("utf-8"))
     acts = ((c.get("model") or {}).get("actuators") or []) if isinstance(c.get("model"), dict) else []
     kp = acts[0].get("kp_fw") if acts and isinstance(acts[0], dict) else None
@@ -179,22 +166,22 @@ class Tune:
         self.rd, self.log, self.state_dir, self.duck = rd, log, state_dir, duck or {}
         self.root = Path(root)
         self.cache = FileCache()
-        self.disk = {}                 # io() 读好的东西：整份换掉（view() 在事件循环里读，不加锁）
-        self._missed = deque(maxlen=64)   # (monotonic, missed, ticks)：算「最近一分钟加了几拍」
+        self.disk = {}                 # Latest snapshot from io() (swapped atomically for view())
+        self._missed = deque(maxlen=64)   # (monotonic, missed, ticks) for missed-ticks/min calculation
         self._io_err_logged = set()
 
-    # ---- 路径 ----
+    # ---- Paths ----
 
     def p(self, rel):
         return self.root / rel
 
     def abs_path(self, path):
-        """robotd 报的绝对路径（/opt/robot/…）换到 root 下面。"""
+        """Re-root an absolute on-duck path (e.g. /opt/robot/...) under self.root."""
         if not isinstance(path, str) or not path.startswith("/"):
             return None
         return self.root / path.lstrip("/")
 
-    # ---- 读文件（线程里） ----
+    # ---- File I/O (worker thread) ----
 
     def io(self):
         c = self.cache
@@ -210,7 +197,7 @@ class Tune:
         disk["builtin_names"] = {m.get("id"): m.get("name") for m in (prof.get("builtin_models") or [])
                                  if isinstance(m, dict) and isinstance(m.get("id"), str)}
         disk["body"] = c.get(Path(self.state_dir) / BODY_FILE, _json)
-        # 要读的模型目录：toml 里各槽 + 技能的路径，加上主程序报的 loaded_models（两边不一定一样）
+        # Model directories to inspect: slots/skills from TOML plus loaded_models reported by robotd
         paths = set()
         pol = (_val(cfg) or {}).get("policy") if isinstance(_val(cfg), dict) else None
         if isinstance(pol, dict):
@@ -240,26 +227,26 @@ class Tune:
             rollers.append({"id": name, "label": label, **m})
         disk["rollers"] = rollers
         disk["at"] = time.monotonic()
-        # 两份 toml 一不一致（板端脚本两份一起写；robot.loadPolicy 只写第一份）
+        # Check whether robotd.toml and robotd.saved.toml match
         a, b = _val(cfg), _val(saved)
         if a is None or b is None:
             disk["tomls_same"] = None
         else:
             disk["tomls_same"] = a == b
         self.disk = disk
-        # 健康检查里的超时拍数：记历史，算最近一分钟加了几拍
+        # Track missed control loop ticks over the last minute
         h = self.rd.health.value if isinstance(self.rd.health.value, dict) else None
         loop = (h or {}).get("control_loop") if isinstance((h or {}).get("control_loop"), dict) else None
         if loop and isinstance(loop.get("missed"), int) and isinstance(loop.get("ticks"), int):
             if self._missed and (loop["ticks"] < self._missed[-1][2] or loop["missed"] < self._missed[-1][1]):
-                self._missed.clear()          # robotd 重启过：计数从头来
+                self._missed.clear()          # robotd restarted: reset counters
             self._missed.append((time.monotonic(), loop["missed"], loop["ticks"]))
         for key, entry in (("config", cfg), ("servo_file", disk["servo_file"]), ("pad_file", disk["pad_file"])):
             e = _err(entry)
             if e and key not in self._io_err_logged:
                 self._io_err_logged.add(key)
-                self.log.warn(f"读不懂鸭子上的配置文件（{key}）", cat="调参", raw=e,
-                              hint="调参卡上那一项会显示「读不懂」；文件被手改坏了的话，主程序也可能起不来")
+                self.log.warn(f"Cannot parse config file ({key})", cat="Tuning", raw=e,
+                              hint="This item will show as unreadable; if hand-edited, robotd may also fail to start")
             elif not e:
                 self._io_err_logged.discard(key)
 
@@ -278,17 +265,17 @@ class Tune:
         return out
 
     async def loop(self):
-        """app.py 的 lifespan 起：2 秒读一次文件（线程里，SD 卡一卡不挡卸力）。"""
+        """Started by app.py lifespan: poll files every 2s in a worker thread."""
         while True:
             try:
                 await asyncio.to_thread(self.io)
             except Exception as e:  # noqa: BLE001
-                self.log.error("调参卡读文件时出错", cat="调参", raw=f"{type(e).__name__}: {e}", exc=True,
-                               hint="这是 Studio 的问题，导出诊断包发出来；不影响站和走")
+                self.log.error("Error reading tuning files", cat="Tuning", raw=f"{type(e).__name__}: {e}", exc=True,
+                               hint="This is a Studio bug; export a diagnostic bundle. Standing/walking unaffected")
                 await asyncio.sleep(5.0)
             await asyncio.sleep(IO_EVERY_S)
 
-    # ---- 推给页面 ----
+    # ---- UI View ----
 
     def view(self, now=None):
         now = time.monotonic() if now is None else now
@@ -316,25 +303,25 @@ class Tune:
 
     def _cap(self, fork, bus):
         if fork is False:
-            why = "这只鸭子的主程序不支持改（不是我们的 fork：没有舵机参数、执行配置这些接口）"
+            why = "robotd on this duck does not expose servo/execution tuning interfaces"
         else:
-            why = "现在只看不改：等鸭子上装好 root 小助手，才能在这里改"
+            why = "Read-only mode: tuning writes require the root helper installed on the duck"
         return {"can_edit": False, "fork": fork, "why": why, "build": bus.get("build")}
 
     def _phase(self, bus):
         rd = self.rd
         if getattr(rd, "paused", None):
-            return {"word": "在调舵机", "kind": "warn", "why": "主程序按计划停着（舵机页接管着总线）", "error": None}
+            return {"word": "Servo Tuning", "kind": "warn", "why": "robotd paused (Servo page owns the bus)", "error": None}
         if rd.present is False:
-            return {"word": "主程序没在跑", "kind": "bad", "why": "停掉 robotd 不会卸力，舵机可能还顶着", "error": None}
+            return {"word": "robotd Not Running", "kind": "bad", "why": "Stopping robotd does not release torque; servos may still be holding", "error": None}
         if not bus:
-            return {"word": "还没读到", "kind": None, "why": None, "error": None}
-        word, kind = PHASE_CN.get(bus.get("phase"), (bus.get("phase") or "不知道", None))
+            return {"word": "Waiting", "kind": None, "why": None, "error": None}
+        word, kind = PHASE_CN.get(bus.get("phase"), (bus.get("phase") or "Unknown", None))
         wait = startup_wait(bus)
         if wait:
             word, kind = wait["text"], "warn"
         if bus.get("mode") == "commissioning" and bus.get("phase") == "ready":
-            word, kind = "调试模式", "warn"
+            word, kind = "Commissioning", "warn"
         return {"word": word, "kind": kind, "mode": bus.get("mode"), "phase": bus.get("phase"),
                 "why": None, "error": bus.get("error")}
 
@@ -400,7 +387,7 @@ class Tune:
                     "worst": worst, "last_cycle_error": bus.get("last_cycle_error"), "read_recovery": bus.get("read_recovery"),
                     "clamps": native.get("command_clamps_total"), "stale_ids": native.get("stale_joint_ids") or []},
             "cpu_c": num((health or {}).get("cpu_temp_c")),
-            "infer_note": "推理耗时：主程序不报，看超时拍数",
+            "infer_note": "Inference latency is not reported by robotd; watch missed ticks",
         }
 
     def _worst_servos(self, bus):
@@ -422,10 +409,10 @@ class Tune:
         rows.sort(key=lambda r: (-(r["timeout"] + r["missing"]), r["id"]))
         return rows[:3]
 
-    # ---- 卡 2 ----
+    # ---- Card 2 ----
 
     def _walk(self, bus, policy_cfg, disk):
-        """走路模型：toml 里配的那个目录、它的执行配置（文件）、主程序在用的（loaded_models.walk）。"""
+        """Walk model: configured directory, deployment-execution.json on disk, and runtime profile in robotd."""
         models = disk.get("models") or {}
         lm = bus.get("loaded_models") if isinstance(bus.get("loaded_models"), dict) else {}
         loaded = lm.get("walk") if isinstance(lm.get("walk"), dict) else None
@@ -438,15 +425,15 @@ class Tune:
         if joint:
             loaded_vals = {k: num(running.get(k)) for k in keys} if running else None
         else:
-            # 不是联合模型：走路用全局 [policy]（主程序报的 resolved 值）
+            # Non-joint model: walk uses global [policy] settings
             loaded_vals = {k: num(bus.get(k)) for k in keys} if any(num(bus.get(k)) is not None for k in keys) else None
         vals = {k: {"file": num((file or {}).get(k)), "loaded": (loaded_vals or {}).get(k)} for k in keys}
         mid = m.get("dir") or (os.path.basename(os.path.dirname(path)) if isinstance(path, str) else None)
         default = None
         if mid == BUNDLED_WALK:
-            default, dsrc = dict(BUNDLED_WALK_DEFAULT), "随包默认"
+            default, dsrc = dict(BUNDLED_WALK_DEFAULT), "Bundled default"
         elif isinstance(m.get("orig_exec"), dict):
-            default, dsrc = {k: num(m["orig_exec"].get(k)) for k in keys}, "第一次改之前的（.orig）"
+            default, dsrc = {k: num(m["orig_exec"].get(k)) for k in keys}, "Pre-edit backup (.orig)"
         else:
             dsrc = None
         loaded_path = (loaded or {}).get("path")
@@ -469,7 +456,7 @@ class Tune:
         glob = {"action_scale": num(bus.get("action_scale")), "head_lowpass": num(bus.get("head_lowpass")),
                 "legs_lowpass": num(bus.get("legs_lowpass")),
                 "in_file": {k: policy_cfg.get(k) for k in ("action_scale", "head_lowpass", "legs_lowpass") if k in policy_cfg},
-                "note": "幅度谁都不用；平滑只有起坐用（起坐不露，方案 D6d）"}
+                "note": "Global action_scale is unused; lowpass only applies to sit/stand"}
         return {
             "walk": walk, "active": active, "global": glob,
             "voltage": {"adapt": bus.get("voltage_adapt"), "nominal_v": num(bus.get("nominal_voltage")),
@@ -496,13 +483,13 @@ class Tune:
                     and all(type(x) is int for x in v.values())):
                 file = dict(v)
             else:
-                ferr = "格式不对：要正好 kp / kd / torque_limit 三个整数（主程序读到这样的文件会停在等总线）"
+                ferr = "Invalid format: must contain exact integer keys kp, kd, torque_limit (otherwise robotd stalls waiting for bus)"
         loaded = hd.get("servo_parameters") if fork else None
         loaded = dict(loaded) if isinstance(loaded, dict) else None
         if fork:
-            eff, src = (loaded, "参数文件") if loaded else (default, "没有参数文件：V167 原版（P 用走路合同的）")
+            eff, src = (loaded, "Parameter file") if loaded else (default, "No parameter file: V167 defaults (P from walk contract)")
         else:
-            eff, src = default, "V167 原版（P 用走路合同的）"
+            eff, src = default, "V167 defaults (P from walk contract)"
         same = None
         if fork is not None:
             same = (file == loaded) if fork else None
@@ -515,24 +502,24 @@ class Tune:
         warn = []
         if eff:
             if (eff.get("kp") or 0) > 10:
-                warn.append("P 大于 10：比常用的硬，可能会抖")
+                warn.append("P > 10: stiffer than usual, may oscillate")
             if (eff.get("torque_limit") or 1000) < 500:
-                warn.append("限力小于 500：可能站不住")
+                warn.append("Torque limit < 500: may not hold standing weight")
             if (eff.get("kd") or 0) > 0:
-                warn.append("D 大于 0：在鸭子上还没试过")
+                warn.append("D > 0: untested on hardware")
         return {"fork": fork, "file": file, "file_exists": not fe.get("missing", False), "file_error": ferr,
                 "loaded": loaded, "effective": eff, "src": src, "default": default,
                 "file_vs_loaded": same, "written_p": {"p": (eff or {}).get("kp"),
-                                                      "src": "参数文件" if loaded else "走路合同（kp_fw）",
+                                                      "src": "Parameter file" if loaded else "Walk contract (kp_fw)",
                                                       "applied": hd.get("temporary_gains_applied") if hd else None},
-                "regs": reg, "regs_why": None if reg else "站起来（上过力）以后才有", "gain_mode": gain_mode,
+                "regs": reg, "regs_why": None if reg else "Available after standing up (torque armed)", "gain_mode": gain_mode,
                 "warn": warn}
 
     def _pad(self, disk):
         def settings(entry):
             v = _val(entry)
             if isinstance(v, dict) and "settings" in v and isinstance(v["settings"], dict):
-                v = v["settings"]                # padd 的回执：{"pid", "path", "settings": {...}}
+                v = v["settings"]                # padd reply: {"pid", "path", "settings": {...}}
             if not isinstance(v, dict):
                 return None
             return {"mouth_percent": num(v.get("mouth_percent")), "head_rad": num(v.get("head_rad"))}
@@ -547,7 +534,7 @@ class Tune:
                 "mouth_warn": mouth is not None and mouth <= MOUTH_WARN,
                 "same": (file == live) if file and live else None}
 
-    # ---- 卡 3 / 模型页 ----
+    # ---- Card 3 / Models Page ----
 
     def _name_of(self, path, models):
         if not isinstance(path, str):
@@ -611,7 +598,7 @@ class Tune:
         return {"slots": rows, "rollers": rollers, "skills": (pol or {}).get("skills") or [],
                 "change_error": (pol or {}).get("change_error"), "policies_known": pol is not None}
 
-    # ---- 导出鸭子档案 ----
+    # ---- Export Duck Profile ----
 
     def body(self):
         v = _val((self.disk or {}).get("body") or {})
@@ -620,7 +607,7 @@ class Tune:
         return v if isinstance(v, dict) else None
 
     def profile(self):
-        """给训练用的鸭子档案（只读汇总，方案 §2.4）。读不到的写 null，不编。"""
+        """Read-only duck hardware/model profile for training export. Unknown fields are null."""
         rd = self.rd
         bus = rd.bus.value if isinstance(rd.bus.value, dict) else {}
         native = bus.get("native") if isinstance(bus.get("native"), dict) else {}
@@ -640,7 +627,7 @@ class Tune:
         return {
             "schema": "microduck-studio-duck-profile/v1",
             "exported_at": time.strftime("%Y-%m-%d %H:%M:%S %z"),
-            "note": "Microduck Studio 导出的鸭子档案（给训练用）。读不到的写 null；重量是人填的。",
+            "note": "Duck profile exported from Microduck Studio for training. Unread fields are null; body weights are user-entered.",
             "duck": {"label": self.duck.get("label"), "name_on_duck": (rd.sysinfo.value or {}).get("name") if isinstance(rd.sysinfo.value, dict) else None,
                      "build": bus.get("build")},
             "body": self.body(),
@@ -658,9 +645,9 @@ class Tune:
         }
 
     def save_body(self, body, by=None):
-        """设置页填的重量（g）和脚底材料。只写 Studio 自己的 state 目录，不碰鸭子的配置。"""
+        """Save body weights (g) and foot material entered in Settings to Studio's state directory."""
         if not isinstance(body, dict):
-            raise Refused("没收到数据")
+            raise Refused("No data received")
         out = {}
         for k in BODY_KEYS:
             x = body.get(k)
@@ -671,10 +658,10 @@ class Tune:
                 try:
                     x = float(x)
                 except ValueError:
-                    raise Refused(f"{k} 要填数字（克）") from None
+                    raise Refused(f"{k} must be a number (grams)") from None
             x = num(x)
             if x is None or not 0 < x <= BODY_MAX_G:
-                raise Refused(f"{k} 要在 0–{BODY_MAX_G} 克之间")
+                raise Refused(f"{k} must be between 0 and {BODY_MAX_G} g")
             out[k] = round(x, 1)
         for k, n in (("foot", 40), ("note", 200)):
             s = body.get(k)
@@ -682,7 +669,7 @@ class Tune:
                 out[k] = None
                 continue
             if not isinstance(s, str) or len(s) > n or any(ord(ch) < 32 for ch in s):
-                raise Refused(f"{'脚底材料' if k == 'foot' else '备注'}最多 {n} 个字、不能有换行")
+                raise Refused(f"{'Foot material' if k == 'foot' else 'Note'} must be at most {n} characters with no newlines")
             out[k] = s.strip() or None
         out["at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         out["by"] = by
@@ -701,7 +688,7 @@ class Tune:
             except OSError:
                 pass
             raise
-        self.log.info("鸭子档案的重量记下了（只存在 Studio 里）", cat="调参",
+        self.log.info("Saved duck profile weights (stored in Studio only)", cat="Tuning",
                       raw=json.dumps({k: out[k] for k in BODY_KEYS + ("foot",)}, ensure_ascii=False), ctx={"by": by})
         self.disk = dict(self.disk, body={"value": out})
         return out
@@ -713,20 +700,20 @@ class Tune:
         if op == "body":
             return self.body()
         if op in ("tune_walk", "tune_servo", "tune_pad", "undo", "default"):
-            raise Refused("现在只看不改：等鸭子上装好 root 小助手，才能在这里改")
-        raise Refused(f"不认识的指令：{op}")
+            raise Refused("Read-only mode: tuning writes require the root helper installed on the duck")
+        raise Refused(f"Unknown command: {op}")
 
     def diag(self):
-        """诊断包里的「调参快照」：三类文件读到的、主程序回读的。"""
+        """Diagnostic bundle snapshot of tuning files and robotd readback."""
         v = self.view()
         d = self.disk or {}
-        return {"view": v, "files": {k: (d.get(k) or {}).get("error") or ("缺" if (d.get(k) or {}).get("missing") else "有")
+        return {"view": v, "files": {k: (d.get(k) or {}).get("error") or ("missing" if (d.get(k) or {}).get("missing") else "present")
                                      for k in ("config", "saved", "servo_file", "pad_file", "pad_live")},
                 "tomls_same": d.get("tomls_same"), "root": str(self.root), "platform": sys.platform}
 
 
 def _group(rows):
-    """[[P, D, I], ...] → [{"pdi": [P, D, I], "n": 颗数}]（15 颗一样就一行）。"""
+    """[[P, D, I], ...] -> [{"pdi": [P, D, I], "n": count}]."""
     out = {}
     for r in rows:
         if isinstance(r, list) and len(r) == 3:

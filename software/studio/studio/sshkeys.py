@@ -1,11 +1,4 @@
-"""「更多」页 SSH 卡片的钥匙：登记、列出、删掉 radxa 的 SSH 公钥。
-
-用户 10-21：会用钥匙的人不用开密码登录，把自己电脑的公钥贴进来就能 SSH。
-Studio 本来就以 radxa 身份跑，~/.ssh/authorized_keys 是 radxa 自己的文件，所以不经过 root 小助手。
-
-只收一整行公钥（类型 + base64 + 可选注释），不收前面带 command= / from= 这类选项的行：网页上贴进来的，
-就照最普通的写法存。指纹跟 `ssh-keygen -l` 的 SHA256 一样，页面上靠它对上是哪一把、删哪一把。
-"""
+"""Manage authorized SSH public keys for the radxa user."""
 import base64
 import binascii
 import hashlib
@@ -19,7 +12,7 @@ MAX_COMMENT = 200
 
 
 class BadKey(ValueError):
-    """贴进来的不是一把能用的公钥。消息直接给页面看。"""
+    """Invalid SSH public key input; message is shown directly in the UI."""
 
 
 def fingerprint(blob):
@@ -27,40 +20,40 @@ def fingerprint(blob):
 
 
 def parse(line):
-    """一行公钥 → {"type", "b64", "comment", "fp"}。不对就抛 BadKey（人话）。"""
+    """Parse one authorized_keys line into {"type", "b64", "comment", "fp"}."""
     if not isinstance(line, str):
-        raise BadKey("要贴一行公钥文字")
+        raise BadKey("Paste a single public key line")
     text = line.strip()
     if not text:
-        raise BadKey("没贴东西")
+        raise BadKey("Public key is empty")
     if "\n" in text or "\r" in text:
-        raise BadKey("只贴一行：一把公钥就是一整行（ssh-ed25519 AAAA… 注释）")
+        raise BadKey("Paste a single line only (e.g. ssh-ed25519 AAAA... comment)")
     if len(text) > MAX_LINE:
-        raise BadKey("太长了，不像一把公钥")
+        raise BadKey("Key line is too long")
     parts = text.split(None, 2)
     kind = parts[0]
     if kind not in KEY_TYPES:
         if "PRIVATE KEY" in text:
-            raise BadKey("这是私钥！私钥别给任何人，贴 .pub 结尾那个文件的内容")
-        raise BadKey("开头要是 ssh-ed25519、ssh-rsa 或 ecdsa-sha2-… 这类公钥类型（贴 .pub 文件的内容；前面不能带选项）")
+            raise BadKey("That is a private key! Never share private keys; paste your .pub file contents")
+        raise BadKey("Key must start with ssh-ed25519, ssh-rsa, or ecdsa-sha2-... (from your .pub file, no options prefix)")
     if len(parts) < 2:
-        raise BadKey("只有类型、没有钥匙本身：把那一整行都贴进来")
+        raise BadKey("Missing key payload; paste the complete .pub line")
     try:
         blob = base64.b64decode(parts[1], validate=True)
     except (binascii.Error, ValueError):
-        raise BadKey("钥匙那一段不是有效的 base64：可能没复制全") from None
+        raise BadKey("Key payload is not valid base64; ensure the entire line was copied") from None
     if len(blob) < 4:
-        raise BadKey("钥匙那一段太短：可能没复制全")
+        raise BadKey("Key payload is truncated; ensure the entire line was copied")
     (n,) = struct.unpack(">I", blob[:4])
     if blob[4:4 + n] != kind.encode("ascii"):
-        raise BadKey("钥匙内容跟开头写的类型对不上：可能没复制全")
+        raise BadKey("Key payload does not match declared key type")
     comment = parts[2].strip() if len(parts) > 2 else ""
     comment = "".join(c for c in comment if ord(c) >= 32 and ord(c) != 127)[:MAX_COMMENT]
     return {"type": kind, "b64": parts[1], "comment": comment, "fp": fingerprint(blob)}
 
 
 def _key_in_line(line):
-    """authorized_keys 里的一行（可能带选项）→ 解析出的钥匙；注释行、看不懂的回 None。"""
+    """Parse an authorized_keys line (with optional key options) or return None."""
     text = line.strip()
     if not text or text.startswith("#"):
         return None
@@ -105,11 +98,11 @@ class SshKeys:
 
     def _write(self, text):
         if os.path.islink(self.dir):
-            raise BadKey("~/.ssh 是个软链接，不敢往里写")
+            raise BadKey("Refusing to write through ~/.ssh symlink")
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
         os.chmod(self.dir, 0o700)
         if os.path.islink(self.path):
-            raise BadKey("authorized_keys 是个软链接，不敢改")
+            raise BadKey("Refusing to modify authorized_keys symlink")
         tmp = os.path.join(self.dir, f".authorized_keys.studio.{os.getpid()}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
         try:
@@ -121,7 +114,7 @@ class SshKeys:
         os.replace(tmp, self.path)
 
     def add(self, line):
-        """回 (加上没有, 钥匙)。同一把已经在了就不重复写（回 False）。"""
+        """Add key if absent. Returns (added, key_dict)."""
         k = parse(line)
         if any(x["fp"] == k["fp"] for x in self.list()):
             return False, k
@@ -133,9 +126,9 @@ class SshKeys:
         return True, k
 
     def remove(self, fp):
-        """按指纹删掉（同一把写了几行都删）。回删掉了几行。"""
+        """Remove all entries matching fingerprint `fp`. Returns count removed."""
         if not isinstance(fp, str) or not fp.startswith("SHA256:"):
-            raise BadKey("指纹不对")
+            raise BadKey("Invalid key fingerprint")
         kept, gone = [], 0
         for line in self._read().splitlines(keepends=True):
             k = _key_in_line(line)

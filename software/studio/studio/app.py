@@ -21,6 +21,7 @@ pad_visible：手柄那一块在不在屏幕上（总览重排审查 O1：手柄
 import asyncio
 import contextlib
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -33,9 +34,10 @@ import zipfile
 from pathlib import Path
 
 from starlette.applications import Starlette
+from starlette.datastructures import Headers
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
-from starlette.staticfiles import StaticFiles
+from starlette.staticfiles import NotModifiedResponse, StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .auth import COOKIE, REMEMBER_S, Auth, OriginGuard
@@ -51,6 +53,9 @@ from .state import summarize
 from .pad import Refused as PadRefused, robot_view  # 手柄页
 from .ai_connections import AiError
 from .ai_service import AiService
+from .audio_interaction import MICROPHONE_SOURCES, microphone_request
+from .microphone_settings import MicrophoneSettings
+from .maintenance import make_handler
 from .updates import Updates, UpdateError, handle as handle_updates, safe_during_update
 
 VERSION = "0.1.0-dev"
@@ -75,6 +80,12 @@ ROBOTD_PROBE_S = 5.0     # 舵机会话期间多久看一眼 robotd 起没起来
 PAD_HEAVY = ("skills", "actions", "combos", "sounds")
 
 
+def overview_diagnostics_active(client, now=None):
+    quiet = (time.monotonic() if now is None else now)-client.get("hb_at", 0.)
+    return (client.get("visible") is True and client.get("diagnostics_visible") is True
+            and client.get("route") in ("/", "/pad") and 0. <= quiet <= HB_QUIET_S)
+
+
 class HostGuard:
     """ASGI 中间件：Host 不认识的请求直接 421（挡 DNS 重绑定）。WebSocket 不认识就关掉。"""
 
@@ -82,7 +93,8 @@ class HostGuard:
         self.app, self.guard, self.log = app, guard, log
 
     async def __call__(self, scope, receive, send):
-        if scope['type'] == 'http' and (scope.get('path') == '/api/ai' or scope.get('path','').startswith('/api/updates')):
+        if scope['type'] == 'http' and (scope.get('path') in ('/api/ai', '/api/microphone')
+                                       or scope.get('path','').startswith('/api/updates')):
             original_send = send
             async def private_send(message):
                 if message['type'] == 'http.response.start':
@@ -105,17 +117,35 @@ class HostGuard:
         await self.app(scope, receive, send)
 
 
-class AppStatic(StaticFiles):
-    """页面自己的文件每次都问一下有没有更新（改了马上生效）；vendor、model 这些不会变的缓存一天。"""
+class WebFileResponse(FileResponse):
+    """发布包把所有文件的修改时间归一；页面和模型只能按实际送出的内容验证。"""
 
+    def set_stat_headers(self, stat_result):
+        self.headers.setdefault("content-length", str(stat_result.st_size))
+
+    def _should_use_range(self, http_if_range):
+        return http_if_range == self.headers["etag"]
+
+    def content_etag(self):
+        digest = hashlib.sha256()
+        with open(self.path, "rb") as source:
+            for block in iter(lambda: source.read(64 * 1024), b""):
+                digest.update(block)
+        return f'"{digest.hexdigest()}"'
+
+    async def __call__(self, scope, receive, send):
+        etag = await asyncio.to_thread(self.content_etag)
+        self.headers["etag"] = etag
+        self.headers["cache-control"] = "no-cache"
+        for value in Headers(scope=scope).getlist("if-none-match"):
+            if value.strip() == "*" or any(tag.strip() in (etag, "W/" + etag) for tag in value.split(",")):
+                return await NotModifiedResponse(self.headers)(scope, receive, send)
+        await super().__call__(scope, receive, send)
+
+
+class AppStatic(StaticFiles):
     def file_response(self, full_path, stat_result, scope, status_code=200):
-        resp = super().file_response(full_path, stat_result, scope, status_code)
-        path = scope.get("path", "")
-        if path.startswith(("/vendor/", "/model/")):
-            resp.headers["Cache-Control"] = "public, max-age=86400"
-        else:
-            resp.headers["Cache-Control"] = "no-cache"
-        return resp
+        return WebFileResponse(full_path, status_code=status_code, stat_result=stat_result)
 
 
 def _client_desc(conn):
@@ -160,24 +190,36 @@ def _bus_give_back(by, servo=None):
 
 def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev_autologin=False, servo=None, imu=None, pad=None,
               onboard=None, battery=None, tune=None, net=None, commit=None, ssh_home=None, models=None, sensors=None, updates=None,
-              ca_cert=None):
+              sensor_auto=None, ca_cert=None):
     guard = OriginGuard(names=names)
     ai = AiService(state_dir)
+    microphone_settings = MicrophoneSettings(state_dir or getattr(auth, 'dir', None))
     updates = updates or Updates()
     if pad is not None:
         pad.update_guard=updates.installing
+    if sensor_auto is not None:
+        sensor_auto.busy = updates.installing        # 软件正在更新时不自动设摄像头和 ToF
     update_commands = set()
     mapping_requests = set()
 
-    def update_readiness(*,native_transaction=None):
+    def update_readiness(*,software=False,native_transaction=None):
         busy = any(not task.done() for task in update_commands) or model_upload_gate.locked()
         motion = getattr(pad,'motion_studio',None)
-        native=updates.native_state() if native_transaction is not None else {}
+        native=updates.native_state()
         own_prepared=(native.get('bundle_schema')=='microduck-controller-payload/1' and native.get('active') is True
             and native.get('phase')=='prepared' and isinstance(native_transaction,str)
             and native.get('transaction_id')==native_transaction)
-        guarded=updates.marker.exists() or (updates.installing() and not own_prepared)
-        if (guarded or busy or (servo is not None and servo.state != 'closed')
+        # The software updater writes its own marker before this query, so the plain
+        # query must not count it or no install can ever pass preflight. Native updates
+        # check that marker themselves as root; native recovery still counts it here.
+        guarded=((native_transaction is not None and updates.marker.exists())
+                 or (native.get('active') is True and not own_prepared))
+        if guarded or busy:
+            return {'ready':False,'error':'另一项更新或控制指令正在执行，请稍后重试'}
+        if software:
+            # updater/control.py reads the live policy flag after writers have drained.
+            return {'ready':True}
+        if ((servo is not None and servo.state != 'closed')
             or mapping_requests or (pad is not None and getattr(getattr(pad,'mapping',None),'blocked',False))
             or (motion is not None and (motion.state != 'idle' or motion.session is not None))
             or (imu is not None and (getattr(imu,'_redo_busy',False)
@@ -234,6 +276,45 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
         return guard.origin_ok(conn.headers.get("origin"), conn.headers.get("host", ""))
 
     # ---- HTTP ----
+
+    async def read_microphone(message):
+        return await asyncio.to_thread(microphone_request, message)
+
+    async def api_microphone(request):
+        def error(reason, status):
+            return JSONResponse({'ok': False, 'error': reason}, status_code=status)
+
+        _, sess = session_of(request)
+        if not sess:
+            return error('请先登录。', 401)
+        write = request.method == 'POST'
+        if (request.headers.get('x-csrf') != sess['csrf'] or
+                ((write or 'origin' in request.headers) and not origin_ok(request))):
+            return error('请求校验失败，请刷新页面再试。', 403)
+        if write:
+            try:
+                body = json.loads(await limited_body(request, 1024))
+            except OverflowError:
+                return error('麦克风请求过大。', 413)
+            except (ValueError, RecursionError):
+                return error('麦克风请求格式不正确。', 400)
+            if not isinstance(body, dict) or set(body) != {'source'} or body['source'] not in MICROPHONE_SOURCES:
+                return error('请选择有效的麦克风输入源。', 400)
+            if updates.installing():
+                return error('软件更新正在进行，请等待完成。', 409)
+        try:
+            if write:
+                task = asyncio.current_task()
+                update_commands.add(task)
+                try:
+                    data = await microphone_settings.apply(body['source'], read_microphone)
+                finally:
+                    update_commands.discard(task)
+            else:
+                data = await read_microphone({'method': 'status'})
+            return JSONResponse({'ok': True, 'data': data})
+        except (RuntimeError, ValueError, OSError) as exc:
+            return error(str(exc), 503)
 
     async def api_updates(request):
         try:
@@ -513,6 +594,8 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
             return JSONResponse({"ok": False, "error": "当前未开启传感器页面的后端"}, status_code=503, headers=headers)
         try:
             data = await getattr(sensors, kind)()
+            if kind == "camera" and sensor_auto is not None:
+                data["auto"] = sensor_auto.view()
             return JSONResponse({"ok": True, "data": data}, headers=headers)
         except Exception as e:
             label = "摄像头" if kind == "camera" else "ToF"
@@ -603,9 +686,15 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
         filename = request.query_params.get("filename", "")
         if not filename or len(filename) > 200 or any(c in filename for c in ("/", "\\", ":", "\x00")):
             return model_response({"ok": False, "error": "请选择模型部署包文件"}, 400)
-        suffix = next((s for s in (".tar.gz", ".tgz", ".zip") if filename.lower().endswith(s)), None)
+        # kind=action 是「更多动作」：还收单个 .onnx。不认识的 kind 直接拒，不落到默认的部署包流程里。
+        kind = request.query_params.get("kind") or None
+        if kind not in (None, "action"):
+            return model_response({"ok": False, "error": "不认识的导入类型"}, 400)
+        suffixes = (".tar.gz", ".tgz", ".zip") + ((".onnx",) if kind == "action" else ())
+        suffix = next((s for s in suffixes if filename.lower().endswith(s)), None)
         if suffix is None:
-            return model_response({"ok": False, "error": "请选择 ZIP、tar.gz 或 tgz 模型部署包"}, 400)
+            return model_response({"ok": False, "error": "请选择 .onnx 模型，或 ZIP、tar.gz 动作包" if kind == "action"
+                                   else "请选择 ZIP、tar.gz 或 tgz 模型部署包"}, 400)
         name = request.query_params.get("name", "")
         if len(name) > 80:
             return model_response({"ok": False, "error": "模型名称最多 80 个字符"}, 400)
@@ -629,6 +718,8 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
                         await asyncio.to_thread(output.write, chunk)
                 if not total:
                     raise ValueError("模型部署包是空的")
+                if kind == "action":
+                    return await model_result(lambda: models.import_package(Path(temporary), name=name, kind=kind))
                 return await model_result(lambda: models.import_package(Path(temporary), name=name))
             except OverflowError:
                 return model_response({"ok": False, "error": "模型部署包不能超过 64 MiB"}, 413)
@@ -639,19 +730,24 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
                     await asyncio.to_thread(Path(temporary).unlink, missing_ok=True)
 
     async def meshes(request):
-        """3D 模型 2.8 MB：预先压好的 .gz 直接给（不在板子上现压），浏览器缓存一天。"""
+        """3D 模型 2.8 MB：有 gzip 时直接发送预压缩文件。"""
         raw = web_dir / "model" / "meshes.bin"
         gz = raw.with_suffix(".bin.gz")
-        headers = {"Cache-Control": "public, max-age=86400", "Vary": "Accept-Encoding"}
+        headers = {"Vary": "Accept-Encoding"}
         if gz.is_file() and "gzip" in request.headers.get("accept-encoding", ""):
             headers["Content-Encoding"] = "gzip"
-            return FileResponse(gz, media_type="application/octet-stream", headers=headers)
-        return FileResponse(raw, media_type="application/octet-stream", headers=headers)
+            return WebFileResponse(gz, media_type="application/octet-stream", headers=headers)
+        return WebFileResponse(raw, media_type="application/octet-stream", headers=headers)
 
     # ---- WebSocket ----
 
     def update_viewers():
         robotd.set_viewers(sum(1 for c in clients.values() if c["visible"]))
+        if hasattr(robotd, "set_telemetry_viewers"):
+            now = time.monotonic()
+            robotd.set_telemetry_viewers(sum(1 for c in clients.values()
+                if (c["visible"] and c.get("route") in ("/servos", "/imu"))
+                or overview_diagnostics_active(c, now)))
 
     tune_err = {"logged": False}
 
@@ -683,8 +779,11 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
             return
         await ws.accept()
         by = _client_desc(ws)
+        # 同一个端口 http、https 都接：给这个页面的地址跟它自己的协议走
+        my_net = net.for_scheme("https" if ws.url.scheme == "wss" else "http") if net is not None else None
         pad_conn = pad.new_conn() if pad is not None else None
-        me = {"visible": True, "by": by, "hb_at": time.monotonic(), "route": None, "pad_visible": None}
+        me = {"visible": True, "by": by, "hb_at": time.monotonic(), "route": None,
+              "pad_visible": None, "diagnostics_visible": False}
         clients[ws] = me
         update_viewers()
         log.info(f"页面连上（{by}，现在 {len(clients)} 个）", cat="连接", dedup=False)
@@ -726,7 +825,7 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
                     me["visible"] = False          # 没心跳了：先当看不见，别让 robotd 白组帧
                     update_viewers()
                 if me["visible"]:
-                    st = summarize(robotd, duck, servo, ob=onboard, bat=battery, net=net, commit=commit, auth=auth)
+                    st = summarize(robotd, duck, servo, ob=onboard, bat=battery, net=my_net, commit=commit, auth=auth)
                     # 上手清单一份 1 KB 左右：没变就不每帧带（页面沿用上一份），每秒还是整份带一次（代码审查 C5，
                     # 跟手柄快照的长列表一个办法）
                     state_tick += 1
@@ -737,14 +836,16 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
                     else:
                         onb_sent = onb
                     await send(st)
-                    # 舵机表一帧 5.6 KB，只有舵机页用：只在舵机页、或者总线接管着的时候推（总览重排审查 O12）
-                    if servo is not None and (me.get("route") == "/servos" or servo.state in ("open", "opening")):
+                    diagnostics_active = overview_diagnostics_active(me)
+                    if servo is not None and (me.get("route") == "/servos" or diagnostics_active
+                            or (servo.state in ("open", "opening") and me.get("route") not in ("/", "/pad"))):
                         # 接管了总线：推总线上读到的整张表；没接管：用主程序的数据拼一张只读的表
-                        await send(servo.snapshot() if servo.state == "open"
+                        await send(servo.snapshot(diagnostics=diagnostics_active) if servo.state == "open"
                                    else view_from_robotd(robotd, servo.directions, servo.state,
                                                          servo.error, servo.sim))
-                    if imu is not None and time.monotonic() - last_imu >= 0.5:
-                        last_imu = time.monotonic()        # IMU 页要的芯片、安装方向、读数状态：半秒一次够了
+                    imu_live = me.get("route") == "/imu" or diagnostics_active
+                    if imu is not None and (imu_live or time.monotonic() - last_imu >= .5):
+                        last_imu = time.monotonic()        # Live views share the state tick and use only the owner cache.
                         await send(imu.view())
                     if (tune is not None and time.monotonic() - last_tune >= 1.0
                             and me.get("route") in ("/", "/pad", "/settings")):     # 还没收到心跳（不知道在哪页）先不推
@@ -1177,12 +1278,13 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
                 t = msg.get("t")
                 if t == "hb":
                     me["route"] = msg.get("route")
+                    me["diagnostics_visible"] = msg.get("diagnostics_visible") is True
                     if isinstance(msg.get("pad_visible"), bool):
                         me["pad_visible"] = msg["pad_visible"]
                     vis = bool(msg.get("visible", True))
                     if vis != me["visible"]:
                         me["visible"] = vis
-                        update_viewers()
+                    update_viewers()
                 elif t == "cmd":
                     name, cid = msg.get("name"), msg.get("id")
                     args = msg.get('args') or {}
@@ -1303,6 +1405,9 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
         finally:
             for t in tasks:
                 t.cancel()
+            verification = getattr(imu, "home_verification_task", None)
+            if verification in cmd_tasks:
+                verification.cancel()
             log.unsubscribe(logq)
             clients.pop(ws, None)
             if pad is not None:
@@ -1590,9 +1695,19 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
                           hint="这是 Studio 的问题，导出诊断包发出来；不影响站和走")
                 await asyncio.sleep(5.0)
 
+    async def sensors_on_boot():
+        try:
+            await sensor_auto.run_on_boot("开机自动识别")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.error("开机自动设摄像头 / ToF 的时候出错", cat="传感器", raw=f"{type(e).__name__}: {e}", exc=True,
+                      hint="不影响站和走；摄像头页、ToF 页照原来的设置显示")
+
     @contextlib.asynccontextmanager
     async def lifespan(app):
         await updates.start_readiness(update_readiness)
+        auto_task = asyncio.create_task(sensors_on_boot()) if sensor_auto is not None else None
         watch = asyncio.create_task(servo_watch())
         feed = asyncio.create_task(pad_feed()) if pad is not None else None
         ob_task = asyncio.create_task(onboard_loop()) if onboard is not None else None
@@ -1609,6 +1724,9 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
                  dedup=False)
         yield
         await updates.stop_readiness()
+        if auto_task is not None:
+            auto_task.cancel()
+            await asyncio.gather(auto_task, return_exceptions=True)
         restore.cancel()
         watch.cancel()
         if tune_task is not None:
@@ -1667,11 +1785,13 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
             return JSONResponse({"ok": False, "error": "请求校验失败，刷新页面再试"}, 403, headers=no_store)
         if phone_bridge is None:
             return JSONResponse({"ok": False, "error": "这块板子没有装语音识别模块"}, 503, headers=no_store)
-        body = await request.body()
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > 12 * 1024 * 1024:
+                return JSONResponse({"ok": False, "error": "这段录音太长了"}, 413, headers=no_store)
+            body.extend(chunk)
         if len(body) < 3200:          # 16 kHz / 16 bit：0.1 秒都不到，什么也认不出来
             return JSONResponse({"ok": False, "error": "这段太短了，再说一次"}, 400, headers=no_store)
-        if len(body) > 12 * 1024 * 1024:
-            return JSONResponse({"ok": False, "error": "这段录音太长了"}, 413, headers=no_store)
         # free=1：不用命令词表，走通用解码。自检页用它看「板子到底听到什么」，
         # 也用来区分「没听清」和「词不在词表里」。慢得多，只给排查用。
         free = (request.query_params.get("free") or "").lower() in ("1", "true", "yes")
@@ -1697,10 +1817,23 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
                         headers={"Content-Disposition": 'attachment; filename="Microduck-Local-CA.crt"',
                                  **no_store})
 
+    def maintenance_blocker():
+        # 软件更新、IMU 标定进行中，不让恢复配置或关机（不能把更新/标定拦腰截断）
+        if updates.installing() or updates.native_preparing():
+            return "正在更新软件，请更新完成后再操作"
+        job = getattr(imu, "job", None) if imu is not None else None
+        if ((job and not (job.get("done") or job.get("failed")))
+                or (imu is not None and getattr(imu, "blocks_updates", lambda: False)())):
+            return "IMU 标定进行中，请先完成或取消再操作"
+        return None
+
+    maintenance_handler = make_handler(auth, session_of, origin_ok, maintenance_blocker)
     routes = [
+        Route("/api/maintenance", maintenance_handler, methods=["GET", "POST"]),
         Route("/healthz", healthz),
         Route("/api/session", api_session),
         Route("/api/ai", api_ai, methods=["GET", "POST"]),
+        Route("/api/microphone", api_microphone, methods=["GET", "POST"]),
         Route('/api/updates',api_updates,methods=['GET','POST']),
         Route('/api/updates/upload',api_updates,methods=['POST']),
         Route("/api/login", api_login, methods=["POST"]),

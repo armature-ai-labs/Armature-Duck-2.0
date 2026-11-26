@@ -14,3 +14,15 @@ analysis-output/
 
 # Local developer tool settings.
 .claude/
+
+# OS and Editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Large disk images and builds
+*.img
+*.img.xz
+*.iso
+

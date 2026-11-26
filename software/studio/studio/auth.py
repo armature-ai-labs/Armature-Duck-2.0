@@ -1,26 +1,4 @@
-"""登录、会话、来源校验。
-
-为什么是 Studio 自己的密码，不用 Linux 的 radxa 密码：
-- 拿 radxa 密码校验，网页就成了 SSH 密码的猜测口，还绕开了 sshd 的 PerSourcePenalties；
-- 密码在安装器里设（经那一次 SSH 把哈希写过来），不在「第一次打开网页」时设，
-  免得局域网里谁先打开谁就成了管理员（DNS 重绑定也能替你设）。开发期用命令行：
-      python -m studio.auth set-password --state-dir ./state
-
-会话：
-- 32 字节随机令牌，cookie `HttpOnly; SameSite=Lax; Path=/`（Lax：从聊天软件点链接进来也带登录；
-  跨站的改动请求由 Origin 校验和 CSRF 令牌挡）；
-- 勾「记住我」30 天有效，不勾就是 12 小时没动静过期；会话存盘，Studio 重启不用重新登录；
-- 改密码、退出时，相关会话立刻作废（页面的 WebSocket 由调用方断开）。
-
-输错：按来源 IP 退避，连错 5 次以后等 30 秒，再错翻倍，最多 5 分钟。只影响网页，不影响 SSH。
-
-危险操作（直连总线、写 EEPROM、改系统设置、装程序）：要求 10 分钟内重新输过密码，像 sudo。
-
-来源校验（挡 DNS 重绑定和跨站请求）：
-- Host 只认：本机名、本机名.local、localhost，或者「这条连接实际连到的本机 IP」；
-- 改动类请求和 WebSocket 握手还要求 Origin 跟 Host 同源。SameSite 挡不住同一只鸭子上
-  别的端口（mediad 的 8080 跟 Studio 是同站），所以 Origin 一定要查。
-"""
+"""Studio authentication, sessions, and Host/Origin guard."""
 import argparse
 import getpass
 import hashlib
@@ -52,7 +30,7 @@ def _hash(password, salt, n, r, p, dklen):
 
 
 def _write_private(path, data):
-    """原子写、权限 0600：先写临时文件再改名，写一半断电也不会留下坏文件。"""
+    """Atomic write with 0600 permissions."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -74,14 +52,14 @@ class Auth:
         self._dirty_at = None
         self._load_sessions()
 
-    # ---- 密码 ----
+    # ---- Password ----
 
     def has_password(self):
         return self.pw_path.is_file()
 
     def set_password(self, password, keep_token=None):
         if len(password) < 6:
-            raise ValueError("密码至少 6 位")
+            raise ValueError("Password must be at least 6 characters")
         salt = secrets.token_bytes(16)
         digest = _hash(password, salt, **SCRYPT)
         _write_private(self.pw_path, {"scrypt": {**SCRYPT, "salt": salt.hex(), "hash": digest.hex()},
@@ -95,16 +73,16 @@ class Auth:
             else:
                 self._sessions.clear()
                 self._flush_locked()
-        self._log("info", "管理员密码已更新，其他登录全部作废" if kept else "管理员密码已更新，旧的登录全部作废")
+        self._log("info", "Admin password updated; other sessions revoked" if kept else "Admin password updated; all old sessions revoked")
 
     def clear_password(self):
-        """清掉管理员密码，回到「同一网络里打开就能用」。跟 set_password 一样只动 Studio 自己的文件。"""
+        """Remove admin password and return Studio to open LAN mode."""
         try:
             self.pw_path.unlink()
         except FileNotFoundError:
             pass
         self.revoke_all()
-        self._log("info", "管理员密码已清掉，Studio 回到不用登录的模式")
+        self._log("info", "Admin password cleared; Studio returned to open access mode")
 
     def check_password(self, password):
         try:
@@ -115,19 +93,18 @@ class Auth:
             return False
         return hmac.compare_digest(want, got)
 
-    # ---- 登录 ----
+    # ---- Login ----
 
     def login(self, password, ip, remember=False):
-        """返回 (令牌, None, 0)；失败返回 (None, 原因, 还要等几秒)。"""
+        """Return (token, None, 0) on success, or (None, reason, retry_wait_s) on failure."""
         now = time.time()
         with self._lock:
             f = self._fails.get(ip)
             if f and f["until"] > now:
                 wait = int(f["until"] - now) + 1
-                return None, f"输错太多次了，{wait} 秒后再试", wait
+                return None, f"Too many failed attempts; retry in {wait}s", wait
         if not self.has_password():
-            return None, "还没设管理员密码：用安装器设，或者在鸭子上运行 set-password", 0
-        # 先记一次失败、再算哈希：就算并发进来，每一次也都已经记在账上（成功了再清掉）
+            return None, "No admin password is set; run set-password on the board or set it in Settings", 0
         with self._lock:
             if len(self._fails) > 1000:
                 self._fails = {k: v for k, v in self._fails.items() if v["until"] > now or now - v["at"] < 3600}
@@ -140,8 +117,8 @@ class Auth:
                 f["until"] = now + wait
             n = f["n"]
         if not self.check_password(password):
-            self._log("warn", "登录失败", cat="连接", raw=f"来自 {ip}，连续第 {n} 次")
-            return None, "密码不对" + (f"，{wait} 秒后再试" if wait else ""), wait
+            self._log("warn", "Login failed", cat="Connection", raw=f"from {ip}, attempt #{n}")
+            return None, "Incorrect password" + (f"; retry in {wait}s" if wait else ""), wait
         token = secrets.token_urlsafe(32)
         sess = {"created": now, "last": now, "remember": bool(remember), "ip": ip,
                 "csrf": secrets.token_urlsafe(24), "auth_at": now}
@@ -150,12 +127,11 @@ class Auth:
             self._sessions = {t: v for t, v in self._sessions.items() if not self._expired(v, now)}
             self._sessions[token] = sess
             self._flush_locked()
-        self._log("info", f"登录成功（来自 {ip}{'，记住 30 天' if remember else ''}）", cat="连接")
+        self._log("info", f"Signed in (from {ip}{', remembered 30d' if remember else ''})", cat="Connection")
         return token, None, 0
 
     def session(self, token, touch=True):
-        """有效就返回会话，否则 None。touch=True 顺便更新最后活动时间（真有请求时）；
-        WebSocket 的定时检查用 touch=False——页面开着不等于有人在用。"""
+        """Return session dict if valid, else None."""
         if not token:
             return None
         now = time.time()
@@ -177,7 +153,7 @@ class Auth:
             return dict(s)
 
     def reauth(self, token, password):
-        """危险操作前再输一次密码。"""
+        """Verify password again before sensitive operations."""
         if not self.check_password(password):
             return False
         with self._lock:
@@ -206,7 +182,7 @@ class Auth:
         with self._lock:
             self._flush_locked()
 
-    # ---- 内部 ----
+    # ---- Internal ----
 
     @staticmethod
     def _expired(s, now):
@@ -231,18 +207,18 @@ class Auth:
         try:
             _write_private(self.sess_path, self._sessions)
         except OSError as e:
-            self._log("warn", "会话存盘失败，Studio 重启后要重新登录", cat="系统", raw=str(e))
+            self._log("warn", "Failed to persist sessions; login required after Studio restart", cat="System", raw=str(e))
         self._dirty_at = None
 
-    def _log(self, level, msg, cat="连接", **kw):
+    def _log(self, level, msg, cat="Connection", **kw):
         if self.log:
             self.log.write(msg, cat=cat, level=level, **kw)
 
 
-# ---- 来源校验 ----
+# ---- Origin Guard ----
 
 def _split_host(host):
-    """'microduck-2.local:80' -> ('microduck-2.local', '80')；'[fe80::1]:80' -> ('fe80::1', '80')。"""
+    """'microduck-2.local:80' -> ('microduck-2.local', '80'); '[fe80::1]:80' -> ('fe80::1', '80')."""
     host = (host or "").strip().lower()
     if host.startswith("["):
         end = host.find("]")
@@ -270,13 +246,10 @@ class OriginGuard:
             return False
         if ip.is_loopback:
             return True
-        # IP 只认「这条连接实际连到的本机地址」：DNS 重绑定用的是域名，过不了上面那关，
-        # 直接用 IP 的人一定是连到了鸭子的这个 IP 上
         return local_ip is not None and name == str(local_ip).lower()
 
     def origin_ok(self, origin_header, host_header):
-        """改动类请求、WebSocket 握手：Origin 必须跟 Host 同源。没带 Origin 的（老浏览器
-        的同源 GET）由调用方决定，改动类一律要求带。"""
+        """Require same-origin Host match for mutating HTTP requests and WebSocket handshakes."""
         if not origin_header:
             return False
         try:
@@ -292,15 +265,15 @@ class OriginGuard:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Studio 管理员密码")
+    ap = argparse.ArgumentParser(description="Studio admin password")
     ap.add_argument("cmd", choices=["set-password"])
     ap.add_argument("--state-dir", required=True)
     a = ap.parse_args()
-    pw = getpass.getpass("新密码（至少 6 位）：")
-    if pw != getpass.getpass("再输一次："):
-        raise SystemExit("两次不一样，没改")
+    pw = getpass.getpass("New password (at least 6 characters): ")
+    if pw != getpass.getpass("Confirm password: "):
+        raise SystemExit("Passwords did not match; unchanged")
     Auth(a.state_dir).set_password(pw)
-    print("已设好。旧的登录全部作废。")
+    print("Password updated; previous sessions revoked.")
 
 
 if __name__ == "__main__":

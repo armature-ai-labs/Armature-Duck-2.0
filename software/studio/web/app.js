@@ -1,3 +1,4 @@
+import { ShutdownButton } from './shutdown-button.js';
 // Microduck Studio 前端。不构建：Preact + htm（vendor/preact-htm.module.js）直接在浏览器里跑。
 //
 // 跟 Studio 后端只有两条路：
@@ -7,17 +8,20 @@
 import { html, render, Component, useState, useEffect, useRef, useCallback } from './vendor/preact-htm.module.js';
 import { Duck3D } from './duck3d.js';
 import { ServoPage, HandBackButton } from './servo.js';
+import { RuntimeDiagnostics } from './runtime-diagnostics.js';
 import { ImuPage } from './imu.js';
 import { PadPage, padActivity, padGo } from './pad.js';
 import { BatteryCell } from './battery.js';
 import { BatterySettings } from './settings-battery.js';
+import { MicrophoneSettings } from './settings-microphone.js';
 import { AiSettings } from './settings-ai.js';
-import { UpdateSettings } from './settings-updates.js';
+import { UpdateNotice, UpdateSettings } from './settings-updates.js';
 import { AccessGuide, AiSshEntry } from './settings-access.js';
 import { TuneSection, ModelSettings } from './tune.js';
 import { WifiCard, WifiSettings, DuckAddresses } from './wifi.js';
 import { TwoStep } from './confirm.js';
 import { ModelsPage } from './models.js';
+import { ActionsPage } from './actions.js';
 import { CameraPage, TofPage, SensorBandCells } from './sensors.js';
 import { imuDiagnosticCopy, startupStageCopy } from './startup-status.js';
 
@@ -105,8 +109,15 @@ class Link {
   // pad_visible：手柄那一块现在在不在屏幕上（总览重排审查 O1）。后端只看它决定手柄快照 10 Hz 还是 1 Hz；
   // #/pad 现在是总览上的锚点，地址是它不代表看得到（往上滑回舞台，地址栏还是 #/pad）
   heartbeat() {
-    this.send({ t: 'hb', seq: ++this.seq, visible: document.visibilityState === 'visible', route: location.hash.replace(/^#/, '') || '/',
-      pad_visible: padActivity.active || this.padCapture });
+    const route=location.hash.replace(/^#/, '') || '/';
+    this.send({ t: 'hb', seq: ++this.seq, visible: document.visibilityState === 'visible', route,
+      pad_visible: padActivity.active || this.padCapture,
+      diagnostics_visible: !!this.diagnosticsVisible && (route==='/' || route==='/pad') });
+  }
+
+  setDiagnosticsVisible(active) {
+    if (!!this.diagnosticsVisible===!!active) return;
+    this.diagnosticsVisible=!!active;this.heartbeat();
   }
 
   // 模型改键只读旁路：请求快照，不改变 padActivity，也不接管网页遥控。
@@ -131,6 +142,7 @@ let csrf = '';   // /api/session 给的；改动类 POST 要带上（X-CSRF）�
 async function api(path, body, timeoutMs = 10000, signal) {
   const opt = body === undefined ? { credentials: 'same-origin' }
     : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF': csrf }, body: JSON.stringify(body) };
+  if (path === '/api/microphone' && body === undefined) opt.headers = { 'X-CSRF': csrf };
   const ctl = new AbortController();
   const abort = () => ctl.abort();
   if (signal?.aborted) ctl.abort();
@@ -227,10 +239,12 @@ function EStop({ st, live, open }) {
       ${es.state === 'pending' ? '卸力中…' : '卸力'}<span class="kbd">空格</span></button></span>`;
 }
 
-function TopBar({ duck, st, live, age, open, hideEStop }) {
+function TopBar({ duck, st, live, age, open, hideEStop, imu }) {
   // 顶栏先说现在是什么模式（出厂标定模式 / 写完切运动模式），再带姿势；标定模式没有策略，别写成「调试中」。
   // 连续报启动阶段超过 30 秒（Studio 从这次连上算）：写「一直报启动中」（10-20 真机：旧 fork 的标定模式永远报 configuring_bus）
-  const postureText = st ? ({ starting: st.start_wait?.text || (st.starting_long ? '一直报启动中' : '启动中'), absent: '主程序没在跑', homing: '在站起来',
+  const calibrationText = live && imu?.job?.phase === 'verify' ? 'IMU 验证中'
+    : live && st?.posture === 'homing' && imu?.coarse_sampling?.hold_ready ? '站姿已停稳' : null;
+  const postureText = st ? (calibrationText || { starting: st.start_wait?.text || (st.starting_long ? '一直报启动中' : '启动中'), absent: '主程序没在跑', homing: '在站起来',
     servo_session: '调舵机中' }[st.posture] || WAS[st.posture] || '状态不明') : null;
   const modeText = !st ? '连接中'
     : st.mode === 'commissioning' ? (st.posture === 'commissioning' ? '标定模式' : `标定模式 · ${postureText}`)
@@ -241,6 +255,7 @@ function TopBar({ duck, st, live, age, open, hideEStop }) {
   const net = st?.net;
   const addrTitle = net?.known ? [`IP ${net.ip_now || '不知道'}`, ...(net.urls || []).map((u) => u.url)].join('\n') : undefined;
   return html`<header class="topbar">
+    <${ShutdownButton} api=${api} />
     <div class="duckid">
       <span class="dot" style=${{ background: duck?.color || '#0F7C80' }}></span>
       <span class="name" title=${addrTitle}>${duck?.label || '鸭子'}</span>
@@ -638,8 +653,8 @@ function Onboard({ st, live }) {
               ${job && job.phase !== 'running' && job.reason ? html`<div class=${'onb-commit-msg ' + (job.ok ? 'ok' : 'bad')}>${job.reason}</div>` : null}
               ${cprev ? html`<div class="onb-preview">
                 <div class="onb-preview-imu"><b>IMU</b> ${cprev.imu?.label || ''} · ${cprev.imu?.text || ''}${cprev.imu?.default ? `（按默认装法写：${cprev.imu.default}）` : ''}</div>
-                <table class="onb-preview-table"><thead><tr><th>关节</th><th>方向</th><th>限位</th></tr></thead><tbody>
-                  ${(cprev.joints || []).map((j) => html`<tr><td>${j.cn || j.name}</td><td>${j.direction > 0 ? '+1' : '−1'}</td><td class="num">${j.min_deg}° ~ ${j.max_deg}°</td></tr>`)}
+                <table class="onb-preview-table"><thead><tr><th>关节</th><th>中位</th><th>方向</th><th>限位</th></tr></thead><tbody>
+                  ${(cprev.joints || []).map((j) => html`<tr><td>${j.cn || j.name}</td><td class="num">${j.zero_raw}</td><td>${j.direction > 0 ? '+1' : '−1'}</td><td class="num">${j.min_deg == null ? "未设置" : `${j.min_deg}° ~ ${j.max_deg}°`}</td></tr>`)}
                 </tbody></table>
                 <details class="onb-preview-toml"><summary>要写的文件</summary><pre>${cprev.toml || ''}</pre></details>
               </div>` : null}
@@ -681,11 +696,12 @@ function Todo({ st, live }) {
 }
 
 // 总览：（开着热点时最上面是「连 WiFi」）→ 舞台 → 仪表带（5 格）→ 上手清单 → 待办 → 往下一刷就是手柄（总览重排 §1）
-function Overview({ st, live, age, diagnosticElapsed, duck, pd, onSame, tune, sensorsActive }) {
+function Overview({ st, live, age, diagnosticElapsed, duck, pd, onSame, tune, sensorsActive, sv, imu, connectionLive, svElapsed, imuElapsed }) {
   // 主机名这类英文名后面空一格再接中文：「duck-c51b 站好了」
   const short = duck?.short || '鸭子';
   const name = /[A-Za-z0-9]$/.test(short) ? short + ' ' : short;
   return html`<div class="overview">
+    ${sensorsActive?html`<${UpdateNotice} api=${api} />`:null}
     ${st?.net?.known && st.net.mode === 'hotspot'
       ? html`<${WifiCard} net=${st.net} link=${link} secure=${st?.auth?.has_password} />` : null}
     <${Stage} st=${st} live=${live} age=${age} name=${name} />
@@ -694,6 +710,8 @@ function Overview({ st, live, age, diagnosticElapsed, duck, pd, onSame, tune, se
     <${Onboard} st=${st} live=${live} />
     <${Todo} st=${st} live=${live} />
     <${PadPage} st=${st} pad=${pd} link=${link} api=${api} previewActive=${sensorsActive} live=${live} />
+    <${RuntimeDiagnostics} st=${st} sv=${sv} imu=${imu} link=${link} active=${sensorsActive}
+      live=${connectionLive} summaryLive=${live} svElapsed=${svElapsed} imuElapsed=${imuElapsed} />
     <${TuneSection} tune=${tune} />
   </div>`;
 }
@@ -765,6 +783,7 @@ function Settings({ st, tune }) {
     <${AiSshEntry} />
     <${UpdateSettings} api=${api} csrf=${csrf} />
     <${AiSettings} api=${api} />
+    <${MicrophoneSettings} api=${api} />
     <div class="board" style="padding:16px 20px;display:flex;flex-wrap:wrap;gap:12px;align-items:center">
       <span style="font-size:15px;font-weight:600;flex:1">日志和诊断</span>
       <a class="settings-logs" href="#/logs" style="font-size:15px">日志</a>
@@ -798,9 +817,11 @@ function Later({ what }) {
 const OVERVIEW = (r) => r === '/' || r === '/pad';
 function navCur(route, padInView) {
   return (r) => {
-    if (r === '/settings') return route === '/settings' || route === '/settings/ssh' ? 'page' : undefined;
+    if (r === '/settings') return route === r || route.startsWith(r+'/') ? 'page' : undefined;
     if (r === '/pad') return OVERVIEW(route) && padInView ? 'page' : undefined;
     if (r === '/') return OVERVIEW(route) && !padInView ? 'page' : undefined;
+    // 走路和站立模型（原来的「模型」页）从动作页进去，侧栏照样亮「动作」
+    if (r === '/actions') return route === '/actions' || route === '/models' ? 'page' : undefined;
     return route === r ? 'page' : undefined;
   };
 }
@@ -816,7 +837,7 @@ function Nav({ route, padInView, onSame }) {
     ${a('#/tof', '/tof', 'ToF')}
     ${a('#/servos', '/servos', '舵机')}
     ${a('#/imu', '/imu', 'IMU')}
-    ${a('#/models', '/models', '模型')}
+    ${a('#/actions', '/actions', '动作')}
     ${a('#/logs', '/logs', '日志')}
     <span class="spacer"></span>
     ${a('#/settings', '/settings', '设置')}
@@ -828,7 +849,7 @@ function TabBar({ route, padInView, onSame }) {
   const cur = navCur(route, padInView);
   const a = (href, r, text) => html`<a href=${href} aria-current=${cur(r)} onClick=${(e) => onSame(e, href)}>${text}</a>`;
   return html`<nav class="tabbar" aria-label="主导航">
-    ${a('#/', '/', '总览')}${a('#/pad', '/pad', '手柄')}${a('#/camera', '/camera', '摄像头')}${a('#/tof', '/tof', 'ToF')}${a('#/servos', '/servos', '舵机')}${a('#/imu', '/imu', 'IMU')}${a('#/models', '/models', '模型')}${a('#/settings', '/settings', '更多')}
+    ${a('#/', '/', '总览')}${a('#/pad', '/pad', '手柄')}${a('#/camera', '/camera', '摄像头')}${a('#/tof', '/tof', 'ToF')}${a('#/servos', '/servos', '舵机')}${a('#/imu', '/imu', 'IMU')}${a('#/actions', '/actions', '动作')}${a('#/settings', '/settings', '更多')}
   </nav>`;
 }
 
@@ -857,11 +878,11 @@ function useRoute() {
 
 // 换页、点导航时滚到哪：#/pad 滚到手柄那一块（scroll-margin-top 扣掉吸顶的顶栏），别的都回到顶上
 function scrollFor(route) {
-  if (route === '/settings/ssh') {
+  if (route === '/settings/ssh' || route === '/settings/updates') {
     requestAnimationFrame(() => {
-      const guide = document.getElementById('ssh-guide');
-      guide?.scrollIntoView({ block: 'start' });
-      guide?.focus({ preventScroll: true });
+      const section = document.getElementById(route === '/settings/ssh' ? 'ssh-guide' : 'software-updates');
+      section?.scrollIntoView({ block: 'start' });
+      section?.focus({ preventScroll: true });
     });
     return;
   }
@@ -882,6 +903,7 @@ function Main({ duck }) {
   const [tune, setTune] = useState(null);
   const [pd, setPd] = useState(null);
   const [stAt, setStAt] = useState(0);
+  const [svAt, setSvAt] = useState(0);
   const [imuAt, setImuAt] = useState(0);
   const imuContext = useRef(null);
   const [status, setStatus] = useState(link.status);
@@ -906,7 +928,7 @@ function Main({ duck }) {
         setSt((prev) => (m.onboarding_same && prev ? { ...m, onboarding: prev.onboarding } : m));
         setStAt(performance.now());
       }
-      else if (m.t === 'servo') setSv(m);
+      else if (m.t === 'servo') { setSv(m); setSvAt(performance.now()); }
       else if (m.t === 'imu') { setImu(m); setImuAt(performance.now()); }
       else if (m.t === 'tune') setTune(m);
       else if (m.t === 'pad') {
@@ -948,15 +970,17 @@ function Main({ duck }) {
   // 总览一直挂着、只是藏起来：3D 鸭子不随切页面销毁重建（three.js 每建一次留一份内部对象，
   // 浏览器能同时开的 WebGL 上下文也有限）。手柄那一块也在总览里（#/pad 是它的锚点），一直挂着：
   // 「在不在手柄区」看 padActivity，不看挂没挂上（审查 O1）
-  const overview = html`<div hidden=${!OVERVIEW(route)}><${Overview} st=${st} live=${live} age=${age} diagnosticElapsed=${now - stAt} duck=${duck} pd=${pd} onSame=${onSame} tune=${tune} sensorsActive=${OVERVIEW(route)} /></div>`;
+  const overview = html`<div hidden=${!OVERVIEW(route)}><${Overview} st=${st} live=${live} age=${age} diagnosticElapsed=${now - stAt} duck=${duck} pd=${pd} onSame=${onSame} tune=${tune} sensorsActive=${OVERVIEW(route)}
+    sv=${sv} imu=${imu} connectionLive=${status==='open'} svElapsed=${svAt?Math.max(0,now-svAt):Infinity} imuElapsed=${imuAt?Math.max(0,now-imuAt):Infinity} /></div>`;
   let page = null;
   if (OVERVIEW(route)) page = null;
   else if (route === '/logs') page = html`<${LogsPage} />`;
   else if (route === '/camera') page = html`<${CameraPage} api=${api} />`;
   else if (route === '/tof') page = html`<${TofPage} api=${api} />`;
   else if (route === '/servos') page = html`<${ServoPage} sv=${sv} link=${link} leaveGuards=${leaveGuards} />`;
-  else if (route === '/settings' || route === '/settings/ssh') page = html`<${Settings} st=${st} tune=${tune} />`;
+  else if (['/settings','/settings/ssh','/settings/updates'].includes(route)) page = html`<${Settings} st=${st} tune=${tune} />`;
   else if (route === '/models') page = html`<${ModelsPage} api=${api} csrf=${csrf} link=${link} live=${live} />`;
+  else if (route === '/actions') page = html`<${ActionsPage} api=${api} csrf=${csrf} link=${link} plazaUrl="https://fanhao375.github.io/microduck-replica/motion-plaza/" />`;
   else if (route === '/imu') page = html`<${ImuPage} st=${st}
     imu=${imu && st?.imu?.diagnostic ? { ...imu, diagnostic: st.imu.diagnostic } : imu}
     link=${link} live=${live} age=${age} diagnosticElapsed=${now - (st?.imu?.diagnostic ? stAt : imuAt)} pd=${pd} />`;
@@ -967,7 +991,7 @@ function Main({ duck }) {
     <${Nav} route=${route} padInView=${padInView} onSame=${onSame} />
     <main class="main">
       <${TopBar} duck=${duck} st=${st} live=${live} age=${age} open=${status === 'open'}
-        hideEStop=${route === '/servos' && sv?.state === 'open'} />
+        hideEStop=${route === '/servos' && sv?.state === 'open'} imu=${route === '/imu' ? imu : null} />
       <div class="sticky-bar" ref=${barRef}><${ServoBar} st=${st} onServos=${route === '/servos'} /></div>
       ${overview}${page}
     </main>

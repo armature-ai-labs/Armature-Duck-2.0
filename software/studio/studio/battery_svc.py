@@ -1,12 +1,4 @@
-"""电池估算挂进 Studio（battery-plan.md v2 §6 B2/B3）：一个 1 Hz 的循环喂估算器，summarize 只读结果，页面的 battery.op。
-
-为什么单独一个循环（审查 B-R7）：summarize 每个页面每秒跑 10 次，在那里喂样本，开三个页面就是每秒 30 个重复值。
-这里一秒一拍，按 busStatus 的采样时间（Sample.at）去重；调舵机时（Studio 自己占着总线，robotd 按计划停着）
-从 servo.snapshot() 的每颗电压取，同一个寄存器，切换时不重新起步。
-
-设置存 state_dir/battery-settings.json（studio/battery.py 读写、校验）；改了马上换掉估算器的设置，下一拍生效。
-只警告：这里不发任何命令给鸭子。
-"""
+"""Battery estimator service running at 1 Hz; summarize() reads cached output."""
 import asyncio
 import os
 import time
@@ -15,9 +7,7 @@ from . import battery as B
 from .state import JOINT_CN, MAX_AGE
 
 TICK_S = 1.0
-BUS_STALE_S = 3.0       # busStatus 这么久没更新：这一拍当没有新数据（10 秒以后估算器自己重新起步）
-# 开发用（端到端测试、截图）：估算器的时间按这个倍数快进（30 秒估算中、60 秒才亮在 20 倍下是 1.5 秒、3 秒）。
-# 快进时每一拍都把最新的那份读数当新样本喂（不按 busStatus 的采样时间去重）。鸭子上不要设
+BUS_STALE_S = 3.0
 SPEED_ENV = "STUDIO_BATTERY_SPEED"
 
 
@@ -36,18 +26,18 @@ class BatteryService:
         self.speed = max(1.0, speed)
         self._t0 = time.monotonic()
         if self.speed != 1.0:
-            log.warn(f"开发用：电量估算按 {self.speed:g} 倍速快进", cat=B.LOG_CAT, raw=f"{SPEED_ENV}={self.speed:g}",
-                     hint="只给端到端测试、截图用；鸭子上不要设这个环境变量")
+            log.warn(f"Dev mode: battery estimator accelerated {self.speed:g}x", cat=B.LOG_CAT, raw=f"{SPEED_ENV}={self.speed:g}",
+                     hint="For E2E tests and screenshots only; do not set on robot")
 
     def clock(self, now=None):
-        """估算器用的时间（快进时按倍数放大）。"""
+        """Estimator clock scaled by speed multiplier."""
         now = time.monotonic() if now is None else now
         return self._t0 + (now - self._t0) * self.speed
 
-    # ---- 一拍 ----
+    # ---- Tick ----
 
     def sample(self, now):
-        """这一拍的输入：(电压, fresh, cls, key, source, 名字) 或 None（没有新数据）。"""
+        """Return (volts, fresh, cls, dedup_key, source, joint_names) or None."""
         sv = self.servo
         if sv is not None and getattr(sv, "state", None) == "open":
             snap = sv.snapshot()
@@ -56,7 +46,6 @@ class BatteryService:
             if vs is None:
                 return None
             names = [r.get("cn") if isinstance(r, dict) else None for r in rows]
-            # 舵机表没有采样时间：按秒去重（估算器在没给 key 时也会按时间去重）
             return vs, fr, B.classify_servo_session(rows), ("servo", int(now)), "servo", names
         bus = self.rd.bus.value
         age = self.rd.bus.age(now)
@@ -71,8 +60,6 @@ class BatteryService:
         names = [JOINT_CN.get(j.get("name"), j.get("name")) if isinstance(j, dict) else None for j in joints]
         cls = B.classify_robotd(bus, st) if st is not None else None
         if cls is None and st is None and isinstance(bus.get("native"), dict):
-            # 状态流没在推（没人看页面时 robotd 不推 robot.state）：只看 busStatus。卸力就是卸力；
-            # 扭矩开着、策略没开 = 保持 HOME（不会走）；策略开着可能在走，算不知道
             torque = bus["native"].get("torque_state_confirmed")
             if torque is False:
                 cls = "rest"
@@ -94,7 +81,7 @@ class BatteryService:
         return events
 
     def view(self, now=None):
-        """summarize 用（每秒 10 次 × 每个页面）：只读内存，不算新样本。"""
+        """Read-only snapshot for summarize()."""
         now = time.monotonic() if now is None else now
         h = self.rd.health
         health = h.value if h.age(now) is not None and h.age(now) <= MAX_AGE["health"] else None
@@ -109,15 +96,14 @@ class BatteryService:
                 self.tick()
             except Exception as e:  # noqa: BLE001
                 self.errors += 1
-                self.log.error("电量估算出错", cat=B.LOG_CAT, raw=f"{type(e).__name__}: {e}", exc=True,
-                               hint="这是 Studio 的问题，导出诊断包发出来；不影响站和走")
+                self.log.error("Battery estimator error", cat=B.LOG_CAT, raw=f"{type(e).__name__}: {e}", exc=True,
+                               hint="Internal Studio error; export diagnostics bundle")
                 await asyncio.sleep(5.0)
 
-    # ---- 页面的 battery.op ----
+    # ---- UI battery.op ----
 
     async def handle(self, args, by="?"):
-        """{op:"get"} → 设置 + 说明；{op:"set", values:{…}} → 校验、存盘、马上生效；
-        {op:"calibrate", measured_v} → 算出读数校准（不存，页面确认后再 set）。不合法的抛 ValueError（原因给人看）。"""
+        """Handle get / set / calibrate requests from UI."""
         op = (args or {}).get("op")
         if op == "get":
             return self._payload()
@@ -125,26 +111,26 @@ class BatteryService:
             values = (args or {}).get("values")
             good, errors = B.validate_settings(values, self.settings)
             if errors:
-                raise ValueError("；".join(errors))
+                raise ValueError("; ".join(errors))
             old = dict(self.settings)
             if good == old:
                 return self._payload()
             try:
                 saved = await asyncio.to_thread(B.save_settings, self.state_dir, good)
             except B.SettingsError as e:
-                self.log.warn("电池设置没存进去", cat=B.LOG_CAT, raw=str(e), hint="state 目录满了或者没权限")
+                self.log.warn("Failed to save battery settings", cat=B.LOG_CAT, raw=str(e), hint="Check state directory space and permissions")
                 raise ValueError(str(e)) from None
             self.settings = saved
             self.est.set_settings(saved)
-            self.log.info(f"电池设置改了：{B.settings_changes(old, saved)}", cat=B.LOG_CAT, raw=f"by={by}")
+            self.log.info(f"Battery settings updated: {B.settings_changes(old, saved)}", cat=B.LOG_CAT, raw=f"by={by}")
             return self._payload()
         if op == "calibrate":
             mv = (args or {}).get("measured_v")
             r = self.est.calibrate(self.clock(), mv)
             if r["ok"]:
-                self.log.info(f"「我量了电池电压」：{r['reason']}（还没存，等确认）", cat=B.LOG_CAT, raw=f"by={by}")
+                self.log.info(f"Measured battery voltage: {r['reason']} (pending confirmation)", cat=B.LOG_CAT, raw=f"by={by}")
             return dict(r, current=self.settings["cal_offset_v"])
-        raise ValueError(f"不认识的电池操作：{op}")
+        raise ValueError(f"Unknown battery operation: {op}")
 
     def _payload(self):
         return {"settings": dict(self.settings), "defaults": dict(B.DEFAULTS), "ranges": {k: list(v) for k, v in B.RANGES.items()},

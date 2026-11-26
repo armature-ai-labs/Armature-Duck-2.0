@@ -1,8 +1,14 @@
-# Microduck Replica
+# Armature Duck 2.0 (Indie Duck)
+
+[![Getting Started](https://img.shields.io/badge/Guide-Getting%20Started-blue)](GETTING_STARTED.md)
+[![Hardware BOM](https://img.shields.io/badge/Hardware-Electronics%20BOM-brightgreen)](BOM/Microduck_Replica_Electronics_BOM.xlsx)
 
 **English** · [简体中文](README.md)
 
-A third-party full-robot replica project based on [Pollen Robotics' Microduck](https://pollen-robotics.com/microduck/), with resources for sourcing parts, printing, assembly, calibration, control, and training.
+An open-source autonomous bipedal robot duck replica project based on [Pollen Robotics' Microduck](https://pollen-robotics.com/microduck/), featuring a complete bill of materials, printable CAD assemblies, real-time control, and an English-localized web management console (**Microduck Studio**).
+
+> 🚀 **New to the project? Read the [Getting Started Guide (GETTING_STARTED.md)](GETTING_STARTED.md) to build or resume your own Indie Duck!**
+
 
 ## Download the image for your board
 

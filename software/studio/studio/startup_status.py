@@ -98,10 +98,10 @@ def startup_wait(bus):
     if re.search(r"\bimu(?:\s*200)?\b", error, re.I):
         source = native.get("imu_source")
         source = source if isinstance(source, str) and source else None
-        return {"kind": "imu", "text": "等待 IMU 数据" + (f"（来源：{source}）" if source else ""),
+        return {"kind": "imu", "text": "Waiting for IMU data" + (f" (source: {source})" if source else ""),
                 "source": source}
     if bus.get("phase") == "waiting_for_bus":
-        return {"kind": "bus", "text": "等待总线设备响应", "source": None}
+        return {"kind": "bus", "text": "Waiting for servo bus response", "source": None}
     return None
 
 

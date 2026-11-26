@@ -1,17 +1,13 @@
-"""写进主程序：把舵机零位、方向、IMU 方向一次写进 robotd 的标定文件。
+"""Write calibration to robotd: commit servo zero offsets, directions, and IMU orientation to robotd's calibration file.
 
-为什么要有这一个文件：舵机页的中位校准只改舵机自己的 EEPROM，方向只存在 Studio 的
-servo-directions.json，IMU 方向只在页面里算出来。robotd 读的是另一个文件
-/etc/robot/feetech-ft5/hd1910-calibration.toml；运动模式下它没写好就会卡在 waiting_for_bus，鸭子站不起来。
+The Servo page midpoint calibration only writes each servo's EEPROM, servo directions are stored in Studio's
+servo-directions.json, and IMU orientation is computed in the UI. robotd reads
+/etc/robot/feetech-ft5/hd1910-calibration.toml; without it in motion mode, robotd stalls at waiting_for_bus.
 
-这里做三件事：
-- 记下 Studio 这边做过什么（state 目录的 servo-centered.json、imu-pending.json）；
-- 算「准备情况」、拼要写的内容（跟 root 小助手共用同一套组 TOML / 校验的代码，小助手那边复制了一份）；
-- 接 calib.op：preview 给页面看要写什么，commit 调小助手（dry_run=False）真正写、重启主程序。
-
-小助手是独立的 root 脚本，不能 import Studio；所以 build_calibration / render_calibration /
-validate_calibration 这三个函数在 deploy/microduck-helper 里有一份逐字相同的副本，
-tests/test_commit.py 会拿同一份输入核对两边的输出完全一样。
+This module handles three responsibilities:
+- Track Studio-side progress (state_dir/servo-centered.json, imu-pending.json);
+- Compute readiness and build/render/validate the calibration TOML (shared verbatim with deploy/microduck-helper);
+- Handle calib.op: preview (dry_run) and commit (calls root helper to write and restart robotd).
 """
 import json
 import math
@@ -19,6 +15,8 @@ import os
 import tempfile
 import threading
 import time
+import tomllib
+import uuid
 
 JOINT_ORDER = (
     "left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
@@ -30,15 +28,15 @@ JOINT_ID = {
     "neck_pitch": 30, "head_pitch": 31, "head_yaw": 32, "head_roll": 33, "mouth": 34,
     "right_hip_yaw": 10, "right_hip_roll": 11, "right_hip_pitch": 12, "right_knee": 13, "right_ankle": 14,
 }
-JOINT_IDS = JOINT_ID       # 旧名字（Studio 别的模块 / 测试在用）
-# fork robotd 的官方 HOME（deployment.rs 的 DEFAULT_POSITION），按 JOINT_ORDER
+JOINT_IDS = JOINT_ID       # Legacy alias used by other Studio modules / tests
+# Official HOME pose from robotd (deployment.rs DEFAULT_POSITION), in JOINT_ORDER
 HOME_RAD = {
     "left_hip_yaw": 0.0, "left_hip_roll": -0.0873, "left_hip_pitch": -0.4579, "left_knee": -0.0049,
     "left_ankle": 0.453, "neck_pitch": 0.3491, "head_pitch": 0.3491, "head_yaw": 0.0, "head_roll": 0.0,
     "mouth": 0.0, "right_hip_yaw": 0.0, "right_hip_roll": 0.0873, "right_hip_pitch": 0.4579,
     "right_knee": 0.0049, "right_ankle": -0.453,
 }
-# 真鸭子上用的标准限位（度）：左右髋偏航是镜像的
+# Standard joint limits (deg) used on real ducks: left/right hip yaw are mirrored
 LIMITS_DEG = {
     "left_hip_yaw": (-25.0, 30.0), "left_hip_roll": (-22.0, 22.0), "left_hip_pitch": (-90.0, 90.0),
     "left_knee": (-90.0, 90.0), "left_ankle": (-70.0, 70.0),
@@ -48,16 +46,15 @@ LIMITS_DEG = {
     "right_knee": (-90.0, 90.0), "right_ankle": (-70.0, 70.0),
 }
 IMU_SOURCES = ("bus", "bno08x", "lsm6dsv16x")
-CHIP_CN = {"bus": "总线小板（ID 200）", "bno08x": "BNO085（I²C）", "lsm6dsv16x": "LSM6DSV16X（I²C）"}
-DEFAULT_BUS_QUAT = [math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0]     # fork imu.rs: SflpDecoder::DEFAULT_MOUNT
-# 第 2 步标了已完成 / 跳过、主程序里方向没确认、IMU 页也没校过时，第 3 步按这些「默认装法」写（任务 17，用户 10-21：
-# 「我一直跳过跳过，最后还是不进运动模式」）。总线小板用文件里现有的 imu_mount_quat（出厂就是上面的官方装法）
+CHIP_CN = {"bus": "Bus IMU (ID 200)", "bno08x": "BNO085 (I2C)", "lsm6dsv16x": "LSM6DSV16X (I2C)"}
+DEFAULT_BUS_QUAT = [math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0]     # SflpDecoder::DEFAULT_MOUNT
+# Fallback default IMU mounts when step 2 was skipped/completed without IMU calibration
 DEFAULT_MOUNTS = {
-    "bno08x": [0.5, 0.5, 0.5, 0.5],                                  # fork duck-control/src/trunk_imu.rs: BNO08X_DEFAULT_MOUNT
-    # 复刻推荐装法：模块 x 朝下、z 朝前（二号鸭 10-17 实测）。fork 给的是单位四元数（「小板没有公认的朝上方向」），不用它
+    "bno08x": [0.5, 0.5, 0.5, 0.5],                                  # BNO08X_DEFAULT_MOUNT
+    # Recommended replica mount: module x down, z forward
     "lsm6dsv16x": [0.7071067811865476, 0.0, 0.7071067811865476, 0.0],
 }
-DEFAULT_HOW = {"bus": "官方装法", "bno08x": "fork 的默认装法", "lsm6dsv16x": "复刻推荐装法，模块 x 朝下、z 朝前"}
+DEFAULT_HOW = {"bus": "Factory mount", "bno08x": "Default fork mount", "lsm6dsv16x": "Replica mount (x down, z forward)"}
 TOP_KEYS = ("motion_enabled", "imu_mount_verified", "imu_mount_quat", "imu_bus_protocol", "imu_bus_profile", "current_ma_per_count", "units_verified")
 TAU = 2.0 * math.pi
 
@@ -68,14 +65,14 @@ COMMIT_WAIT_S = 180.0
 
 
 class CalibError(Exception):
-    """要写进主程序的这份标定没过 robotd 的校验。消息直接给页面 / 人看。"""
+    """Calibration failed robotd validation; message is user-facing."""
 
 
 class Refused(Exception):
-    """现在不能做（准备没齐、读不到标定、小助手不在）。原因直接给页面看。"""
+    """Commit cannot proceed (prerequisites missing, calibration unreadable, or helper absent)."""
 
 
-# ---------------- 组 TOML / 校验（小助手里有逐字相同的一份） ----------------
+# ---------------- Build / Validate TOML (mirrored in helper) ----------------
 
 def _is_int(v):
     return isinstance(v, int) and not isinstance(v, bool)
@@ -87,16 +84,16 @@ def _is_num(v):
 
 def _quat(q, what):
     if not isinstance(q, (list, tuple)) or len(q) != 4 or not all(_is_num(x) for x in q):
-        raise CalibError(f"{what} 要是 [w, x, y, z] 四个有限数")
+        raise CalibError(f"{what} must be 4 finite numbers [w, x, y, z]")
     return [float(x) for x in q]
 
 
 def normalize_quat(q):
-    """单位化；零向量、nan、inf 都拒。误差 1e-6 之内才算数（跟 robotd 一样）。"""
-    v = _quat(q, "四元数")
+    """Normalize quaternion; reject zero-vector, NaN, and Inf."""
+    v = _quat(q, "Quaternion")
     n = math.sqrt(sum(x * x for x in v))
     if not math.isfinite(n) or n <= 1e-12:
-        raise CalibError("四元数是零向量，没法归一化")
+        raise CalibError("Quaternion is zero; cannot normalize")
     return [x / n for x in v]
 
 
@@ -108,56 +105,62 @@ def _bool_text(v):
     return "true" if v else "false"
 
 
-def build_calibration(current, joints, imu):
-    """按现在文件里的 name / id，加这次的方向和 IMU 方向，组一份完整的标定。
-
-    current：现在文件的字典（calibration-status 里的 calibration，或者 tomllib 读出来的）；
-    joints：[{"id": int, "direction": 1|-1}, ... 15 个]；
-    imu：{"source": "bus"|"bno08x"|"lsm6dsv16x", "quat": [w,x,y,z]}。
-    """
+def build_calibration(current, joints, imu, joint_mode="recorded"):
+    """Build a complete calibration dict from current robotd calibration + new joint directions and IMU mount."""
     if not isinstance(current, dict):
-        raise CalibError("主程序现在的标定文件不是一个对象")
+        raise CalibError("Current robotd calibration is not an object")
     rows = current.get("joints")
     if not isinstance(rows, list):
-        raise CalibError("主程序现在的标定文件里没有 joints")
+        raise CalibError("Current robotd calibration is missing joints")
     by_name = {}
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("name"), str):
-            raise CalibError("主程序现在的标定文件里有一行关节没有 name")
+            raise CalibError("A joint entry in robotd calibration is missing 'name'")
         name = row["name"]
         if name not in JOINT_ID:
-            raise CalibError(f"主程序现在的标定文件里有不认识的关节：{name}")
+            raise CalibError(f"Unknown joint in robotd calibration: {name}")
         if name in by_name:
-            raise CalibError(f"主程序现在的标定文件里 {name} 出现了两次")
+            raise CalibError(f"Duplicate joint in robotd calibration: {name}")
         by_name[name] = row
     if set(by_name) != set(JOINT_ORDER):
         missing = [n for n in JOINT_ORDER if n not in by_name]
-        raise CalibError("主程序现在的标定文件不是 15 颗官方关节" + (f"（少了 {', '.join(missing)}）" if missing else ""))
+        raise CalibError("robotd calibration does not match the 15 official joints" + (f" (missing {', '.join(missing)})" if missing else ""))
 
     if not isinstance(joints, list) or len(joints) != 15:
-        raise CalibError("joints 要正好 15 个 {id, direction}")
+        raise CalibError("joints must contain exactly 15 {id, direction} entries")
     dirs = {}
+    centered_ids = set()
     for row in joints:
         if not isinstance(row, dict) or not _is_int(row.get("id")) or row.get("direction") not in (-1, 1):
-            raise CalibError("joints 的每一行要是 {id: 整数, direction: 1 或 -1}")
+            raise CalibError("Each joint entry must be {id: int, direction: 1 or -1}")
         if row["id"] in dirs:
-            raise CalibError(f"joints 里 id {row['id']} 出现了两次")
+            raise CalibError(f"Duplicate joint id {row['id']}")
         dirs[row["id"]] = row["direction"]
+        if joint_mode == "recorded" and row.get("centered") is True:
+            centered_ids.add(row["id"])
     file_ids = {row.get("id") for row in by_name.values()}
     if set(dirs) != file_ids:
-        raise CalibError(f"这次的 15 颗（{sorted(dirs)}）跟主程序文件里的（{sorted(file_ids, key=str)}）对不上")
+        raise CalibError(f"Provided 15 joint IDs ({sorted(dirs)}) do not match robotd file ({sorted(file_ids, key=str)})")
 
+    if joint_mode not in ("recorded", "keep", "imu_only"):
+        raise CalibError("Unknown joint calibration write mode")
     out_joints = []
     for name in JOINT_ORDER:
         src = by_name[name]
         jid = src.get("id")
         if not _is_int(jid):
-            raise CalibError(f"{name} 的 id 不是整数")
-        lo, hi = LIMITS_DEG[name]
-        out_joints.append({
-            "name": name, "id": jid, "zero_raw": 2048, "direction": dirs[jid], "calibrated": True,
-            "min_rad": math.radians(lo), "max_rad": math.radians(hi),
-        })
+            raise CalibError(f"{name} id is not an integer")
+        row = dict(src)
+        if joint_mode == "recorded":
+            row["direction"] = dirs[jid]
+            if jid in centered_ids:
+                row["zero_raw"] = 2048
+        if joint_mode != "imu_only":
+            if row.get("min_rad") is None and row.get("max_rad") is None and row.get("calibrated") is False:
+                lo, hi = LIMITS_DEG[name]
+                row.update(min_rad=math.radians(lo), max_rad=math.radians(hi))
+            row["calibrated"] = True
+        out_joints.append(row)
 
     out = {
         "motion_enabled": True,
@@ -174,11 +177,11 @@ def build_calibration(current, joints, imu):
     if "imu_bus_protocol" in current:
         protocol = current["imu_bus_protocol"]
         if protocol not in ("feetech", "dxl2"):
-            raise CalibError("imu_bus_protocol 只能是 feetech 或 dxl2（由主程序验证后写入）")
+            raise CalibError("imu_bus_protocol must be 'feetech' or 'dxl2'")
         out["imu_bus_protocol"] = protocol
     if "imu_bus_profile" in current:
         if current["imu_bus_profile"] not in ("legacy", "qinmo"):
-            raise CalibError("imu_bus_profile 只能是 legacy 或 qinmo")
+            raise CalibError("imu_bus_profile must be 'legacy' or 'qinmo'")
         out["imu_bus_profile"] = current["imu_bus_profile"]
 
     raw_mounts = current.get("imu_mounts")
@@ -188,15 +191,17 @@ def build_calibration(current, joints, imu):
             if mount is None:
                 continue
             if not isinstance(mount, dict):
-                raise CalibError(f"imu_mounts.{kind} 不是一个对象")
+                raise CalibError(f"imu_mounts.{kind} must be an object")
             out["imu_mounts"][kind] = {"quat": _quat(mount.get("quat"), f"imu_mounts.{kind}.quat"),
                                        "verified": bool(mount.get("verified", False))}
 
+    if joint_mode == "imu_only":
+        out = {**current, "imu_mounts": dict(current.get("imu_mounts") or {})}
     if not isinstance(imu, dict):
-        raise CalibError("imu 要是一个对象")
+        raise CalibError("imu must be an object")
     source = imu.get("source")
     if source not in IMU_SOURCES:
-        raise CalibError(f"imu.source 只能是 bus / bno08x / lsm6dsv16x，现在是 {source!r}")
+        raise CalibError(f"imu.source must be bus / bno08x / lsm6dsv16x, got {source!r}")
     quat = normalize_quat(imu.get("quat"))
     if source == "bus":
         out["imu_mount_quat"], out["imu_mount_verified"] = quat, True
@@ -210,97 +215,97 @@ def _raw_position(zero_raw, radians, direction):
 
 
 def validate_calibration(cal, source=None):
-    """照 fork robotd 的 Calibration::validate 一条一条查。不过就抛 CalibError，说清哪颗、哪条。"""
+    """Validate against robotd Calibration::validate rules; raises CalibError with details."""
     if not isinstance(cal, dict):
-        raise CalibError("标定不是一个对象")
+        raise CalibError("Calibration must be an object")
     allowed = set(TOP_KEYS) | {"imu_mounts", "joints"}
     extra = sorted(set(cal) - allowed)
     if extra:
-        raise CalibError(f"顶层有不认识的键：{extra}（robotd 会拒绝整个文件）")
+        raise CalibError(f"Unknown top-level keys: {extra} (robotd will reject the file)")
 
     if not isinstance(cal.get("motion_enabled"), bool):
-        raise CalibError("motion_enabled 要是 true / false")
+        raise CalibError("motion_enabled must be true or false")
     if not isinstance(cal.get("imu_mount_verified"), bool):
-        raise CalibError("imu_mount_verified 要是 true / false")
+        raise CalibError("imu_mount_verified must be true or false")
     if "imu_bus_protocol" in cal and cal["imu_bus_protocol"] not in ("feetech", "dxl2"):
-        raise CalibError("imu_bus_protocol 只能是 feetech 或 dxl2")
+        raise CalibError("imu_bus_protocol must be 'feetech' or 'dxl2'")
     if "imu_bus_profile" in cal and cal["imu_bus_profile"] not in ("legacy", "qinmo"):
-        raise CalibError("imu_bus_profile 只能是 legacy 或 qinmo")
+        raise CalibError("imu_bus_profile must be 'legacy' or 'qinmo'")
     if cal.get("imu_bus_profile") == "qinmo" and cal.get("imu_bus_protocol", "feetech") != "feetech":
-        raise CalibError("Qinmo 只支持 Feetech")
+        raise CalibError("Qinmo profile only supports Feetech protocol")
     if not _is_num(cal.get("current_ma_per_count")):
-        raise CalibError("current_ma_per_count 要是有限数")
+        raise CalibError("current_ma_per_count must be a finite number")
     if not isinstance(cal.get("units_verified"), bool):
-        raise CalibError("units_verified 要是 true / false")
+        raise CalibError("units_verified must be true or false")
 
     bus_q = _quat(cal.get("imu_mount_quat"), "imu_mount_quat")
     mounts = cal.get("imu_mounts")
     mounts = mounts if isinstance(mounts, dict) else {}
     if set(mounts) - {"bno08x", "lsm6dsv16x"}:
-        raise CalibError(f"imu_mounts 里有不认识的来源：{sorted(set(mounts) - {'bno08x', 'lsm6dsv16x'})}")
-    checked = [("总线小板", bus_q)]
+        raise CalibError(f"Unknown IMU sources in imu_mounts: {sorted(set(mounts) - {'bno08x', 'lsm6dsv16x'})}")
+    checked = [("Bus IMU", bus_q)]
     for kind in ("bno08x", "lsm6dsv16x"):
         mount = mounts.get(kind)
         if mount is None:
             continue
         if not isinstance(mount, dict):
-            raise CalibError(f"imu_mounts.{kind} 不是一个对象")
+            raise CalibError(f"imu_mounts.{kind} must be an object")
         if not isinstance(mount.get("verified"), bool):
-            raise CalibError(f"imu_mounts.{kind}.verified 要是 true / false")
+            raise CalibError(f"imu_mounts.{kind}.verified must be true or false")
         checked.append((CHIP_CN[kind], _quat(mount.get("quat"), f"imu_mounts.{kind}.quat")))
     for label, q in checked:
         norm = sum(x * x for x in q)
         if not math.isfinite(norm) or abs(norm - 1.0) > 1e-6:
-            raise CalibError(f"{label} 的安装方向四元数不是单位长度（误差要 ≤ 1e-6，现在是 {norm - 1.0:+.2e}）")
+            raise CalibError(f"{label} mount quaternion is not unit length (error {norm - 1.0:+.2e}, max 1e-6)")
 
     if cal.get("units_verified") and float(cal["current_ma_per_count"]) <= 0.0:
-        raise CalibError("units_verified = true 时 current_ma_per_count 必须是正数")
+        raise CalibError("current_ma_per_count must be positive when units_verified = true")
 
     joints = cal.get("joints")
     if not isinstance(joints, list) or len(joints) != 15:
-        raise CalibError("要正好 15 颗关节（官方顺序）")
+        raise CalibError("Exactly 15 joints (in official order) are required")
     seen = set()
     for i, name in enumerate(JOINT_ORDER):
         j = joints[i]
         if not isinstance(j, dict):
-            raise CalibError(f"{name}（第 {i + 1} 颗）不是一个对象")
+            raise CalibError(f"{name} (joint #{i + 1}) must be an object")
         if j.get("name") != name:
-            raise CalibError(f"第 {i + 1} 颗要是 {name}，现在是 {j.get('name')!r}（15 颗必须按官方顺序）")
+            raise CalibError(f"Joint #{i + 1} must be {name}, got {j.get('name')!r} (official order required)")
         jid = j.get("id")
         if not _is_int(jid) or jid >= 254 or jid == 200:
-            raise CalibError(f"{name}：id 要是小于 254 的整数、不能是 200（IMU 小板），现在是 {jid!r}")
+            raise CalibError(f"{name}: id must be < 254 and not 200 (IMU board), got {jid!r}")
         if jid in seen:
-            raise CalibError(f"{name}：id {jid} 跟前面重复了")
+            raise CalibError(f"{name}: duplicate id {jid}")
         seen.add(jid)
         zero = j.get("zero_raw")
         if not _is_int(zero) or not 0 <= zero <= 4095:
-            raise CalibError(f"{name}：zero_raw 要是 0–4095，现在是 {zero!r}")
+            raise CalibError(f"{name}: zero_raw must be 0-4095, got {zero!r}")
         direction = j.get("direction")
         if direction not in (-1, 1):
-            raise CalibError(f"{name}：direction 只能是 1 或 -1，现在是 {direction!r}")
+            raise CalibError(f"{name}: direction must be 1 or -1, got {direction!r}")
         if not isinstance(j.get("calibrated"), bool):
-            raise CalibError(f"{name}：calibrated 要是 true / false")
+            raise CalibError(f"{name}: calibrated must be true or false")
         lo, hi = j.get("min_rad"), j.get("max_rad")
         if lo is None and hi is None:
             if j.get("calibrated"):
-                raise CalibError(f"{name}：标了 calibrated 就必须有限位")
+                raise CalibError(f"{name}: limits are required when calibrated = true")
             continue
         if not (_is_num(lo) and _is_num(hi)):
-            raise CalibError(f"{name}：限位要两个都有、都是有限数")
+            raise CalibError(f"{name}: both min_rad and max_rad must be finite numbers")
         lo, hi = float(lo), float(hi)
         if not lo < hi:
-            raise CalibError(f"{name}：min_rad 要小于 max_rad（{lo:g} / {hi:g}）")
+            raise CalibError(f"{name}: min_rad must be < max_rad ({lo:g} / {hi:g})")
         for edge, value in (("min", lo), ("max", hi)):
             raw = _raw_position(zero, value, direction)
             if not math.isfinite(raw) or not 0.0 <= round(raw) <= 4095.0:
-                raise CalibError(f"{name}：{edge}_rad 换成的读数 {raw:.1f} 不在 0–4095（会跨过单圈边界）")
+                raise CalibError(f"{name}: {edge}_rad maps to raw {raw:.1f}, outside 0-4095")
         home = HOME_RAD[name]
         if not lo <= home <= hi:
-            raise CalibError(f"{name}：限位 {lo:.4f}–{hi:.4f} 没包住官方 HOME {home:.4f}")
+            raise CalibError(f"{name}: limits {lo:.4f}..{hi:.4f} do not include official HOME {home:.4f}")
 
     if cal.get("motion_enabled"):
         if any(not j.get("calibrated") or j.get("min_rad") is None or j.get("max_rad") is None for j in joints):
-            raise CalibError("motion_enabled = true 时 15 颗都要 calibrated 且有限位")
+            raise CalibError("All 15 joints must be calibrated with limits when motion_enabled = true")
         if source in ("bno08x", "lsm6dsv16x"):
             mount = mounts.get(source) or {}
             verified = bool(mount.get("verified")) if isinstance(mount, dict) else False
@@ -310,14 +315,14 @@ def validate_calibration(cal, source=None):
         else:
             verified = bool(cal.get("imu_mount_verified")) or any(
                 isinstance(m, dict) and m.get("verified") for m in mounts.values())
-            label = "正在用的那颗"
+            label = "active"
         if not verified:
-            raise CalibError(f"motion_enabled = true 时正在用的 {label} IMU 方向要 verified")
+            raise CalibError(f"Active {label} IMU mount must be verified when motion_enabled = true")
     return cal
 
 
 def render_calibration(cal):
-    """自己写 TOML：顶层键 → [imu_mounts.*] → [[joints]]。写完要再用 tomllib 读回来核对。"""
+    """Render calibration TOML: top-level keys -> [imu_mounts.*] -> [[joints]]."""
     lines = [
         f"motion_enabled = {_bool_text(cal.get('motion_enabled'))}",
         f"imu_mount_verified = {_bool_text(cal.get('imu_mount_verified'))}",
@@ -327,11 +332,11 @@ def render_calibration(cal):
     ]
     if "imu_bus_protocol" in cal:
         if cal["imu_bus_protocol"] not in ("feetech", "dxl2"):
-            raise CalibError("imu_bus_protocol 只能是 feetech 或 dxl2")
+            raise CalibError("imu_bus_protocol must be 'feetech' or 'dxl2'")
         lines.append(f'imu_bus_protocol = "{cal["imu_bus_protocol"]}"')
     if "imu_bus_profile" in cal:
         if cal["imu_bus_profile"] not in ("legacy", "qinmo"):
-            raise CalibError("imu_bus_profile 只能是 legacy 或 qinmo")
+            raise CalibError("imu_bus_profile must be 'legacy' or 'qinmo'")
         lines.append(f'imu_bus_profile = "{cal["imu_bus_profile"]}"')
     mounts = cal.get("imu_mounts") or {}
     for kind in ("bno08x", "lsm6dsv16x"):
@@ -356,14 +361,14 @@ def render_calibration(cal):
 
 
 def normalized_calibration(cal):
-    """读回来以后比对用：空的 [imu_mounts] 不写出来，读回来就没有这个键。"""
+    """For round-trip comparison: empty [imu_mounts] is omitted when writing TOML."""
     out = dict(cal)
     out["imu_mounts"] = dict(cal.get("imu_mounts") or {})
     return out
 
 
 def same_calibration(a, b):
-    """逐项严格比：TOML 用 repr 写浮点，读回来一定一模一样。"""
+    """Strict structural comparison after TOML round-trip."""
     if isinstance(a, dict) and isinstance(b, dict):
         return set(a) == set(b) and all(same_calibration(a[k], b[k]) for k in a)
     if isinstance(a, list) and isinstance(b, list):
@@ -375,7 +380,7 @@ def same_calibration(a, b):
     return a == b
 
 
-# ---------------- Studio 这边的状态文件 ----------------
+# ---------------- Studio State Files ----------------
 
 def _path(state_dir, name):
     return os.path.join(state_dir or ".", name)
@@ -409,7 +414,7 @@ def _write_json(path, obj):
 
 
 def record_centered(state_dir, ids, by, at=None):
-    """中位校准成功一颗记一颗：{id: {"at": 墙钟, "by": 谁}}。"""
+    """Assign a fresh event ID on each midpoint calibration so prior records are not re-applied."""
     ids = [int(i) for i in ids]
     if not ids:
         return {}
@@ -417,7 +422,7 @@ def record_centered(state_dir, ids, by, at=None):
     data = _read_json(p) or {}
     now = time.time() if at is None else at
     for jid in ids:
-        data[str(jid)] = {"at": now, "by": by or "舵机页"}
+        data[str(jid)] = {"at": now, "by": by or "Servo Page", "event": uuid.uuid4().hex}
     _write_json(p, data)
     return data
 
@@ -436,9 +441,9 @@ def load_centered(state_dir):
 
 
 def save_pending(state_dir, source, quat, quality=None, by=None, at=None, *, imu_bus=None):
-    """IMU 页站着完整校完、结果 ok 的那一份：Studio 重启也不丢。"""
+    """Persist verified standing IMU calibration so it survives Studio restarts."""
     if source not in IMU_SOURCES:
-        raise Refused(f"不认识的 IMU 来源：{source!r}")
+        raise Refused(f"Unknown IMU source: {source!r}")
     row = {"at": time.time() if at is None else at, "by": by, "source": source,
            "quat": normalize_quat(quat), "quality": quality if isinstance(quality, dict) else {}}
     if source == "bus" and imu_bus is not None:
@@ -469,7 +474,7 @@ def clear_pending(state_dir):
 
 
 def pending_matches(pending, source, bus):
-    """旧站姿结果只兼容 Feetech；新结果要跟采数时的总线板卡完全相同。"""
+    """Legacy results match Feetech only; newer results must match the exact bus IMU board."""
     from .imu import bus_imu_of, configured_profile, imu_bus_metadata
     if not pending or pending.get("source") != source:
         return False
@@ -491,7 +496,7 @@ def pending_matches(pending, source, bus):
 
 
 def forget_centered(state_dir, ids):
-    """撤销中位校准时，把那几颗从 servo-centered.json 里删掉。回删掉的 id。"""
+    """Remove specified joint IDs from servo-centered.json when undoing midpoint calibration."""
     p = _path(state_dir, SERVO_CENTERED)
     data = _read_json(p) or {}
     gone = []
@@ -504,7 +509,7 @@ def forget_centered(state_dir, ids):
 
 
 def _load_directions(state_dir):
-    """servo-directions.json 里明确设过的那几颗（只有这些算「Studio 的方向」）；没有就空。"""
+    """Load directions explicitly set on the Servo page; empty if absent."""
     try:
         with open(_path(state_dir, "servo-directions.json"), encoding="utf-8") as f:
             raw = json.load(f)
@@ -519,7 +524,7 @@ def _load_directions(state_dir):
 
 
 def _file_directions(cal):
-    """主程序文件里 15 颗现有的方向 {id: ±1}；读不到的不放。"""
+    """Existing joint directions {id: +/-1} from robotd's calibration file."""
     out = {}
     for j in (cal or {}).get("joints") or []:
         if isinstance(j, dict) and isinstance(j.get("id"), int) and j.get("direction") in (1, -1):
@@ -527,7 +532,7 @@ def _file_directions(cal):
     return out
 
 
-# ---------------- 准备情况 / 预览 / 写入 ----------------
+# ---------------- Readiness / Preview / Commit ----------------
 
 class CommitService:
     def __init__(self, robotd, log, state_dir, simulate=False):
@@ -539,13 +544,21 @@ class CommitService:
         self._file_calib_at = -1e9
         self.cal_from_file = False
         self.job = None
-        self.onboard = None                    # 上手清单（app 接上）：第 1 / 2 步用户标了「已完成」「跳过」，准备情况要知道
+        self.onboard = None                    # Onboarding checklist (wired by app) for step 1/2 marks
         self._writing = threading.Lock()
         self._reload_at = -1e9
         self.reload(force=True)
         self.job = self._job_from_last_result()
 
-    # ---- 状态文件：按修改时间缓存（state.summarize 每帧都会调 view，不能每帧读盘） ----
+    # ---- Cached state files (view() runs every frame) ----
+
+    def stage_import(self, source, quat, by, imu_bus):
+        if not self._writing.acquire(blocking=False):
+            raise Refused("Calibration write in progress; wait until it finishes before importing")
+        try:
+            return save_pending(self.state_dir, source, quat, {"imported": True}, by, imu_bus=imu_bus)
+        finally:
+            self._writing.release()
 
     def _sig(self, path):
         try:
@@ -577,8 +590,7 @@ class CommitService:
                     self.directions = fn()
 
     def _calibration(self, rd=None):
-        """优先用这次 hello 之后的 calibration-status；拿不到时（运动模式卡在 waiting_for_bus）
-        调小助手 calib-read 读文件。文件兜底最多 5 秒问一次，页面每帧不跑 sudo。"""
+        """Prefer calibration-status after current hello; fall back to helper calib-read (throttled to every 5s)."""
         from .robotd import fresh_calib
         from . import helper
         rd = rd or self.rd
@@ -594,7 +606,7 @@ class CommitService:
             self._file_calib_at = now
             self.file_calib = None
             if helper.available():
-                ok, _result, detail = helper.calib_read(by="Studio 准备情况", timeout=10)
+                ok, _result, detail = helper.calib_read(by="Studio readiness", timeout=10)
                 if ok and isinstance(detail, dict) and isinstance(detail.get("calibration"), dict):
                     self.file_calib = {"calibration": detail["calibration"],
                                        "imu_source": detail.get("imu_source"),
@@ -609,12 +621,6 @@ class CommitService:
         rd = rd or self.rd
         return rd.bus.value if isinstance(rd.bus.value, dict) else {}
 
-    def _mtime(self, name):
-        try:
-            return os.stat(_path(self.state_dir, name)).st_mtime_ns
-        except OSError:
-            return None
-
     def _last_commit(self):
         row = _read_json(_path(self.state_dir, COMMIT_LAST))
         return row if isinstance(row, dict) else None
@@ -622,31 +628,49 @@ class CommitService:
     def _dirty(self, cal):
         why = []
         if self.pending:
-            why.append("IMU 方向有新校准还没写")
-        last = self._last_commit() or {}
-        cm = self._mtime(SERVO_CENTERED)
-        if cm is not None and cm > int(last.get("centered_mtime_ns") or -1):
-            why.append("舵机零位记录比上次成功写入新")
-        # 只比舵机页里明确设过方向的那几颗：没设过的写的时候沿用文件里的，不算改动
+            why.append("New IMU orientation calibration has not been written yet")
+        mark, marked_at = self._servo_mark()
+        _, _, fresh = self._center_events(mark, marked_at)
+        if fresh:
+            why.append("Servo zero positions are newer than the last write")
         rows = {j.get("id"): j for j in (cal or {}).get("joints") or [] if isinstance(j, dict)}
-        if rows and any(jid in rows and rows[jid].get("direction") != d for jid, d in self.directions.items()):
-            why.append("舵机页设的方向和主程序文件不一样")
+        if not mark and rows and any(jid in rows and rows[jid].get("direction") != d for jid, d in self.directions.items()):
+            why.append("Servo page directions differ from robotd calibration file")
         return why
 
     def _user_mark(self, step):
-        """上手清单第 step 步是不是用户自己标的（done / skip / None）；没接上清单、出错都当没标。"""
+        """Return user's onboarding mark (done / skip / None) for step; None if unavailable."""
         ob = self.onboard
         if ob is None:
             return None
         try:
             return ob.user_mark(step)
-        except Exception:  # noqa: BLE001 —— 准备情况每帧都算，清单出错不能把它弄没
+        except Exception:  # noqa: BLE001 — readiness runs every frame
             return None
 
+    def _joint_mode(self, mark):
+        if self.pending and (self.pending.get("quality") or {}).get("imported") is True:
+            return "imu_only"
+        return "keep" if mark else "recorded"
+
+    def _center_events(self, mark, marked_at):
+        applied = (self._last_commit() or {}).get("center_events") or {}
+        events = {str(jid): row["event"] for jid, row in self.centered.items() if isinstance(row.get("event"), str)}
+        fresh = {jid for jid, row in self.centered.items() if str(jid) in events
+                 and events[str(jid)] != applied.get(str(jid))
+                 and (not mark or isinstance(marked_at, (int, float)) and row["at"] > marked_at)}
+        return applied, events, fresh
+
+    def _servo_mark(self):
+        # A mark takes effect as soon as it is saved, even before the next UI tick.
+        get_mark = getattr(self.onboard, "servo_mark_record", None)
+        saved = get_mark() if callable(get_mark) else None
+        if isinstance(saved, tuple):
+            return saved
+        return self._user_mark("servo"), None
+
     def _default_imu(self, source, mount, cal, mark=None):
-        """第 2 步标了「已完成」/「跳过」、主程序里正在用的那颗 IMU 方向没确认、也没有 imu-pending.json：
-        按默认装法写这颗、标成已确认（任务 17）。回 {source, quat, label, how, mark}；不该用默认的回 None。
-        有 pending（站着校过）照旧用 pending；方向已确认照旧用主程序的；芯片不知道的不猜。"""
+        """Fallback default IMU mount when step 2 was marked done/skip and IMU is unverified with no pending calibration."""
         if self.pending or source not in IMU_SOURCES or (mount or {}).get("verified") is True:
             return None
         if source == "bus" and (cal or {}).get("imu_bus_profile") == "qinmo":
@@ -682,8 +706,8 @@ class CommitService:
         items = []
 
         online = rd.present is True and isinstance(bus, dict)
-        items.append({"key": "robotd", "label": "主程序", "ok": online,
-                      "text": "主程序在线" if online else "主程序没在跑（或者还没连上）：等几秒；一直不好就去日志页看它为什么没起来", "action": None})
+        items.append({"key": "robotd", "label": "robotd", "ok": online,
+                      "text": "robotd online" if online else "robotd not running (or still connecting); wait a few seconds or check Logs", "action": None})
 
         sample = bus.get("last_sample") if isinstance(bus.get("last_sample"), dict) else {}
         servos = sample.get("servos") if isinstance(sample.get("servos"), list) else []
@@ -696,134 +720,136 @@ class CommitService:
         err = bus.get("error") if isinstance(bus, dict) else None
         wait = startup_wait(bus)
         if not online:
-            mode_ok, mode_text = False, "连上主程序才判得出现在是什么模式"
+            mode_ok, mode_text = False, "Connect to robotd to inspect current mode"
         elif mode == "commissioning" and phase in STARTING_PHASES:
-            # 标定模式的启动报告（还没第一次读成功）：不是「last_sample 里只有 0 颗」。旧 fork 永远停在这里（10-20 真机验收）
             mode_ok = False
             if wait:
-                mode_text = f"标定模式，{wait['text']}（phase={phase}）" + (f"：{err}" if err else "")
+                mode_text = f"Commissioning, {wait['text']} (phase={phase})" + (f": {err}" if err else "")
             elif starting_s is not None and starting_s >= STARTING_LONG_S:
-                mode_text = f"标定模式，主程序一直报「启动中」（phase={phase}，已经 {starting_s} 秒了）：{STILL_STARTING}"
+                mode_text = f"Commissioning, robotd stuck starting (phase={phase}, {starting_s}s): {STILL_STARTING}"
             else:
-                mode_text = f"标定模式，主程序还在启动（phase={phase}）：起来以后才有舵机读数，等几秒"
+                mode_text = f"Commissioning, robotd still starting (phase={phase}); servo telemetry appears once ready"
         elif mode == "commissioning" and phase == "read_error":
-            # 起来了（实时快照），只是这一拍读舵机出错：照原样把主程序的原话带出来
             mode_ok = False
             cycle_err = bus.get("last_cycle_error")
-            mode_text = "标定模式，主程序起来了，但读舵机出错" + (f"：{cycle_err}" if cycle_err else "") + "。先看舵机电源和线"
+            mode_text = "Commissioning, robotd running but servo read failed" + (f": {cycle_err}" if cycle_err else "") + ". Check servo power and cabling"
         elif mode == "commissioning":
             mode_ok = len(servos) == 15 and fresh
-            mode_text = ("标定模式：15 颗舵机都有新读数" if mode_ok
-                         else f"标定模式，但 last_sample 里只有 {len(servos)} 颗舵机" +
-                              ("" if fresh else "、读数已经不新了") + "：先开舵机电源，等几秒")
+            mode_text = ("Commissioning: all 15 servos reporting fresh telemetry" if mode_ok
+                         else f"Commissioning, but only {len(servos)} servos in last_sample" +
+                              ("" if fresh else " (stale)") + "; power on servos and wait a few seconds")
         elif mode == "motion":
             mode_ok = phase == "control"
             if mode_ok:
-                mode_text = "运动模式：总线已经打开"
+                mode_text = "Motion mode: bus open"
             elif wait:
-                mode_text = f"运动模式，{wait['text']}（phase={phase}）" + (f"：{err}" if err else "")
+                mode_text = f"Motion mode, {wait['text']} (phase={phase})" + (f": {err}" if err else "")
             else:
                 err = bus.get("error") if isinstance(bus, dict) else None
-                mode_text = (f"运动模式，但主程序还没进控制阶段（phase={phase or '?'}）"
-                             + (f"：{err}" if err else "")
-                             + "。照日志页的提示处理")
+                mode_text = (f"Motion mode, but robotd is not in control phase yet (phase={phase or '?'})"
+                             + (f": {err}" if err else "")
+                             + ". Follow hints in Logs")
         else:
-            mode_ok, mode_text = False, f"主程序在 {mode or '?'} 模式、{phase or '?'} 阶段"
-        items.append({"key": "mode", "label": "主程序模式", "ok": mode_ok, "text": mode_text,
-                      "action": {"do": "robotd", "label": "去看日志页"} if online and not mode_ok else None,
+            mode_ok, mode_text = False, f"robotd in mode={mode or '?'}, phase={phase or '?'}"
+        items.append({"key": "mode", "label": "robotd Mode", "ok": mode_ok, "text": mode_text,
+                      "action": {"do": "robotd", "label": "View Logs"} if online and not mode_ok else None,
                       "mode": mode, "phase": phase})
 
         safe_ok = True
-        safe_text = "鸭子在走 / 站着：先坐下或卸力再写"
+        safe_text = "Duck is standing/walking: sit down or release torque before writing"
         if mode == "motion" and phase == "control":
             if bus.get("policy_enabled") is True or native.get("torque_state_confirmed") is True:
                 safe_ok = False
         elif mode == "commissioning" and isinstance(bus.get("hold"), dict):
-            # 标定模式「站姿使能」站着：写进主程序会重启主程序，15 颗一下子全卸力，鸭子直接塌
+            # Commissioning stand-hold active: writing restarts robotd and drops all 15 servos limp
             safe_ok = False
-            safe_text = "鸭子在标定模式站着（站姿使能）：先在 IMU 页点「失能」或者顶上「卸力」，扶好再写"
-        items.append({"key": "safety", "label": "鸭子姿势", "ok": safe_ok,
-                      "text": "没在走、没站着，可以写" if safe_ok else safe_text,
+            safe_text = "Duck is standing in commissioning hold: click Disable on IMU page or E-Stop before writing"
+        items.append({"key": "safety", "label": "Posture", "ok": safe_ok,
+                      "text": "Idle/limp, safe to write" if safe_ok else safe_text,
                       "action": None})
 
         missing = [name for name in JOINT_ORDER if JOINT_ID[name] not in self.centered]
         servo_mark = self._user_mark("servo")
         servo_ok = not missing or servo_mark in ("done", "skip")
-        if not missing:
-            servo_text = "15 颗的零位都记在 servo-centered.json 里了"
-        elif servo_mark:
-            # 用户说第 1 步以前做过 / 先不做（用户 10-20：二号鸭零位早校过，以前被逼着重校）：写的时候 15 颗照样按 2048 写
-            servo_text = (("你标了第 1 步已完成" if servo_mark == "done" else "你跳过了第 1 步")
-                          + "：15 颗按 2048 写零位（零位要是用 Studio 的舵机页校过的才对）")
+        joint_mode = self._joint_mode(servo_mark)
+        if joint_mode == "imu_only":
+            servo_ok, servo_text = True, "Writing imported IMU orientation only; preserving all servo calibrations"
+        elif servo_mark in ("done", "skip"):
+            servo_text = (("Step 1 marked done" if servo_mark == "done" else "Step 1 skipped")
+                          + ": keeping existing servo zero offsets and directions in robotd")
+        elif not missing:
+            servo_text = "All 15 servo zero positions recorded in servo-centered.json"
         else:
-            names = "、".join(JOINT_CN.get(n, n) for n in missing[:6]) + ("…" if len(missing) > 6 else "")
-            servo_text = f"还有 {len(missing)} 颗没在一键中位校过：{names}"
-        items.append({"key": "servo", "label": "舵机零位", "ok": servo_ok, "text": servo_text,
-                      "action": {"do": "servos", "label": "去舵机页"} if not servo_ok else None,
+            names = ", ".join(JOINT_CN.get(n, n) for n in missing[:6]) + ("..." if len(missing) > 6 else "")
+            servo_text = f"{len(missing)} servos not yet midpoint-calibrated: {names}"
+        items.append({"key": "servo", "label": "Servo Zeroing", "ok": servo_ok, "text": servo_text,
+                      "action": {"do": "servos", "label": "Open Servo Page"} if not servo_ok else None,
                       "missing": missing, "done": 15 - len(missing), "by_mark": servo_mark if missing else None})
 
-        # 写的方向：舵机页明确设过的用舵机页的，其余沿用主程序文件里现有的（不拿默认 −1 去盖）
+        # Use Servo page directions where explicitly set; preserve file directions otherwise.
         file_dirs = _file_directions(cal)
         final = {jid: self.directions.get(jid, file_dirs.get(jid, -1)) for jid in JOINT_ID.values()}
         changed = [{"id": jid, "name": name, "cn": JOINT_CN.get(name, name), "direction": final[jid]}
                    for name, jid in JOINT_ID.items() if final[jid] != -1]
         changed.sort(key=lambda r: JOINT_ORDER.index(r["name"]))
-        dir_text = ("要写成 +1 的有 " + "、".join(f"{r['cn']}" for r in changed) + "：核对一下方向对不对"
-                    if changed else "15 颗都是 −1")
-        if self.directions:
-            dir_text += "（舵机页设过的用舵机页的，其余沿用主程序文件里的）"
+        dir_text = ("Set to +1: " + ", ".join(f"{r['cn']}" for r in changed) + " (verify direction)"
+                    if changed else "All 15 set to -1")
+        if joint_mode in ("keep", "imu_only"):
+            dir_text, changed = "Keeping existing joint directions from robotd calibration file", []
+        elif self.directions:
+            dir_text += " (using Servo page overrides where set; keeping file defaults otherwise)"
         else:
-            dir_text += "（舵机页没改过方向，沿用主程序文件里的）"
-        items.append({"key": "directions", "label": "方向", "ok": True, "text": dir_text,
-                      "action": {"do": "servos", "label": "去核对方向"} if changed else None, "changed": changed})
+            dir_text += " (no directions changed on Servo page; keeping existing file directions)"
+        items.append({"key": "directions", "label": "Directions", "ok": True, "text": dir_text,
+                      "action": {"do": "servos", "label": "Check Directions"} if changed else None, "changed": changed})
 
         source, mount = mount_of(bus, calib if isinstance(calib, dict) else {})
         mount = mount if isinstance(mount, dict) else {}
         verified = mount.get("verified") is True
         protocol_changed = bus_protocol_mismatch(bus, calib, source)
         if not source:
-            imu_ok, imu_text = False, "主程序还没报用的是哪颗 IMU"
+            imu_ok, imu_text = False, "robotd has not reported which IMU is active yet"
         elif protocol_changed:
-            imu_ok, imu_text = False, "总线 IMU 协议与安装方向标定不匹配：去 IMU 页重新标定，并交给主程序验证"
+            imu_ok, imu_text = False, "Bus IMU protocol does not match mount calibration: recalibrate on IMU page and verify with robotd"
         elif self.pending and self.pending.get("source") != source:
             imu_ok = False
-            imu_text = (f"IMU 芯片换过了（现在用 {CHIP_CN.get(source, source)}，"
-                        f"记下来的是 {self.pending.get('source')}）：重校一次")
+            imu_text = (f"IMU chip changed (active {CHIP_CN.get(source, source)}, "
+                        f"pending {self.pending.get('source')}): recalibrate on IMU page")
         elif self.pending and not pending_matches(self.pending, source, bus):
-            imu_ok, imu_text = False, "IMU 总线板卡已改变：去 IMU 页重新标定"
+            imu_ok, imu_text = False, "Bus IMU board changed: recalibrate on IMU page"
         elif self.pending:
             imu_ok = True
-            imu_text = f"IMU 页校过了（{CHIP_CN.get(source, source)}），写的时候用这份新方向"
+            imu_text = (f"Imported IMU orientation ({CHIP_CN.get(source, source)}) will be written"
+                        if (self.pending.get("quality") or {}).get("imported") is True
+                        else f"Calibrated on IMU page ({CHIP_CN.get(source, source)}); new orientation will be written")
         elif verified:
-            imu_ok, imu_text = True, f"主程序里的 IMU 方向已经确认过（{CHIP_CN.get(source, source)}）"
+            imu_ok, imu_text = True, f"IMU orientation already verified in robotd ({CHIP_CN.get(source, source)})"
         elif mode == "commissioning":
-            imu_ok, imu_text = False, "标定模式：先在 IMU 页粗校一次，交给主程序验证"
+            imu_ok, imu_text = False, "Commissioning mode: run rough calibration on IMU page and verify with robotd"
         else:
-            imu_ok, imu_text = False, "还没在 IMU 页校过安装方向"
+            imu_ok, imu_text = False, "IMU mount orientation not calibrated on IMU page yet"
         imu_mark = self._user_mark("imu")
         imu_default = None
         if not imu_ok and imu_mark and not protocol_changed:
-            said = "你标了第 2 步已完成" if imu_mark == "done" else "你跳过了第 2 步"
+            said = "Step 2 marked done" if imu_mark == "done" else "Step 2 skipped"
             imu_default = self._default_imu(source, mount, cal, imu_mark)
             if imu_default:
-                # 用户 10-21：「我一直跳过跳过，最后还是不进运动模式」「我以前 IMU 已经校准过」：按默认装法写、标成已确认
                 imu_ok = True
-                imu_text = (f"{said}：IMU 按默认装法写（{imu_default['label']}：{imu_default['how']}）。"
-                            "装得不一样的，站起来会往一边倒——写完以后在 IMU 页站着校一次，再写一次主程序")
+                imu_text = (f"{said}: writing default mount for {imu_default['label']} ({imu_default['how']}). "
+                            "If mounted differently it will lean; run standing calibration on IMU page after writing")
             else:
-                # 芯片不知道、或者 IMU 页记下的是另一颗芯片的：没法按默认装法写
-                imu_text = f"{said}，但没法按默认装法写：{imu_text}"
-        items.append({"key": "imu", "label": "IMU 方向", "ok": imu_ok, "text": imu_text,
-                      "action": {"do": "imu", "label": "去 IMU 页"} if not imu_ok else None, "source": source,
+                imu_text = f"{said}, but cannot use default mount: {imu_text}"
+        items.append({"key": "imu", "label": "IMU Orientation", "ok": imu_ok, "text": imu_text,
+                      "action": {"do": "imu", "label": "Open IMU Page"} if not imu_ok else None, "source": source,
                       "default": bool(imu_default)})
 
         servo_open = servo is not None and getattr(servo, "state", None) in ("open", "opening")
-        items.append({"key": "bus", "label": "舵机总线", "ok": not servo_open,
-                      "text": "舵机页正开着总线：先在舵机页点「交还主程序」" if servo_open else "舵机页没开着总线",
-                      "action": {"do": "servos", "label": "去舵机页"} if servo_open else None})
+        items.append({"key": "bus", "label": "Servo Bus", "ok": not servo_open,
+                      "text": "Servo page owns the bus: click 'Hand back to robotd' on Servo page first" if servo_open else "Servo page bus is released",
+                      "action": {"do": "servos", "label": "Open Servo Page"} if servo_open else None})
 
         why = self._dirty(cal)
-        note = ("主程序现在没在用这份标定，下面是文件里的内容" if self.cal_from_file else None)
+        note = ("robotd is not currently using this calibration; showing contents from file" if self.cal_from_file else None)
         return {"ready": all(i["ok"] for i in items), "items": items, "source": source,
                 "imu_default": ({k: imu_default[k] for k in ("source", "label", "how", "quat")} if imu_default else None),
                 "pending": bool(self.pending), "centered": len(self.centered),
@@ -834,7 +860,7 @@ class CommitService:
     def view(self, rd=None, servo=None):
         out = self.readiness(rd, servo)
         job = dict(self.job) if isinstance(self.job, dict) else None
-        # 写成功 2 分钟后收起进度（页面不再把第 3 步那张卡撑开）；失败的一直留着，等人看原因
+        # Collapse progress 2 min after success; keep failures visible
         if job and job.get("ok") and job.get("phase") == "done":
             finished = job.get("finished")
             if isinstance(finished, (int, float)) and time.time() - finished > 120:
@@ -845,18 +871,17 @@ class CommitService:
         return out
 
     def hold_directions(self, rd=None):
-        """标定模式「站姿使能」（fork hold-home）用的 15 颗方向，按 JOINT_ORDER：跟 _payload 写进主程序的同一套
-        （舵机页设过的用舵机页的，其余沿用主程序文件里的）。站起来的样子就是写进去以后运动模式的 HOME。"""
+        """15 joint directions (in JOINT_ORDER) for commissioning stand-hold, matching what commit writes."""
         self.reload()
         cal, _calib = self._calibration(rd or self.rd)
         if not isinstance(cal, dict) or not isinstance(cal.get("joints"), list) or len(cal["joints"]) != 15:
-            raise Refused("还没读到主程序的 15 颗标定：等几秒再试")
+            raise Refused("Have not received 15-joint calibration from robotd yet; wait a few seconds")
         by_name = {j.get("name"): j for j in cal["joints"] if isinstance(j, dict)}
         out = []
         for name in JOINT_ORDER:
             row = by_name.get(name)
             if not isinstance(row, dict) or not _is_int(row.get("id")):
-                raise Refused(f"主程序的标定文件里 {name} 不对：读不到 id")
+                raise Refused(f"Invalid robotd calibration entry for {name}: missing id")
             file_dir = row.get("direction") if row.get("direction") in (1, -1) else -1
             out.append(self.directions.get(row["id"], file_dir))
         return out
@@ -866,33 +891,42 @@ class CommitService:
         rd = rd or self.rd
         cal, calib = self._calibration(rd)
         if not isinstance(cal, dict) or not isinstance(cal.get("joints"), list) or len(cal["joints"]) != 15:
-            raise Refused("还没读到主程序的 15 颗标定：等几秒再试")
+            raise Refused("Have not received 15-joint calibration from robotd yet; wait a few seconds")
         by_name = {j.get("name"): j for j in cal["joints"] if isinstance(j, dict)}
+        mark, marked_at = self._servo_mark()
+        joint_mode = self._joint_mode(mark)
+        applied, events, fresh_ids = self._center_events(mark, marked_at)
+        use_directions = joint_mode == "recorded"
+        if joint_mode == "keep" and fresh_ids:
+            joint_mode = "recorded"
         joints = []
         for name in JOINT_ORDER:
             row = by_name.get(name)
             if not isinstance(row, dict) or not _is_int(row.get("id")):
-                raise Refused(f"主程序的标定文件里 {name} 不对：读不到 id")
+                raise Refused(f"Invalid robotd calibration entry for {name}: missing id")
             file_dir = row.get("direction") if row.get("direction") in (1, -1) else -1
-            joints.append({"id": row["id"], "direction": self.directions.get(row["id"], file_dir)})
+            jid = row["id"]
+            joint = {"id": jid, "direction": self.directions.get(jid, file_dir) if use_directions else file_dir}
+            if joint_mode == "recorded" and jid in fresh_ids:
+                joint["centered"] = True
+            joints.append(joint)
         bus = self._current_bus(rd)
         source, mount = mount_of(bus, calib if isinstance(calib, dict) else {})
         if bus_protocol_mismatch(bus, calib, source):
-            raise Refused("总线 IMU 协议与安装方向标定不匹配：先去 IMU 页重新标定并验证")
+            raise Refused("Bus IMU protocol does not match mount calibration: recalibrate on IMU page and verify with robotd")
         mount = mount if isinstance(mount, dict) else {}
         if source not in IMU_SOURCES:
             if self.pending and self.pending.get("source") in IMU_SOURCES:
                 source = self.pending["source"]
             else:
-                raise Refused("主程序还没报用的是哪颗 IMU：等几秒再试")
-        # 用哪份 IMU 方向：IMU 页站着校过的（pending）> 主程序里已确认的 > 第 2 步标了时的默认装法（任务 17）> 主程序里没确认的
-        # （最后这种只有「先看看要写什么」走得到：准备情况不满足时写不了）
+                raise Refused("robotd has not reported which IMU is active yet; wait a few seconds")
+        # Priority: standing IMU calibration (pending) > verified mount > step 2 default > unverified mount (preview only)
         dflt = None
         if self.pending:
             if self.pending.get("source") != source:
-                raise Refused("IMU 芯片换过了，重校一次")
+                raise Refused("IMU chip changed; recalibrate on IMU page")
             if not pending_matches(self.pending, source, bus):
-                raise Refused("IMU 总线板卡已改变，重校一次")
+                raise Refused("Bus IMU board changed; recalibrate on IMU page")
             quat = self.pending["quat"]
         elif mount.get("verified") is True and mount.get("quat"):
             quat = mount["quat"]
@@ -901,10 +935,11 @@ class CommitService:
         elif mount.get("quat"):
             quat = mount["quat"]
         else:
-            raise Refused("IMU 方向还没读到：等主程序报上来，或者去 IMU 页校一次")
-        out = {"joints": joints, "imu": {"source": source, "quat": list(quat)}}
+            raise Refused("IMU orientation unavailable yet; wait for robotd or calibrate on IMU page")
+        out = {"joints": joints, "imu": {"source": source, "quat": list(quat)}, "joint_mode": joint_mode}
+        out["center_events"] = applied if joint_mode == "imu_only" else events
         if dflt:
-            out["imu_default"] = dflt["how"]          # 只给预览 / 日志看；交给小助手的 imu 照旧只有 {source, quat}
+            out["imu_default"] = dflt["how"]          # Preview/log only; helper receives {source, quat}
         return out
 
     def _summary(self, payload, toml, used_helper):
@@ -913,19 +948,17 @@ class CommitService:
         q = payload["imu"]["quat"]
         desc = describe_mount(q)
         rows = []
-        for name in JOINT_ORDER:
-            jid = JOINT_ID[name]
-            row = next((j for j in payload["joints"] if j["id"] == jid), None)
-            if row is None:
-                continue
-            lo, hi = LIMITS_DEG[name]
-            rows.append({"name": name, "cn": JOINT_CN.get(name, name), "id": jid, "direction": row["direction"],
-                         "min_deg": lo, "max_deg": hi})
+        for row in tomllib.loads(toml)["joints"]:
+            name = row["name"]
+            rows.append({"name": name, "cn": JOINT_CN.get(name, name), "id": row["id"],
+                         "direction": row["direction"], "zero_raw": row["zero_raw"],
+                         "min_deg": round(math.degrees(row["min_rad"]), 3) if row.get("min_rad") is not None else None,
+                         "max_deg": round(math.degrees(row["max_rad"]), 3) if row.get("max_rad") is not None else None})
         return {"imu": {"source": payload["imu"]["source"], "label": CHIP_CN.get(payload["imu"]["source"]),
                         "text": desc["text"], "off_deg": desc["off_deg"], "quat": list(q),
                         "default": payload.get("imu_default")},
                 "joints": rows, "toml": toml, "helper": used_helper,
-                "from_file": bool(self.cal_from_file), "note": "主程序现在没在用这份标定，下面是文件里的内容" if self.cal_from_file else None}
+                "from_file": bool(self.cal_from_file), "note": "robotd is not currently using this calibration; showing contents from file" if self.cal_from_file else None}
 
     def preview(self, by=None, rd=None):
         from . import helper
@@ -934,26 +967,26 @@ class CommitService:
         cal, _ = self._calibration(rd)
         if helper.available():
             ok, result, detail = helper.calib_commit(by or "Studio", payload["joints"], payload["imu"],
-                                                     dry_run=True, timeout=90)
+                                                     dry_run=True, timeout=90, joint_mode=payload["joint_mode"])
             if not ok:
                 raise Refused(helper.friendly(result, detail, "calib-commit"))
             toml = (detail or {}).get("toml")
             if not isinstance(toml, str) or not toml.strip():
-                raise Refused("小助手没回要写的内容")
+                raise Refused("Helper returned empty calibration preview")
             return self._summary(payload, toml, True)
-        built = build_calibration(cal, payload["joints"], payload["imu"])
+        built = build_calibration(cal, payload["joints"], payload["imu"], payload["joint_mode"])
         validate_calibration(built, payload["imu"]["source"])
         return self._summary(payload, render_calibration(built), False)
 
     def _record_success(self, payload):
-        row = {"at": time.time(), "directions": {str(j["id"]): j["direction"] for j in payload["joints"]},
-               "centered_mtime_ns": self._mtime(SERVO_CENTERED), "imu_source": payload["imu"]["source"],
+        row = {"at": time.time(), "center_events": payload["center_events"], "directions": {str(j["id"]): j["direction"] for j in payload["joints"]},
+               "imu_source": payload["imu"]["source"],
                "imu_quat": list(payload["imu"]["quat"])}
         try:
             _write_json(_path(self.state_dir, COMMIT_LAST), row)
             self._mt["commit-last"] = self._sig(_path(self.state_dir, COMMIT_LAST))
         except OSError as e:
-            self.log.warn("写成功记录写不下来（不影响主程序里的标定）", cat="校准", raw=f"{type(e).__name__}: {e}")
+            self.log.warn("Failed to record commit-last.json (robotd calibration is unaffected)", cat="Calibration", raw=f"{type(e).__name__}: {e}")
 
     @staticmethod
     def _job_from_result(row):
@@ -963,7 +996,7 @@ class CommitService:
         ok = row.get("exit") == 0
         return {"phase": "done" if ok else "failed", "ok": ok, "reason": row.get("reason") or detail.get("msg"),
                 "started": row.get("wall"), "finished": row.get("wall"), "detail": detail,
-                "from_last_result": True, "msg": "上次写入的结果" if ok else "上次写入没成"}
+                "from_last_result": True, "msg": "Last write result" if ok else "Last write failed"}
 
     def _job_from_last_result(self):
         from . import helper
@@ -972,13 +1005,13 @@ class CommitService:
     def commit(self, by=None, progress=None, rd=None):
         from . import helper
         if not self._writing.acquire(blocking=False):
-            return {"ok": False, "reason": "已经在写了，等它跑完", "busy": True}
+            return {"ok": False, "reason": "Write already in progress; please wait", "busy": True}
         started_wall = time.time()
         try:
             by = by or "Studio"
             self.reload(force=True)
             payload = self._payload(rd)
-            self.job = {"phase": "running", "msg": "准备写入", "started": started_wall, "steps": []}
+            self.job = {"phase": "running", "msg": "Preparing write", "started": started_wall, "steps": []}
 
             def say(msg, detail=None):
                 self.job["msg"] = msg
@@ -989,30 +1022,30 @@ class CommitService:
                     except Exception:  # noqa: BLE001
                         pass
 
-            say("准备写入")
+            say("Preparing write")
             if payload.get("imu_default"):
                 src = payload["imu"]["source"]
-                self.log.info(f"IMU 按默认装法写（{CHIP_CN.get(src, src)}：{payload['imu_default']}）：第 2 步标了已完成 / 跳过，"
-                              "主程序里方向没确认、IMU 页也没校过", cat="校准", raw=json.dumps(payload["imu"]),
-                              hint="装得不一样的站起来会往一边倒：写完在 IMU 页站着校一次，再写一次主程序")
+                self.log.info(f"Writing default IMU mount ({CHIP_CN.get(src, src)}: {payload['imu_default']}): step 2 marked done/skip "
+                              "with no verified or pending IMU calibration", cat="Calibration", raw=json.dumps(payload["imu"]),
+                              hint="If mounted differently, the duck will lean; run standing calibration on IMU page and re-commit")
             if self.simulate:
                 cal, _ = self._calibration(rd)
-                built = build_calibration(cal, payload["joints"], payload["imu"])
+                built = build_calibration(cal, payload["joints"], payload["imu"], payload["joint_mode"])
                 validate_calibration(built, payload["imu"]["source"])
                 toml = render_calibration(built)
-                say("电脑演示：没有真的写主程序")
+                say("Desktop demo: did not write robotd config")
                 clear_pending(self.state_dir)
                 self._record_success(payload)
                 self.reload(force=True)
                 done = time.time()
-                self.job.update({"phase": "done", "ok": True, "reason": "电脑演示：写好了（没有真的改文件）",
+                self.job.update({"phase": "done", "ok": True, "reason": "Desktop demo: simulated write succeeded (no files modified)",
                                  "toml": toml, "finished": done})
-                self.log.info("写进主程序（电脑演示，没有真的写）", cat="校准", raw=toml[:2000])
+                self.log.info("Write to robotd (desktop demo, simulated)", cat="Calibration", raw=toml[:2000])
                 return {"ok": True, "reason": self.job["reason"], "detail": {"simulate": True}}
             if not helper.available():
-                reason = "电脑上不能写主程序"
+                reason = "Cannot write to robotd on desktop"
                 self.job.update({"phase": "failed", "ok": False, "reason": reason, "finished": time.time()})
-                self.log.warn(reason, cat="校准", hint="写进主程序要在鸭子上做（装 deploy 里的小助手）")
+                self.log.warn(reason, cat="Calibration", hint="Writing to robotd requires running on the duck with microduck-helper installed")
                 return {"ok": False, "reason": reason, "detail": {"rolled_back": False}}
 
             def on_line(obj):
@@ -1022,9 +1055,9 @@ class CommitService:
                         return
                     say(msg, {"step": step, "level": obj.get("level")})
 
-            say("写文件、切模式、重启主程序（最多 180 秒）")
+            say("Writing config, switching mode, and restarting robotd (up to 180s)")
             ok, result, detail = helper.calib_commit(by, payload["joints"], payload["imu"], dry_run=False,
-                                                     timeout=COMMIT_WAIT_S, on_line=on_line)
+                                                     timeout=COMMIT_WAIT_S, on_line=on_line, joint_mode=payload["joint_mode"])
             from_last = False
             if result == "TimeoutExpired":
                 last = helper.last_result()
@@ -1033,38 +1066,39 @@ class CommitService:
                     d["msg"] = last.get("reason") or d.get("msg")
                     ok, result, detail, from_last = last.get("exit") == 0, last.get("result"), d, True
                 else:
-                    reason = "等了 180 秒小助手还没回最终结果；它可能还在独立单元里跑。过一会儿看日志页或重新打开 Studio"
+                    reason = "Helper did not return final result within 180s; it may still be running. Check Logs or reopen Studio shortly"
                     self.job.update({"phase": "failed", "ok": False, "reason": reason, "finished": time.time()})
-                    self.log.warn(reason, cat="校准", hint="小助手的结果会写进 /run/microduck-helper/last-result.json")
+                    self.log.warn(reason, cat="Calibration", hint="Helper writes final status to /run/microduck-helper/last-result.json")
                     return {"ok": False, "reason": reason, "detail": {"rolled_back": False}}
             if ok:
                 clear_pending(self.state_dir)
                 self._record_success(payload)
                 self.reload(force=True)
-                reason = "写进主程序了，主程序进了运动模式"
+                reason = ("Wrote IMU orientation and preserved all servo calibrations" if payload["joint_mode"] == "imu_only" else
+                          "Calibration written to robotd; switched to motion mode")
                 self.job.update({"phase": "done", "ok": True, "reason": reason, "finished": time.time(),
                                  "from_last_result": from_last, "detail": detail or {}})
-                self.log.info(reason, cat="校准", raw=json.dumps(detail or {}, ensure_ascii=False)[:2000])
+                self.log.info(reason, cat="Calibration", raw=json.dumps(detail or {}, ensure_ascii=False)[:2000])
                 return {"ok": True, "reason": reason, "detail": detail or {}}
             reason = helper.friendly(result, detail, "calib-commit")
             rolled = bool((detail or {}).get("rolled_back"))
             self.job.update({"phase": "failed", "ok": False, "reason": reason, "rolled_back": rolled,
                              "finished": time.time(), "from_last_result": from_last, "detail": detail or {}})
-            self.log.error(f"写进主程序没成：{reason}", cat="校准", raw=json.dumps(detail or {}, ensure_ascii=False)[:4000],
-                           hint="看日志里小助手附的主程序最后几行；原来的文件已经换回去了" if rolled else "看日志里小助手的话")
+            self.log.error(f"Write to robotd failed: {reason}", cat="Calibration", raw=json.dumps(detail or {}, ensure_ascii=False)[:4000],
+                           hint="Check the trailing robotd lines in Logs; previous config was restored" if rolled else "Check helper details in Logs")
             return {"ok": False, "reason": reason, "detail": detail or {}}
         except (Refused, CalibError) as e:
             reason = str(e)
             self.job = {"phase": "failed", "msg": reason, "ok": False, "reason": reason,
                         "started": started_wall, "finished": time.time()}
-            self.log.warn(f"写进主程序没开始：{reason}", cat="校准")
+            self.log.warn(f"Write to robotd did not start: {reason}", cat="Calibration")
             return {"ok": False, "reason": reason, "detail": {"rolled_back": False}}
         except Exception as e:  # noqa: BLE001
-            reason = f"Studio 出错：{type(e).__name__}: {e}"
+            reason = f"Studio error: {type(e).__name__}: {e}"
             self.job = {"phase": "failed", "msg": reason, "ok": False, "reason": reason,
                         "started": started_wall, "finished": time.time()}
-            self.log.error("写进主程序时 Studio 出错", cat="校准", raw=reason, exc=True,
-                           hint="原来的文件没动；导出诊断包发出来")
+            self.log.error("Studio error while writing calibration", cat="Calibration", raw=reason, exc=True,
+                           hint="Original files untouched; export a diagnostic bundle")
             return {"ok": False, "reason": reason, "detail": {"rolled_back": False}}
         finally:
             self._writing.release()
