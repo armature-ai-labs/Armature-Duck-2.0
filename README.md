@@ -1,282 +1,272 @@
 # Armature Duck 2.0 (Indie Duck)
 
-[![快速上手指南](https://img.shields.io/badge/指南-快速上手-blue)](GETTING_STARTED.md)
-[![硬件 BOM](https://img.shields.io/badge/硬件-电子物料BOM-brightgreen)](BOM/Microduck_Replica_Electronics_BOM.xlsx)
+[![Getting Started](https://img.shields.io/badge/Guide-Getting%20Started-blue)](GETTING_STARTED.md)
+[![Hardware BOM](https://img.shields.io/badge/Hardware-Electronics%20BOM-brightgreen)](BOM/Microduck_Replica_Electronics_BOM.xlsx)
 
-**简体中文** · [English](README.en.md)
+**English** · [简体中文](README.zh-CN.md)
 
-基于 [Pollen Robotics Microduck](https://pollen-robotics.com/microduck/) 的第三方整机复刻项目，提供从采购、打印、装配到标定、控制和训练的资料。配备全新的英文/国际化 Web 中控控制台与完整电子物料清单。
+An open-source autonomous bipedal robot duck replica project based on [Pollen Robotics' Microduck](https://pollen-robotics.com/microduck/), featuring a complete bill of materials, printable CAD assemblies, real-time control, and an English-localized web management console (**Microduck Studio**).
 
-> 🚀 **新手指南：查看 [快速上手指南 (GETTING_STARTED.md)](GETTING_STARTED.md) 了解从零组装与配置 Indie Duck 的完整流程！**
+> 🚀 **New to the project? Read the [Getting Started Guide (GETTING_STARTED.md)](GETTING_STARTED.md) to build or resume your own Indie Duck!**
 
 
-## 按主板下载镜像
+## Download the image for your board
 
-先看主板丝印。**Radxa ZERO 3W** 和 **Radxa Cubie A7Z** 用不同的镜像，烧卡前请核对下载页和主板上的完整型号。
+Check the model printed on the board. **Radxa ZERO 3W** and **Radxa Cubie A7Z** use different images. Match the full board model to the release before flashing.
 
-| 主板 | 镜像下载 | 首次使用 |
+| Board | Image download | First use |
 |---|---|---|
-| **Radxa ZERO 3W** | [ZERO 3W · 20261112 RC4 测试镜像](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-replica-image-zero3w-20261112-rc4) · [旧版正式镜像](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-replica-image-20261027) | [ZERO 3W 烧录与配网](software/image/烧录和第一次使用.md) |
-| **Radxa Cubie A7Z** | [Cubie A7Z 预览镜像](https://github.com/Liangjin5437/microduck-replica/releases/tag/a7z-duck-image-20261109-preview1) | [A7Z 烧录与配网](radxa-cubie-a7z/image/README.md) |
+| **Radxa ZERO 3W** | [ZERO 3W · 20261112 RC4 test image](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-replica-image-zero3w-20261112-rc4) · [Previous stable image](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-replica-image-20261027) | [ZERO 3W flashing and setup](software/image/烧录和第一次使用.md) |
+| **Radxa Cubie A7Z** | [Cubie A7Z preview image](https://github.com/Liangjin5437/microduck-replica/releases/tag/a7z-duck-image-20261109-preview1) | [A7Z flashing and setup](radxa-cubie-a7z/image/README.md) |
 
-**飞特 HD-1910 版本已完成整机实机验证：站立、行走、前滚翻后起身均已跑通。** 主线使用 **15 颗飞特 HD-1910 舵机**，提供可烧录的**复刻镜像**和 **Microduck Studio 网页中控**，通过手机或电脑浏览器完成配网、标定和遥控。
+**The Feetech HD-1910 build has passed real hardware validation: standing, walking, a forward roll and standing back up.** Our main build uses **15 Feetech HD-1910 servos**. We provide a **ready-to-flash system image** and the **Microduck Studio web console** for Wi-Fi setup, calibration, and remote control from a phone or computer browser.
 
-**首次上手流程已在实机跑通：** 烧录镜像 → 热点配网 → 舵机与 IMU 标定 → 配手柄、测试急停 → 站立行走。[查看实机验证记录](docs/历史更新.md#最近更新)
+**The first-use workflow has also been completed on real hardware:** flash the image → hotspot and Wi-Fi setup → servo and IMU calibration → gamepad pairing and e-stop test → stand and walk. [Real hardware validation records](docs/update-history.en.md#latest)
 
-## 鸭子现在的样子
+## The ducks in action
 
-**2026-10-24 · 实机运动验证通过**：下方两段实拍视频分别展示前滚翻后起身和桌面行走。
+**2026-10-24 · Motion validated on real hardware**: the two recordings below show a forward roll followed by standing back up, and walking on a tabletop.
 
 <table>
 <tr>
-<th align="center">前滚翻与起身</th>
-<th align="center">桌面行走</th>
+<th align="center">Forward roll and recovery</th>
+<th align="center">Tabletop walking</th>
 </tr>
 <tr>
-<td align="center" valign="middle"><a href="assets/demos/2026-10-24-roll-and-rise.mp4"><img src="assets/demos/2026-10-24-roll-and-rise.gif" alt="实机完成前滚翻后重新站起" width="260"></a></td>
-<td align="center" valign="middle"><a href="assets/demos/2026-10-24-walking.mp4"><img src="assets/demos/2026-10-24-walking.gif" alt="飞特版鸭子在桌面上迈步行走" width="400"></a></td>
+<td align="center" valign="middle"><a href="assets/demos/2026-10-24-roll-and-rise.mp4"><img src="assets/demos/2026-10-24-roll-and-rise.gif" alt="A real duck performs a forward roll and stands back up" width="260"></a></td>
+<td align="center" valign="middle"><a href="assets/demos/2026-10-24-walking.mp4"><img src="assets/demos/2026-10-24-walking.gif" alt="A Feetech duck walks on a tabletop" width="400"></a></td>
 </tr>
 <tr>
-<td align="center"><a href="assets/demos/2026-10-24-roll-and-rise.mp4">完整 MP4 · 约 8 秒</a></td>
-<td align="center"><a href="assets/demos/2026-10-24-walking.mp4">完整 MP4 · 约 6 秒</a></td>
+<td align="center"><a href="assets/demos/2026-10-24-roll-and-rise.mp4">Full MP4 · about 8 seconds</a></td>
+<td align="center"><a href="assets/demos/2026-10-24-walking.mp4">Full MP4 · about 6 seconds</a></td>
 </tr>
 </table>
 
-动图为无声预览，MP4 保留完整画面和声音。
+The GIFs are silent previews; the MP4 files include the complete video and audio.
 
-**[按主板下载镜像](#按主板下载镜像)** · **[首次使用指南（PDF / 网页）](docs/上手指南/README.md)** · **[CAD 与打印件](https://github.com/fanhao375/microduck-replica-cad)** · **[装配教程](#-装配视频教程)** · **[BOM 采购清单](BOM/README.md)** · **[硬件工程](hardware/README.md)**
-
----
-
-### 适用版本
-
-- **飞特 HD-1910 + Radxa Zero 3W**：使用本仓复刻镜像和 Studio 网页中控。
-- **飞特 HD-1910 + Radxa Cubie A7Z（预览）**：[适配源码与说明](radxa-cubie-a7z/README.md) · [按主板下载镜像](#按主板下载镜像)。预览镜像的实机验收范围见发布页。
-- **Dynamixel XL330**：提供对应 CAD 与装配资料，需使用匹配的运行软件。
-
-[选择打印件与采购清单](#打印件与采购清单) · [查看舵机详细对比](docs/执行器选型.md)
+**[Download the image for your board](#download-the-image-for-your-board)** · **[First-use guide (PDF / web)](docs/上手指南/README.md)** · **[CAD and print files](https://github.com/fanhao375/microduck-replica-cad)** · **[Assembly tutorials](#-assembly-videos)** · **[BOM shopping list](BOM/README.md)** · **[Hardware projects](hardware/README.md)**
 
 ---
 
-## 交流群
+### Supported builds
 
-有人在做同样的事，凑了个微信群一起讨论复刻进度、踩过的坑、元件采购。
+- **Feetech HD-1910 + Radxa Zero 3W**: use this repository's system image and Studio web console.
+- **Feetech HD-1910 + Radxa Cubie A7Z (preview)**: [port sources and notes](radxa-cubie-a7z/README.md) · [download the image for your board](#download-the-image-for-your-board). See the release for the preview's hardware validation status.
+- **Dynamixel XL330**: matching CAD and assembly resources are available; use compatible runtime software.
 
-下面是**鸭子复刻群 16**的二维码（微信群满 200 人后无法扫码加入）。
+[Choose print files and shopping list](#print-files-and-shopping-list) · [Detailed servo comparison](docs/actuator-selection.en.md)
+
+---
+
+## Community
+
+A WeChat group for people working on the same thing — build progress, pitfalls, sourcing.
+
+The code below is for **Duck Replica Group 16** (WeChat disables QR joins once a group reaches 200 members).
 
 <div align="center">
-  <img src="assets/wechat-group-16.png" alt="鸭子复刻群 16 微信二维码" width="280">
+  <img src="assets/wechat-group-16.png" alt="Duck Replica Group 16 WeChat QR code" width="280">
   <br>
-  <sub><b>鸭子复刻群 16 · 二维码在 2026-11-20 前有效</b>（微信群码 7 天自动失效）<br>
-  过期了请开个 <a href="https://github.com/fanhao375/microduck-replica/issues">issue</a> 说一声，我会换上新的</sub>
+  <sub><b>Duck Replica Group 16 · QR code valid before 2026-11-20</b> — WeChat group codes are valid for 7 days<br>
+  If it has expired, open an <a href="https://github.com/fanhao375/microduck-replica/issues">issue</a> and I will post a fresh one</sub>
 </div>
 
 ---
 
-## 📺 装配视频教程
+## 📺 Assembly videos
 
-**[B 站合集《MicroDuck 从零安装教程》](https://space.bilibili.com/312747174/lists/9279084?type=season)** —— CAD 图纸和装配 BOM 的作者 **机械行者Robo** 录的，从零件清单讲起，一集装一个部件。共 8 集，截至 2026-10-12 已更新 6 集：
+**[Bilibili series "MicroDuck 从零安装教程" (assembly from scratch)](https://space.bilibili.com/312747174/lists/9279084?type=season)** — recorded by **机械行者Robo**, who modelled the CAD and wrote the assembly BOM. It starts from the parts list and builds one subassembly per episode. Narration is in Chinese, but the hands-on footage is easy to follow. 6 of 8 episodes are out as of 2026-10-12:
 
-分集目录右侧是作者账号，依次为 **B 站、小红书、抖音**，可扫码或点击图片进入。
+The creator's accounts sit beside the episode list: **Bilibili, Xiaohongshu (RED), then Douyin**. Scan a code or click its image to open the account.
 
 <table>
 <thead>
-<tr><th>集</th><th>内容</th><th nowrap>时长</th><th>B 站</th><th>小红书</th><th>抖音</th></tr>
+<tr><th>Episode</th><th>Content</th><th nowrap>Length</th><th>Bilibili</th><th>Xiaohongshu</th><th>Douyin</th></tr>
 </thead>
 <tbody>
 <tr>
-<td nowrap><a href="https://www.bilibili.com/video/BV1RoHX68EFV/">第 1 集</a></td><td width="260"><a href="https://www.bilibili.com/video/BV1RoHX68EFV/">零件与配件清单</a></td><td nowrap>1:32</td>
-<td rowspan="6" align="center" valign="middle" width="210"><a href="https://space.bilibili.com/312747174"><img src="assets/social/bilibili-qr.jpg" alt="B 站：机械行者Robo" width="200"></a><br><sub><b>机械行者Robo</b><br>UID 312747174</sub></td>
-<td rowspan="6" align="center" valign="middle" width="210"><a href="https://www.xiaohongshu.com/user/profile/5ad950114eacab046016f038"><img src="assets/social/xiaohongshu-qr.jpg" alt="小红书：机械行者" width="200"></a><br><sub><b>机械行者</b><br>小红书号 270594280</sub></td>
-<td rowspan="6" align="center" valign="middle" width="210"><a href="https://www.douyin.com/user/MS4wLjABAAAArLa_6yE3GE-AoRURoQnIHdbbI7yM-GHhzlgLZ-XbeYE"><img src="assets/social/douyin-qr.jpg" alt="抖音：机械行者Robo" width="200"></a><br><sub><b>机械行者Robo</b><br>抖音号 1852366168</sub></td>
+<td nowrap><a href="https://www.bilibili.com/video/BV1RoHX68EFV/">1</a></td><td width="260"><a href="https://www.bilibili.com/video/BV1RoHX68EFV/">Parts and hardware list</a></td><td nowrap>1:32</td>
+<td rowspan="6" align="center" valign="middle" width="210"><a href="https://space.bilibili.com/312747174"><img src="assets/social/bilibili-qr.jpg" alt="Bilibili: 机械行者Robo" width="200"></a><br><sub><b>机械行者Robo</b><br>UID 312747174</sub></td>
+<td rowspan="6" align="center" valign="middle" width="210"><a href="https://www.xiaohongshu.com/user/profile/5ad950114eacab046016f038"><img src="assets/social/xiaohongshu-qr.jpg" alt="Xiaohongshu: 机械行者" width="200"></a><br><sub><b>机械行者</b><br>ID 270594280</sub></td>
+<td rowspan="6" align="center" valign="middle" width="210"><a href="https://www.douyin.com/user/MS4wLjABAAAArLa_6yE3GE-AoRURoQnIHdbbI7yM-GHhzlgLZ-XbeYE"><img src="assets/social/douyin-qr.jpg" alt="Douyin: 机械行者Robo" width="200"></a><br><sub><b>机械行者Robo</b><br>ID 1852366168</sub></td>
 </tr>
-<tr><td nowrap><a href="https://www.bilibili.com/video/BV1Xppb6tECr/">第 2 集</a></td><td><a href="https://www.bilibili.com/video/BV1Xppb6tECr/">小腿安装</a></td><td nowrap>2:21</td></tr>
-<tr><td nowrap><a href="https://www.bilibili.com/video/BV1ycpb6yEwB/">第 3 集</a></td><td><a href="https://www.bilibili.com/video/BV1ycpb6yEwB/">大腿安装</a></td><td nowrap>5:13</td></tr>
-<tr><td nowrap><a href="https://www.bilibili.com/video/BV1Kwpg6wE9G/">第 4 集</a></td><td><a href="https://www.bilibili.com/video/BV1Kwpg6wE9G/">躯干组件安装</a></td><td nowrap>2:29</td></tr>
-<tr><td nowrap><a href="https://www.bilibili.com/video/BV1EEpg6nEkD/">第 5 集</a></td><td><a href="https://www.bilibili.com/video/BV1EEpg6nEkD/">颈部安装</a></td><td nowrap>0:40</td></tr>
-<tr><td nowrap><a href="https://www.bilibili.com/video/BV1aKpE6hEzj/">第 6 集</a></td><td><a href="https://www.bilibili.com/video/BV1aKpE6hEzj/">头部安装</a></td><td nowrap>5:50</td></tr>
+<tr><td nowrap><a href="https://www.bilibili.com/video/BV1Xppb6tECr/">2</a></td><td><a href="https://www.bilibili.com/video/BV1Xppb6tECr/">Lower legs</a></td><td nowrap>2:21</td></tr>
+<tr><td nowrap><a href="https://www.bilibili.com/video/BV1ycpb6yEwB/">3</a></td><td><a href="https://www.bilibili.com/video/BV1ycpb6yEwB/">Thighs</a></td><td nowrap>5:13</td></tr>
+<tr><td nowrap><a href="https://www.bilibili.com/video/BV1Kwpg6wE9G/">4</a></td><td><a href="https://www.bilibili.com/video/BV1Kwpg6wE9G/">Torso</a></td><td nowrap>2:29</td></tr>
+<tr><td nowrap><a href="https://www.bilibili.com/video/BV1EEpg6nEkD/">5</a></td><td><a href="https://www.bilibili.com/video/BV1EEpg6nEkD/">Neck</a></td><td nowrap>0:40</td></tr>
+<tr><td nowrap><a href="https://www.bilibili.com/video/BV1aKpE6hEzj/">6</a></td><td><a href="https://www.bilibili.com/video/BV1aKpE6hEzj/">Head</a></td><td nowrap>5:50</td></tr>
 </tbody>
 </table>
 
-### 打印件与采购清单
+### Print files and shopping list
 
-先按舵机版本选择打印资料，再准备对应的外购件。
+Choose print resources for your servo version, then prepare the matching purchased parts.
 
-| 资料 | 适用版本 | 入口 |
+| Resource | Servo version | Where to find it |
 |---|---|---|
-| **打印件与 CAD** | **飞特 HD-1910** | [进入飞特版专区](https://github.com/fanhao375/microduck-replica-cad#飞特-hd-1910-打印资料)：打印工程、CAD 源文件和更新说明 |
-| **打印件与 CAD** | **Dynamixel XL330** | [进入 XL330 版专区](https://github.com/fanhao375/microduck-replica-cad#dynamixel-xl330-打印资料)：对应版本的 CAD 源文件与打印说明 |
-| **装配采购清单** | **飞特 HD-1910** | **[在线预览](BOM/README.md)** · **[下载 Excel](BOM/装配BOM-机械行者Robo-2026-10-23-带采购链接.xlsx)**：机械行者Robo整理，2026-10-23 版，含数量、材料和采购链接 |
+| **Print files and CAD** | **Feetech HD-1910** | [Feetech section](https://github.com/fanhao375/microduck-replica-cad#飞特-hd-1910-打印资料): print project, CAD sources and update notes |
+| **Print files and CAD** | **Dynamixel XL330** | [XL330 section](https://github.com/fanhao375/microduck-replica-cad#dynamixel-xl330-打印资料): matching CAD sources and printing instructions |
+| **Assembly shopping list** | **Feetech HD-1910** | **[Online preview](BOM/README.md)** · **[Download Excel](BOM/装配BOM-机械行者Robo-2026-10-23-带采购链接.xlsx)**: compiled by 机械行者Robo, dated 2026-10-23, with quantities, materials and purchase links |
 
-两种舵机的配合件不能混用。打印文件的具体版本和更新日期在 CAD 仓库对应专区维护；这份采购清单按飞特方案整理，XL330 的舵机及配套电控需另行核对。
-
----
-
-## 现在做到哪了
-
-截至 **2026-10-25**，**飞特版整机复刻、首次上手与实机运动链路已跑通**。下面介绍各部分成果与后续拓展项目，具体测试范围及历史过程见[更新记录](docs/历史更新.md)。
+Mating parts from the two servo versions are not interchangeable. File versions and update dates are maintained in the respective CAD sections. This shopping list follows the Feetech build; XL330 servos and associated electronics need separate checks.
 
 ---
 
-## 💻 软件 · 复刻镜像与 Microduck Studio
+## Where things stand
 
-**2026-10-31 修订 · 2026.10.3101：嘴巴34／偏航32图示修正**：修复3D模型两颗舵机外壳配反及旧模型缓存，点选、高亮和编号引线保持一致，不互换实物ID。已有27版更新入口可直接安装，31版也可升级；配套原生程序沿用31版，不重烧镜像。[软件修订包](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-software-v2026.10.3101) · [更新步骤与群14资料](docs/软件修订-20261031-r1.md)
-
-**2026-10-31 · 软件包更新：手柄重新映射、摄像头原地放大与 SSH 指引**：已有27版更新入口的设备安装软件包即可，不重烧镜像。手柄学习按键、摇杆与扳机后保存配置；驱动需按页面提示单独确认安装，不能只更新网页。原27版升级器、Linux 映射与服务权限检查已通过，新手柄驱动的实物安装和各型号手柄仍待验收。[软件包与首次引导附件](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-software-v2026.10.31) · [操作步骤与验证范围](docs/功能软件升级-20261030.md)
-
-**2026-10-30 · 软件包更新：只接 IMU 也能独立诊断**：总线 IMU 不再被舵机启动检查挡住。没有或只接部分舵机时，总览与 IMU 页仍显示板卡应答、识别与样本状态；过期、断线及切换配置不会沿用旧结果。诊断不放行运动或标定写入。先升级网页，再明确确认主程序更新至 `.47` / API 42。[软件包与引导附件](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-software-v2026.10.30) · [更新步骤与使用说明](docs/仅接IMU的独立诊断与软件更新-20261030.md)
-
-**2026-10-29 · 软件包更新：IMU 与舵机状态分开显示**：主程序等待 IMU 时，总览和舵机页继续显示已收到的舵机回包、原始位置、电压与温度，并区分缺失、未知和过期数据。先升级网页，再明确确认主程序更新至 `.46`，已有卡通过软件更新安装。[软件包与引导附件](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-software-v2026.10.29) · [更新步骤与验收范围](docs/软件更新与独立设备状态说明-20261029.md)
-
-**2026-10-28 · 软件包更新（不重烧 SD 卡）**：已有设置页升级入口的用户先安装 `2026.10.28` 网页 / 语音包，重连后可承托卸力并明确确认主程序更新，再在 IMU 页选择 `Qinmo · Feetech`、验证方向。主程序自动更新仅支持已知 20261027 基线；现有板卡继续默认自动识别。Qinmo 实物与本版整机升级仍待验收，音乐跟拍和自由 AI 人声对话仍未解决。[软件包与引导附件](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-software-v2026.10.28) · [现有用户更新步骤](docs/软件更新与Qinmo使用说明-20261028.md) · [Qinmo 网页使用](docs/Qinmo-IMU-网页使用.md)
-
-**复刻镜像 20261027：网页软件升级与本地坐站语音。** 设置页可检查、下载或上传签名软件包，安装失败可回退；R3 单击开关监听，识别“坐下／站起来”，附带中文模型，无需云端账号。保留网页录制回放、灵动及模型管理。已有卡先通过 SSH 安装一次升级入口，之后日常软件更新不用重烧。
-
-本版保留 20261023c 的主程序、步态模型与总线 ID 200 IMU 自动识别。软件、签名事务、浏览器及镜像只读验证通过；本版新卡首次使用、旧卡升级/回退和真人声学仍待实物验收。音乐头身跟拍仍待修复，自由 AI 人声对话尚未接入。[镜像与校验值](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-replica-image-20261027) · [软件升级包](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-software-v2026.10.27) · [更新与语音用法](docs/软件更新与语音使用说明-20261027.md) · [验证范围](docs/superpowers/verification/2026-10-27-web-updates.md)
-
-<p align="center"><a href="software/studio/README.md"><img src="assets/studio-overview-20261025-demo.jpg" alt="Microduck Studio 当前界面演示，设备读数为模拟数据" width="920"></a><br><sub>Studio 界面演示，设备读数为模拟数据</sub></p>
-
-**[按主板下载镜像](#按主板下载镜像)** · **[首次使用指南](docs/上手指南/README.md)** · **[Studio 说明](software/studio/README.md)**
-
-镜像免费，仅供个人非商业复刻；各部分许可见发布页。摄像头默认测试源，真实摄像头和 ToF 的验证范围见本版说明。
+As of **2026-10-25**, **the Feetech replica, first-use workflow and robot motion have been validated on real hardware**. The sections below cover the completed work and further extensions. See [update history](docs/update-history.en.md) for the test scope and development history.
 
 ---
 
-## 🔧 机械 · 一站式打印与装配
+## 💻 Software · system image and Microduck Studio
 
-**机械行者Robo持续维护飞特 HD-1910 与 Dynamixel XL330 两套资料。** 模型、打印工程和更新说明集中在 CAD 仓库，按自己的舵机版本选择。
+**Replica image 20261027: web software updates and local Mandarin posture commands.** Settings can check, download or upload signed software packages, with rollback on failed installation. Tap R3 to toggle listening for “sit down” and “stand up”; the Mandarin model is included and needs no cloud account. Web motion recording/playback, lively mode and model management are retained. Existing cards need one SSH bootstrap; routine software updates then use the browser without reflashing.
 
-| 需要什么 | 入口 |
+The robot runtime, gait models and bus-ID-200 IMU autodetection are unchanged from 20261023c. Software, signed transactions, browser flows and read-only image checks passed; physical first boot, existing-card upgrades/rollback and live acoustics still need acceptance. Music-driven head/body motion remains unresolved, and spoken AI dialogue is not connected. [Image and checksums](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-replica-image-20261027) · [Software package](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-software-v2026.10.27) · [Update and voice guide](docs/软件更新与语音使用说明-20261027.md) · [Verification scope](docs/superpowers/verification/2026-10-27-web-updates.md)
+
+<p align="center"><a href="software/studio/README.md"><img src="assets/studio-overview-20261025-demo.jpg" alt="Current Microduck Studio interface with simulated device readings" width="920"></a><br><sub>Studio interface demonstration with simulated device readings</sub></p>
+
+**[Download the image for your board](#download-the-image-for-your-board)** · **[First-use guide](docs/上手指南/README.md)** · **[Studio documentation](software/studio/README.md)**
+
+The image is free for personal non-commercial builds; see the release for component licences. Camera input defaults to a test source; see the release notes for physical camera and ToF verification limits.
+
+---
+
+## 🔧 Mechanics · one-stop printing and assembly
+
+**机械行者Robo maintains separate Feetech HD-1910 and Dynamixel XL330 resources.** Models, print projects and update notes live in the CAD repository; choose the files matching your servos.
+
+| What you need | Where to find it |
 |---|---|
-| **一站式打印** | **[拓竹 MakerWorld（飞特版）](https://makerworld.com.cn/zh/models/2963569-microduck#profileId-3478428)** · [Bambu Studio 3MF 工程](https://github.com/fanhao375/microduck-replica-cad#打印) |
-| **模型与打印资料** | **[飞特 HD-1910 专区](https://github.com/fanhao375/microduck-replica-cad#飞特-hd-1910-打印资料)** · **[XL330 专区](https://github.com/fanhao375/microduck-replica-cad#dynamixel-xl330-打印资料)** |
-| **装配教程** | **[装配说明书 PDF](https://github.com/fanhao375/microduck-replica-cad/blob/master/安装说明书/microduck装配安装说明书.pdf)** · **[分集视频](#-装配视频教程)**；两版按对应结构件装配 |
-| **采购清单** | **[BOM 在线预览](BOM/README.md)** · **[下载 Excel](BOM/装配BOM-机械行者Robo-2026-10-23-带采购链接.xlsx)**：2026-10-23 飞特版，XL330 的舵机及配套电控需另行核对 |
+| **One-stop printing** | **[Bambu MakerWorld (Feetech)](https://makerworld.com.cn/zh/models/2963569-microduck#profileId-3478428)** · [Bambu Studio 3MF project](https://github.com/fanhao375/microduck-replica-cad#打印) |
+| **Models and print resources** | **[Feetech HD-1910 section](https://github.com/fanhao375/microduck-replica-cad#飞特-hd-1910-打印资料)** · **[XL330 section](https://github.com/fanhao375/microduck-replica-cad#dynamixel-xl330-打印资料)** |
+| **Assembly tutorials** | **[Assembly manual PDF](https://github.com/fanhao375/microduck-replica-cad/blob/master/安装说明书/microduck装配安装说明书.pdf)** · **[Episode videos](#-assembly-videos)**; use the matching structural parts for each build |
+| **Shopping list** | **[Online BOM preview](BOM/README.md)** · **[Download Excel](BOM/装配BOM-机械行者Robo-2026-10-23-带采购链接.xlsx)**: 2026-10-23 Feetech list; XL330 servos and associated electronics need separate checks |
 
-[CAD 仓库与最新发布](https://github.com/fanhao375/microduck-replica-cad/releases) · [构建记录](构建日志.md)
+[CAD repository releases](https://github.com/fanhao375/microduck-replica-cad/releases) · [Build log](BUILD-LOG.en.md)
 
 ---
 
-## 🔌 电气 · 五块电路板
+## 🔌 Electronics · five circuit boards
 
-本仓提供总线 IMU 板、舵机总线 HUB 和电池接口板的工程资料；主控采用瑞莎 **Radxa ZERO 3W**，扩展板使用 Pollen Robotics 官方开源的 **RPI Robot HAT**。
+This repository provides projects for the bus IMU board, servo bus hub and battery terminal board. The main board is a **Radxa ZERO 3W**, paired with Pollen Robotics' open-source **RPI Robot HAT**.
 
 <table>
 <tr>
-<th>总线 IMU 板</th>
-<th>舵机总线 HUB</th>
-<th>电池接口板</th>
-<th>瑞莎主控<br>Radxa ZERO 3W</th>
-<th>官方 HAT<br>RPI Robot HAT</th>
+<th>Bus IMU board</th>
+<th>Servo bus hub</th>
+<th>Battery terminal board</th>
+<th>Main board<br>Radxa ZERO 3W</th>
+<th>Official HAT<br>RPI Robot HAT</th>
 </tr>
 <tr>
-<td align="center" valign="middle" width="170"><a href="assets/hw/imu-to-dxl-1v0a-3d.png"><img src="assets/hw/imu-to-dxl-1v0a-3d.png" alt="总线 IMU 板 3D 设计预览" width="160"></a></td>
-<td align="center" valign="middle" width="170"><a href="assets/hw/wire-hub-1v0a-3d.png"><img src="assets/hw/wire-hub-1v0a-3d.png" alt="舵机总线 HUB 3D 设计预览" width="160"></a></td>
-<td align="center" valign="middle" width="170"><a href="assets/hw/pogo-pin-1v0a-3d.png"><img src="assets/hw/pogo-pin-1v0a-3d.png" alt="电池接口板 3D 设计预览" width="160"></a></td>
-<td align="center" valign="middle" width="170"><a href="assets/hw/radxa-zero3w-official.webp"><img src="assets/hw/radxa-zero3w-official.webp" alt="瑞莎官方 ZERO 3W 板卡图" width="160"></a></td>
-<td align="center" valign="middle" width="170"><a href="assets/hw/rpi-robot-hat-official.png"><img src="assets/hw/rpi-robot-hat-official.png" alt="Pollen Robotics 官方 RPI Robot HAT 设计图" width="160"></a></td>
+<td align="center" valign="middle" width="170"><a href="assets/hw/imu-to-dxl-1v0a-3d.png"><img src="assets/hw/imu-to-dxl-1v0a-3d.png" alt="Bus IMU board 3D design preview" width="160"></a></td>
+<td align="center" valign="middle" width="170"><a href="assets/hw/wire-hub-1v0a-3d.png"><img src="assets/hw/wire-hub-1v0a-3d.png" alt="Servo bus hub 3D design preview" width="160"></a></td>
+<td align="center" valign="middle" width="170"><a href="assets/hw/pogo-pin-1v0a-3d.png"><img src="assets/hw/pogo-pin-1v0a-3d.png" alt="Battery terminal board 3D design preview" width="160"></a></td>
+<td align="center" valign="middle" width="170"><a href="assets/hw/radxa-zero3w-official.webp"><img src="assets/hw/radxa-zero3w-official.webp" alt="Official Radxa ZERO 3W board overview" width="160"></a></td>
+<td align="center" valign="middle" width="170"><a href="assets/hw/rpi-robot-hat-official.png"><img src="assets/hw/rpi-robot-hat-official.png" alt="Official Pollen Robotics RPI Robot HAT rendering" width="160"></a></td>
 </tr>
 <tr>
-<td align="center" valign="top"><a href="assets/hw/imu-to-dxl-1v0a-pcb.png">PCB 预览</a><br><a href="hardware/新版/imu_to_dxl_1V0A/">工程文件</a></td>
-<td align="center" valign="top"><a href="assets/hw/wire-hub-1v0a-pcb.png">PCB 预览</a><br><a href="hardware/新版/wire_hub_1V0A/">工程文件</a></td>
-<td align="center" valign="top"><a href="assets/hw/pogo-pin-1v0a-pcb.png">PCB 预览</a><br><a href="hardware/新版/POGO_PIN_1V0A/">工程文件</a></td>
-<td align="center" valign="top"><a href="https://item.taobao.com/item.htm?id=763812025816">购买（淘宝）</a><br><a href="https://docs.radxa.com/en/zero/zero3">官方资料</a> · <a href="https://docs.radxa.com/en/zero/zero3/download#hardware-design">设计文件</a></td>
-<td align="center" valign="top"><a href="https://github.com/pollen-robotics/elec_RPI_Robot_HAT">KiCad 工程</a><br><a href="https://github.com/pollen-robotics/elec_RPI_Robot_HAT/tree/main/production">生产打样文件</a></td>
+<td align="center" valign="top"><a href="assets/hw/imu-to-dxl-1v0a-pcb.png">PCB preview</a><br><a href="hardware/新版/imu_to_dxl_1V0A/">Project files</a></td>
+<td align="center" valign="top"><a href="assets/hw/wire-hub-1v0a-pcb.png">PCB preview</a><br><a href="hardware/新版/wire_hub_1V0A/">Project files</a></td>
+<td align="center" valign="top"><a href="assets/hw/pogo-pin-1v0a-pcb.png">PCB preview</a><br><a href="hardware/新版/POGO_PIN_1V0A/">Project files</a></td>
+<td align="center" valign="top"><a href="https://item.taobao.com/item.htm?id=763812025816">Buy on Taobao</a><br><a href="https://docs.radxa.com/en/zero/zero3">Documentation</a> · <a href="https://docs.radxa.com/en/zero/zero3/download#hardware-design">Design files</a></td>
+<td align="center" valign="top"><a href="https://github.com/pollen-robotics/elec_RPI_Robot_HAT">KiCad sources</a><br><a href="https://github.com/pollen-robotics/elec_RPI_Robot_HAT/tree/main/production">Production files</a></td>
 </tr>
 </table>
 
-前三张为自制板的 3D 设计预览，后两张瑞莎与 HAT 配图来自官方资料。点击图片可查看原图，[图片来源](assets/hw/official-board-images.md)。瑞莎设计资料含原理图、2D 尺寸与 3D 模型；三块自制板的嘉立创 EDA 工程、STEP 和实测进度见各工程说明。
+The first three images are custom-board design previews; the Radxa and HAT images come from official resources. Click an image for full size; see [image credits](assets/hw/official-board-images.md). Radxa provides schematics, 2D dimensions and 3D models. See the custom projects for EasyEDA Pro files, STEP models and physical validation status.
 
-[全部硬件工程](hardware/README.md) · [三块板的说明](hardware/新版/README.md) · [总线 IMU 固件](hardware/imu_to_dxl/README.md)
-
----
-
-## 🧠 算法 · 飞特官方 BAM
-
-[**飞特官方 HD-1910 BAM**](https://gitee.com/ftservo/ftservo-bam) 提供舵机动力学模型与辨识参数，供仿真训练参考。本仓提供开源[训练工程](software/training/README.md)与[网页训练工作台](software/training-studio/README.md)，具体模型配置与参数来源见[参数说明](docs/HD-1910-M6参数来源.md)。
+[All hardware projects](hardware/README.md) · [Three-board notes](hardware/新版/README.md) · [Bus IMU firmware](hardware/imu_to_dxl/README.md)
 
 ---
 
-## 🖥️ 开源训练平台 · Microduck Training Studio
+## 🧠 Actuator modelling · Feetech's official BAM
 
-我们还做了 **Microduck Training Studio**：在电脑上通过网页创建训练实验、查看曲线、暂停与继续、评估检查点并导出 ONNX 模型。训练工作台与鸭子上的 Studio 是两个独立服务。
-
-<p align="center"><a href="software/training-studio/README.md"><img src="assets/training-studio-20261025-demo.jpg" alt="Microduck Training Studio 实际界面：三维模型、训练控制与合成演示曲线" width="920"></a><br><sub>训练平台演示界面：3D 为模型预览，曲线为合成演示数据</sub></p>
-
-已完成真实 GPU 短试跑、评估回放和模型导出的链路验证；长训练与自训策略的真机验证仍待完成。
-
-**[训练平台与使用说明](software/training-studio/README.md)** · **[动作实验室指南](software/training-studio/web/custom-actions.md)** · **[训练工程](software/training/README.md)** · [验证记录](software/training-studio/docs/verification.md)
+[**Feetech's official HD-1910 BAM**](https://gitee.com/ftservo/ftservo-bam) provides actuator models and identified parameters as a reference for simulation training. This repository includes an open-source [training project](software/training/README.md) and [web training workbench](software/training-studio/README.md); see the [parameter notes](docs/HD-1910-M6参数来源.md) for the model configuration and parameter sources used here.
 
 ---
 
-## 🧰 工具 · 烧卡、调试与资料
+## 🖥️ Open-source training workbench · Microduck Training Studio
 
-常用软件和开发工具集中在[工具导航](tools/README.md)，按要做的事选择即可。
+We also built **Microduck Training Studio**: create training experiments on a computer, view curves, pause and resume, evaluate checkpoints and export ONNX models through a browser. It runs separately from Studio on the duck.
 
-| 要做什么 | 工具与入口 |
+<p align="center"><a href="software/training-studio/README.md"><img src="assets/training-studio-20261025-demo.jpg" alt="Actual Microduck Training Studio interface showing a 3D model, training controls and synthetic demo metrics" width="920"></a><br><sub>Training workbench in demo mode: the 3D view is a model preview and the curves use synthetic data</sub></p>
+
+The real-GPU short-run, evaluation-video and model-export pipeline has been verified. Long training and physical validation of our own trained policies remain pending.
+
+**[Training workbench and usage](software/training-studio/README.md)** · **[Action Lab guide](software/training-studio/web/custom-actions.md)** · **[Training engine](software/training/README.md)** · [Verification record](software/training-studio/docs/verification.md)
+
+---
+
+## 🧰 Tools · flashing, debugging and references
+
+The [tool index](tools/README.en.md) groups utilities by the task you want to perform.
+
+| Task | Tools and links |
 |---|---|
-| 烧录镜像 | **[Rufus 便携版 EXE](tools/rufus/rufus-4.15p.exe)** · [烧卡说明](tools/rufus/README.md) |
-| 串口与舵机调试 | **[飞特 FD 与串口助手](tools/飞特/README.md)** · [3D 网页调试台](tools/servo-web/README.md) |
-| 查飞特资料、接入 SDK | **[官方手册、型号规格书与 SDK](docs/飞特资料/README.md)**，标明官网版本和离线副本日期 |
-| 测舵机、分析问题 | [HD1910M 测试工具](tools/FeeTech_HD1910M_Servo/README.md) · [STS3215 测试工具](tools/sts3215Servo_testtool/README.md) · [步态分析](tools/gait-analysis/README.md) |
+| Flash an image | **[Rufus portable EXE](tools/rufus/rufus-4.15p.exe)** · [Flashing guide](tools/rufus/README.md) |
+| Serial and servo debugging | **[Feetech FD and serial utilities](tools/飞特/README.md)** · [3D servo web console](tools/servo-web/README.md) |
+| Read Feetech references or use an SDK | **[Official manuals, model specifications and SDKs](docs/飞特资料/README.md)**, with official version checks and separate offline snapshot dates |
+| Test servos and investigate motion | [HD1910M tester](tools/FeeTech_HD1910M_Servo/README.md) · [STS3215 tester](tools/sts3215Servo_testtool/README.md) · [Gait analysis](tools/gait-analysis/README.md) |
 
 ---
 
-## 🦆 鸭友贡献
+## 🦆 Contributions from the flock
 
-这个仓库不是一个人写的。合并进来的代码、实测验证过的结论，都记在这儿。
+This repo is not one person's work. Merged code and bench-verified findings are credited here.
 
-| 谁 | 贡献了什么 |
+| Who | What they contributed |
 |---|---|
-| [@yoyojacky](https://github.com/yoyojacky) | **Rust 版飞特舵机测试工具**（[PR #27](https://github.com/fanhao375/microduck-replica/pull/27)，已合并）。自己实现的最小 STS/SCS 协议（帧打包、校验和、ping、读写寄存器、状态解析），命令行可以扫描总线（带进度条）、读状态、转到指定位置、单颗测试和批量测试，输出位置偏差、峰值电流、峰值负载、电压温度并判定 PASS/FAIL。台架验收一条命令出汇总表 → [`tools/sts3215Servo_testtool/`](tools/sts3215Servo_testtool/) |
-| [@Abo1ish](https://github.com/Abo1ish) | **IMU 小板固件 + 调试台姿态显示**（[PR #32](https://github.com/fanhao375/microduck-replica/pull/32)，已合并）。给官方没开源的那块 imu_to_dxl 写了 STM32G031 固件底子，在实板上验证过，带主机端测试和一份写清楚边界的 [`VALIDATION.md`](hardware/imu_to_dxl/firmware/VALIDATION.md) → [`hardware/imu_to_dxl/firmware/`](hardware/imu_to_dxl/firmware/)；再用 J-Link 把 IMU 姿态实时读出来并进了网页调试台，3D 鸭子的躯干跟着真板子转（`--imu-jlink`，没板子也能用 `--imu-demo` 先看效果）→ [`tools/servo-web/`](tools/servo-web/) |
-| [@yansis2026](https://github.com/yansis2026) | **手机版中控与离线语音**（[PR #52](https://github.com/fanhao375/microduck-replica/pull/52)，已合并）。在 `/m` 提供手机手柄、模型管理和摄像头画面。手机麦克风通过 HTTPS 把语音送到鸭子，由板载 Vosk 识别，连鸭子热点就能离线使用。贡献者在自己的鸭子上跑通了这套流程，合并版已通过软件回归，待实机复测。见[手机与离线使用指南](software/studio/deploy/OFFLINE.md)。 |
-| [@Liangjin5437](https://github.com/Liangjin5437) | **Radxa Cubie A7Z 适配与预览镜像**（[PR #54](https://github.com/fanhao375/microduck-replica/pull/54)，已合并）。为飞特 HD-1910 舵机和总线 IMU 提供 A7Z 的热点配网、UART 总线与分组读取、Studio 适配、温控和镜像构建工具。贡献者已在自己的 A7Z 鸭子上验证适配。现有预览镜像早于合并修复，更新版待重新打包和上板验收。见 [A7Z 适配与下载说明](radxa-cubie-a7z/README.md)。 |
-| 微信群的鸭友 | **Radxa Zero 3W V1.12J 的启动方案**。这批板子（WiFi 换成 AIC8800DS2）光换瑞莎引导还是起不来，他实测出设备树也得换成瑞莎 B1 的：**B1 引导 + B1 DTB + Armbian 6.1.115 内核 + Trixie 系统**，跑通了 → 写进了[踩坑记录](踩坑记录.md#软件)和[镜像使用说明](tools/radxa/镜像使用说明.md#6-如果你的板子不是这一批) |
+| [@yoyojacky](https://github.com/yoyojacky) | **A Rust test tool for Feetech servos** ([PR #27](https://github.com/fanhao375/microduck-replica/pull/27), merged). A minimal STS/SCS protocol implementation of his own (framing, checksum, ping, register read/write, status parsing). The CLI scans the bus with a progress bar, reads status, moves a servo to a position, and runs single or batch tests that report position error, peak current, peak load, voltage and temperature, with a PASS/FAIL verdict — one command gives you a bench acceptance table → [`tools/sts3215Servo_testtool/`](tools/sts3215Servo_testtool/) |
+| [@Abo1ish](https://github.com/Abo1ish) | **IMU board firmware + attitude view in the debug console** ([PR #32](https://github.com/fanhao375/microduck-replica/pull/32), merged). A base STM32G031 firmware for the imu_to_dxl board that Pollen never open-sourced, verified on real hardware, with host-side tests and a [`VALIDATION.md`](hardware/imu_to_dxl/firmware/VALIDATION.md) that is clear about its limits → [`hardware/imu_to_dxl/firmware/`](hardware/imu_to_dxl/firmware/). He also streams the IMU attitude over J-Link into the web debug console, so the 3D duck's body turns with the real board (`--imu-jlink`, or `--imu-demo` with no hardware) → [`tools/servo-web/`](tools/servo-web/) |
+| [@yansis2026](https://github.com/yansis2026) | **Mobile console and offline voice control** ([PR #52](https://github.com/fanhao375/microduck-replica/pull/52), merged). The `/m` console provides a phone gamepad, model management, and a camera view. The phone sends microphone audio to the duck over HTTPS for onboard Vosk recognition, which works offline over the duck's hotspot. The contributor tested the workflow on their own duck. The merged revision passed software regression tests and awaits another hardware run. See the [mobile and offline guide](software/studio/deploy/OFFLINE.md). |
+| [@Liangjin5437](https://github.com/Liangjin5437) | **Radxa Cubie A7Z port and preview image** ([PR #54](https://github.com/fanhao375/microduck-replica/pull/54), merged). Adds hotspot provisioning, UART and grouped bus reads, Studio support, thermal management, and image build tools for Feetech HD-1910 servos and a bus IMU. The contributor tested the port on their own A7Z duck. The available preview image predates the merge fixes. The updated image still needs to be built and tested on hardware. See the [A7Z port and download guide](radxa-cubie-a7z/README.md). |
+| A member of the WeChat group | **Boot recipe for the Radxa Zero 3W V1.12J.** On this batch (WiFi changed to AIC8800DS2), swapping in Radxa's bootloader is not enough. He found by testing that the device tree has to come from Radxa too: **B1 bootloader + B1 DTB + Armbian 6.1.115 kernel + Trixie userland**, and got it booting → written up in the [pitfalls log](踩坑记录.md#软件) and the [image guide](tools/radxa/镜像使用说明.md) (both Chinese) |
 
 ---
 
-## 鸭友的项目
+## Projects from the flock
 
-有些鸭友是自己单独开仓库做的，不在这个仓库里，但跟鸭子直接相关、做得好的，放这儿推一下：
+Some people build duck-related things in their own repos. The good ones get a shout-out here:
 
-| 项目 | 作者 | 做什么的 |
+| Project | Author | What it does |
 |---|---|---|
-| [microduck-color-studio](https://github.com/LathamZ/microduck-color-studio)（[在线试用](https://lathamz.github.io/microduck-color-studio/)） | [@LathamZ](https://github.com/LathamZ) | **鸭子的 3D 配色工作室，打印前先在网页里把颜色定好。** 70 个零件逐件上色，选材质（PLA / 哑光 / PETG / 金属 / 碳纤 / TPU）和灯光看效果；填上自己手里有哪些耗材，它按库存推荐配色（只用已有 / 补一色 / 丙烯点缀）。还能导入自己的 3MF（比如飞特版），导出**带颜色的多盘 3MF** 和按件拆好的 STL，拓竹 P1S / A1 mini / H2D 有预设。中英文界面，手机上也能看 |
-| [MICDUCK_FTHD1901_REBUILD](https://github.com/fengj4780-sudo/MICDUCK_FTHD1901_REBUILD) | [@fengj4780-sudo](https://github.com/fengj4780-sudo) | **飞特版结构改进 + 可选 CNC 加强件。** 在我们的[可编辑 SolidWorks 图纸](https://github.com/fanhao375/microduck-replica-cad)基础上接着改：适配飞特舵机（他仓库里写作 HD1901，零件文件用的是 HD-1910-C001），加强了薄弱件，修了装配干涉和几个破损的模型。腿部 **5 个零件可以换成 CNC 件**让受力更合理（还在打样测试，他估算 5 件含运费约 45 元）；不做 CNC 直接打印也行，强度也比原版好。附一键打印的 3MF（拓竹 H2D、0.4 mm、5 盘）和改好的 SolidWorks 图纸 |
-| [Microduck-kissqy](https://github.com/kissqy/Microduck-kissqy) | [@kissqy](https://github.com/kissqy) | **飞特 HD1910 的训练流程与控制实现参考。** 提供训练中控、训练环境准备与任务管理说明、ONNX 模型导出，以及机器人中控、固件和演示视频；算法部分的具体训练流程推荐参考这个项目 |
+| [microduck-color-studio](https://github.com/LathamZ/microduck-color-studio) ([live demo](https://lathamz.github.io/microduck-color-studio/)) | [@LathamZ](https://github.com/LathamZ) | **A 3D color studio for the duck: settle the colors in your browser before you print.** Color each of the 70 parts, pick a material (PLA / matte / PETG / metallic / carbon fiber / TPU) and lighting to preview. Enter the filaments you already own and it recommends palettes from your stock (use what you have / add one color / acrylic accents). You can also import your own 3MF (e.g. the Feetech version) and export a **colored multi-plate 3MF** plus per-part STLs, with presets for Bambu P1S / A1 mini / H2D. Chinese and English UI, works on mobile |
+| [MICDUCK_FTHD1901_REBUILD](https://github.com/fengj4780-sudo/MICDUCK_FTHD1901_REBUILD) | [@fengj4780-sudo](https://github.com/fengj4780-sudo) | **Feetech-build structural rework with optional CNC reinforcement.** Builds on our [editable SolidWorks drawings](https://github.com/fanhao375/microduck-replica-cad): adapted to the Feetech servo (written as HD1901 in that repo; the part files are HD-1910-C001), weak parts reinforced, assembly interferences fixed and some broken models repaired. **Five leg parts can be made as CNC parts** for better load paths (still being prototyped; the author estimates about ¥45 for all five including shipping); printing them instead also works and is stronger than the original. Includes a one-click 3MF (Bambu H2D, 0.4 mm, 5 plates) and the reworked SolidWorks drawings (Chinese) |
+| [Microduck-kissqy](https://github.com/kissqy/Microduck-kissqy) | [@kissqy](https://github.com/kissqy) | **A reference for Feetech HD1910 training workflows and robot control.** Includes a training console, environment setup and job management guides, ONNX model export, a robot control console, firmware and demo videos. Recommended in the algorithms section for the practical training workflow |
 
-做了跟鸭子有关的项目（工具、教程、改装、策略……），开 issue 贴个链接，我们加进来。
+Built something for the duck (a tool, tutorial, mod, policy…)? Open an issue with the link and we'll add it.
 
-想加进来：直接开 [issue](https://github.com/fanhao375/microduck-replica/issues) 或提 PR。
-硬件、固件、算法、文档、实测数据都算 —— **实测数据尤其欢迎**，这个仓库的规矩是结论如实记录，无论正反。
+Want to join in: open an [issue](https://github.com/fanhao375/microduck-replica/issues) or send a PR.
+Hardware, firmware, algorithms, documentation, measured data — all of it counts. **Measured data especially**: the rule in this repo is that results get recorded honestly, positive or negative.
 
 ---
 
-## 资料导航
+## Documentation
 
-路径相对于本仓库根目录；机械 CAD 在独立仓库维护。
+Paths are relative to this repository's root. Mechanical CAD is maintained in a separate repository.
 
-| 项目 | 仓库位置 | 说明与入口 |
+| Project | Repository location | Description and links |
 |---|---|---|
-| 使用与装配 | [CAD 仓库](https://github.com/fanhao375/microduck-replica-cad) · [BOM/](BOM/README.md) | [首次使用指南](docs/上手指南/README.md) · [采购清单](BOM/README.md) · [装配视频](#-装配视频教程) |
-| 软件与镜像 | [software/](software/README.md) | [Studio 中控](software/studio/README.md) · [镜像构建](software/image/README.md) |
-| 训练平台与工程 | [software/training-studio/](software/training-studio/README.md)<br>[software/training/](software/training/README.md) | 网页训练工作台、仿真环境与模型导出 |
-| 电气与固件 | [hardware/](hardware/README.md) | [电路板工程](hardware/README.md) · [IMU 固件](hardware/imu_to_dxl/README.md) |
-| 调试与分析工具 | [tools/](tools/README.md) | [工具导航](tools/README.md) · 烧卡、串口调试、飞特资料和分析脚本 |
-| 文档与记录 | [docs/](docs/README.md) | [完整文档导航](docs/README.md) · [踩坑](踩坑记录.md) · [调试](调试记录.md) · [构建](构建日志.md) |
-| 历史与社区 | [docs/](docs/README.md#深入研究与归档) | [官方更新跟踪](docs/官方更新跟踪.md) · [历史更新](docs/历史更新.md) · [社区贡献](docs/社区贡献.md) |
+| First use and assembly | [CAD repository](https://github.com/fanhao375/microduck-replica-cad) · [BOM/](BOM/README.md) | [First-use guide](docs/上手指南/README.md) · [Shopping list](BOM/README.md) · [Assembly videos](#-assembly-videos) |
+| Software and image | [software/](software/README.md) | [Studio](software/studio/README.md) · [Image build](software/image/README.md) |
+| Training workbench and project | [software/training-studio/](software/training-studio/README.md)<br>[software/training/](software/training/README.md) | Browser workbench, simulation environment and model export |
+| Electronics and firmware | [hardware/](hardware/README.md) | [Board projects](hardware/README.md) · [IMU firmware](hardware/imu_to_dxl/README.md) |
+| Debug and analysis tools | [tools/](tools/README.en.md) | [Tool index](tools/README.en.md) · Flashing, serial debugging, Feetech references and analysis |
+| Documentation and records | [docs/](docs/README.en.md) | [All documentation](docs/README.en.md) · [Pitfalls](踩坑记录.md) · [Debug log](调试记录.md) · [Build log](BUILD-LOG.en.md) |
+| History and community | [docs/](docs/README.en.md#research-and-archives) | [Upstream updates (Chinese)](docs/官方更新跟踪.md) · [Update history](docs/update-history.en.md) · [Community contributions](docs/community-contributions.en.md) |
 
 ---
 
-## 许可与来源
+## Licence and sources
 
-代码、仿真素材和镜像内模型分别适用各自许可，详见[许可与署名](NOTICE.md)及[模型使用条款](software/image/overlay/usr/share/doc/microduck/模型说明.txt)。**复刻镜像仅供个人非商业复刻，不得随收费产品分发。**
+Code, simulation assets and bundled models have separate licences. See [licensing and attribution](NOTICE.md) and the [model terms](software/image/overlay/usr/share/doc/microduck/模型说明.txt); **the replica image is for personal non-commercial builds and must not be distributed with paid products**.
 
-本项目与 Pollen Robotics 无隶属关系，未获其背书。
+This third-party project is not affiliated with or endorsed by Pollen Robotics.
 
-### ❤️ 支持作者
+### ❤️ Support the author
 
-从装配、调试到软件和文档，这个项目是靠一次次尝试积累起来的。如果这些资料和工具帮到了你，欢迎点个 Star ⭐、反馈问题或分享复刻经验；也可以自愿打赏，请作者喝杯咖啡，支持项目继续维护。感谢每一位鸭友的支持。
+This project has grown through hands-on assembly, debugging, software development and documentation. If the resources and tools have helped you, a Star ⭐, bug report or build story is always welcome. You can also leave a voluntary tip to buy the author a coffee and support continued maintenance. Thank you to everyone helping the duck along.
 
-<p align="center"><a href="assets/alipay-support.jpg"><img src="assets/alipay-support.jpg" alt="支付宝打赏二维码，点击查看原图" width="240"></a><br><sub>支付宝扫码支持 · 点击图片查看原图</sub></p>
+<p align="center"><a href="assets/wechat-support.jpg"><img src="assets/wechat-support.jpg" alt="WeChat tip QR code; click to view the original image" width="240"></a><br><sub>Optional support via WeChat · Click the image for full size</sub></p>

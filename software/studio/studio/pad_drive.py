@@ -1,66 +1,15 @@
-"""手柄页里「让鸭子动」的部分：谁在开（方向盘）、网页手柄（图上的键、摇杆）、站起来 / 开始走 / 坐下、技能、声音、
-动作和组合动作。
+"""Gamepad drive, virtual sticks, posture commands, skills, sounds, and action combos.
 
-PadOps（pad.py）继承这个类，共用锁、robotd 回读、日志。这里的规矩（安全优先）：
-- **方向盘**（审查 19、25）：推摇杆、按住扳机 / X、做动作的页面拿方向盘；别的页面要点「接管」才能抢。拿着的页面 6 秒
-  没推摇杆、没说「还按着」就自动松开（只开着手柄页不算：watch、drive open 都不续方向盘，审查二 I1、三 V5）。一次性的
-  命令（站、走、坐、技能、叫）不拿方向盘；别人正在推摇杆时不让点（「停下（站好）」除外，谁都能点、不排队）。
-- **页面在不在手柄区**（三 V5；总览重排审查 O1：手柄并进了总览，「在」= 路由是 / 或 /pad、页面可见、手柄那一块在
-  视口里）：进来发 drive {open, seq}，离开发 drive {on:false, seq}，seq 是页面的递增序号，按连接记最后一个，比它旧的丢掉
-  （线程池里会乱序）。离开的连接记进 closed：之后晚到的摇杆、按键、动作一律丢；再 open 才解开。**新连接一开始就在 closed
-  里**（new_conn），没发过 open 不算在。**断开的连接（gone）永远拿不回**：open 遇到 gone 直接拒。
-- **摇杆按住才动**：页面按住时 10 Hz 发 sticks（或旧的 move），松手发一次 stop；服务端不替页面重复发（断了靠 robotd 的
-  deadman 500 ms：duck-control safety.rs:226-237）。序号按连接存、换方向盘也不清；比这个连接最后一次 stop 旧的帧一律丢
-  （屏障三个通道共用）；「最新的那一帧」按通道分（move / head / body，三 V6）。检查和发送在同一把锁里。
-- **头、身体是锁存的**（三 V1）：robot.head、robot.pose 在 robotd 里都不过期（fork robotd intents.rs:327-341），
-  pose 的 active:true 会让控制器把速度清零、强制用站立网络（fork control.rs:595-607）——网页留下一个，网页和实体手柄
-  都推不走鸭子。所以记下「网页置过的头 / 身体」（_latch），下面每条路都清一次（头全 0、身体 {"active": false}，
-  **镜像时也清**：padd 在身体模式时最多 0.1 秒就重发，padd:1570、1625-1631）：切回走路、松手离页、页面断开、被接管、
-  方向盘 6 秒换人、卸力（四个来源）、实体手柄连上、点停下 / Start 停下、姿势离开「准备好走」、Studio 关闭。
-  卸力那几个入口在事件循环里，只置标志（_request_clear），交给后台线程发，而且排在卸力之后 0.1 秒。
-  **坑**：PoseParams 默认 active:true（fork lib.rs:2320-2346），发 robot.pose {} 反而会打开身体模式，退出一定写 active:false。
-  Studio 第一次看到主程序在时无条件发一次 robot.pose {"active": false}（Studio 崩了重启，不知道上次有没有留下）。
-- **看门狗**（三 V11）：头 / 身体的最后一帧非零、0.6 秒没新帧 → 头全 0、身体回中（还在身体模式）；模式 3 秒没报「还在」
-  → 退出模式（发 active:false）。按住的键 0.45 秒（X 0.3 秒）没报就当松开。都在 25 Hz 的后台线程（_tick_loop）里。
-- **按住的键**（三 V4）：LT / RT / X 走 keys 通道（页面按下、松开、按住每 0.15 秒报一次），后台 25 Hz 按「按着什么」发：
-  嘴 = 按着 LT 或 RT × mouth_percent、LT 一直 wheee（hold:true，松开发 hold:false）、RT 按下那一下嘎一声、X 按住每 40 ms
-  再发一次 robot.do（连滚，padd:1182-1211）。不复用 _run_action；跟正在做的头 / 嘴类动作互斥。
-- **实体手柄连着**（镜像）：padd 哪怕没人碰也每 0.1 秒发一次零速度（padd main.rs:962-977），每拍发一次嘴
-  （padd main.rs:1351-1363）→ 网页摇杆、按键、模式、图上的一次性键（src:"svg"）都不收；不接受 drive on；网页没在开就不发
-  「停」（不去打断实体手柄；头 / 身体的清理是例外，见上）。下面的大按钮（站起来 / 开始走 / 坐下 / 技能 / 叫一声）是一次性的
-  请求，跟 padd 不抢，照常能用。
-- **卸力之后 2 秒内**不接受站、走、坐、技能、摇杆、动作（上力、回站姿、卸力共用一个请求槽，后写的赢：
-  robotd intents.rs:24-36、149-157）。卸力时间三处来：app 的 run_relax 同步调 note_relax()（顶上按钮、空格、图上 Select）、
-  robotd.py 的卸力计数变了、回读看到扭矩从开变关（手柄 Select、robotctl、摔倒、低电量：审查二 I2）。
-- **坐着没坐着要读新鲜的 robot.policies.sitting**（审查二 S2）：读不到就不让点「坐下 / 站起来」，不靠猜
-  （lib.rs:2362-2368：站起来是两个不同的调用，猜错会让坐着的鸭子每按两次就坐下一次）。Start、十字下、绑了 sit_toggle 的键一样。
-
-接口出处（官方仓库 pollen-robotics/microduck；fork 指 fork 固件）：
-| 页面上的         | 发给 robotd                                   | 出处 |
-|------------------|-----------------------------------------------|------|
-| 站起来（软着时） | robot.init（请求）                            | lib.rs:553-558；main.rs:4550-4563；fork main.rs:5898-5908（总线没就绪会拒） |
-| 站起来（坐着时） | robot.do {"skill":"sit_toggle"}               | lib.rs:2362-2370（坐着要用 sit_toggle，init 会跟锁存打架）；main.rs:659-669 |
-| 开始走           | robot.enable {"on":true,"toggle":false}       | lib.rs:2685-2704；main.rs:4518-4548；fork main.rs:5780-5850（HOME/IMU/策略几道闸） |
-| 停下（站好）     | robot.stop，再 robot.enable {"on":false}       | lib.rs:537-540；main.rs:4513-4516（stop 只清速度） |
-| 坐下             | robot.do {"skill":"sit_toggle"}               | main.rs:4223-4255（策略没在跑、没到 HOME 都会拒）；main.rs:4158-4168 |
-| 技能             | robot.do {"skill":名字}                       | lib.rs:2338-2346（名字看 robot.policies 的 skills）；main.rs:4136-4176 |
-| 叫一声           | robot.sound {"tag":…}（请求）                 | lib.rs:590-600、2094-2140；main.rs:4300-4319 |
-| 摇杆（走路）     | robot.move 通知 {vx,vy,vyaw}                  | lib.rs:2041-2051；main.rs:3589-3597、3631-3636 |
-| 摇杆（头模式）   | robot.head 通知（换算见 sticks_to_intent）     | fork padd:1427-1445 |
-| 摇杆（身体模式） | robot.pose 通知 {z,roll,pitch,active}         | fork padd:316-320、1447-1460；fork lib.rs:2320-2346 |
-| LT / RT / X 按住 | robot.mouth / robot.sound / robot.do 通知     | fork padd:1182-1211、1351-1396 |
-| 点头、歪头、张嘴 | robot.head / robot.mouth 通知                 | 见 pad_combo.py 文件头 |
-| 十字右（图上）   | robot.rebootMotors {"ids":[]}（请求，空 = 全部） | 官方 padd main.rs:530、750-765；fork（handover 版）main.rs:2731-2758（先全身卸力再重启，之后软着）、6050-6056（从不拒） |
-| 十字上按住 3 秒  | robot.setMode {"mode":"roller" / "walk"}（请求） | 官方 padd main.rs:247-252、766-806；fork（handover 版）main.rs:5700-5736（没装轮滑模型会拒；autodetect 版一样）、2870-2930 |
-
-十字右、十字上照官方（用户 10-19 定：沿用官方方案）：十字右按一下就发、不用确认，不看方向盘、不占「上一个还没回话」
-（跟卸力一样是救急的路）；主程序收下以后记一次卸力（note_relax：2 秒内不让上力、叫停动作、清头 / 身体）。十字上在页面上
-按住 3 秒才发（计时在页面），带 expect（要切到哪个）；后端按 robot.policies 的 mode 再判一遍，不一样就拒。
-
-网页手柄的 Start（三 V7、V8）：页面按 motion.start 算出 Start 会做什么，发 start {expect}；后端挑出来的跟 expect 不一样就拒
-（「状态刚变了，再按一次」）。实体手柄 Start 跟网页的差别（fork padd:1113-1148、fork robotd:5795-5873）：坐着时实体是
-robot.init 直线回 HOME，网页走 sit_toggle（sitstand 网络起身，更柔和）；在走时实体是 toggle 关（渐变回 HOME），网页是
-stop + enable off（直接给 HOME 目标）。
+PadOps (pad.py) inherits from this mixin, sharing the state lock, robotd readback, and logging.
+Safety rules:
+- **Lease (steering wheel)**: Pages driving sticks, holding triggers/X, or running actions hold the lease;
+  other pages must click 'Take Over'. Inactive lease expires after 6s.
+- **Active drive area**: Pages send drive {open, seq} on entering the gamepad area and drive {on:false, seq} on leaving.
+- **Deadman**: Pages send sticks at 10 Hz while held and stop on release; robotd has a 500 ms deadman.
+- **Latched head & body**: robot.head and robot.pose do not expire in robotd; pose active:true forces standing network.
+- **Watchdogs**: Non-zero head/body without updates for 0.6s re-center; mode without heartbeat for 3s exits; held keys timeout at 0.45s (0.3s for X).
+- **Physical gamepad mirror**: When physical gamepad is attached, web sticks/keys/mode/SVG buttons are rejected.
+- **Post-E-Stop 2s guard**: Rejects stand/walk/sit/skills/sticks/actions for 2s after torque-off.
 """
 import itertools
 from contextlib import nullcontext
@@ -77,90 +26,88 @@ from .pad_combo import Refused
 from .rpc import RpcError, Timeout, Unreachable
 from .updates import neutral_robot_command
 
-MAX_V = 0.3               # 满杆 m/s：padd 默认 --max-linear 0.3（padd main.rs:158-164），官方网页遥控同一个数
-MAX_W = 1.5               # 满杆 rad/s：padd 默认 --max-angular 1.5（padd main.rs:166-168）
-V_CEIL, W_CEIL = 0.6, 3.0   # 从配置里读到的再大也不超过这个（读错了也不至于飞出去）
-HEAD_RAD = 2.5            # 头满杆 rad：padd 默认 --max-head 2.5（fork padd:201-205，「the network itself decides how far」）
-HEAD_CEIL = 2.5           # 配置里写得再大也按这个算
-HEAD_CHOICES = (0.5, 1.0, 2.5)   # --input-settings 文件里 head_rad 只认这三个（fork padd/src/input_settings.rs:16-21）
-BODY_Z_UP, BODY_Z_DOWN, BODY_ANGLE = 0.010, 0.025, 0.2618   # 身体模式满杆（fork padd:316-320）
-BODY_TRAIN_ANGLE = 0.26   # 训练范围 roll / pitch ±0.26 rad、z −0.025..+0.010 m（fork lib.rs:2320-2325）：发之前夹到这里
-DEADZONE = 0.1            # 摇杆死区，每个轴单独算、不重新缩放（fork padd:184-187、1342-1349）
-LEASE_S = 6.0             # 拿着方向盘的页面这么久没推摇杆、没说「还按着」：松开
+MAX_V = 0.3
+MAX_W = 1.5
+V_CEIL, W_CEIL = 0.6, 3.0
+HEAD_RAD = 2.5
+HEAD_CEIL = 2.5
+HEAD_CHOICES = (0.5, 1.0, 2.5)
+BODY_Z_UP, BODY_Z_DOWN, BODY_ANGLE = 0.010, 0.025, 0.2618
+BODY_TRAIN_ANGLE = 0.26
+DEADZONE = 0.1
+LEASE_S = 6.0
 RELAX_GUARD_S = 2.0
-HOLD_S = 0.45             # 动作按住时页面每 0.15 秒说一次「还按着」；这么久没说就停
-KEYS_HOLD_S = 0.45        # 按住的键（LT / RT）：页面每 0.15 秒报一次，这么久没报当松开（三 V4）
-X_HOLD_S = 0.3            # X 单独短一点：连滚窗口是 0.15 秒（fork control.rs:42-47），页面掉线最多多滚一次
-STICK_STALE_S = 0.6       # 头 / 身体最后一帧非零、这么久没新帧：回中（三 V11）
-MODE_HB_S = 3.0           # 头 / 身体模式这么久没报「还在」：退出模式（三 V11）
-TICK_S = 0.04             # 后台 25 Hz：按住的键、看门狗、清理
-RELAX_CLEAR_DELAY_S = 0.1   # 卸力引起的头 / 身体清理排在卸力请求之后（三 V1 第 5 条）
-MOVE_MIN_GAP_S = 0.04     # 同一通道两帧至少隔这么久；来得太密的不丢，等一下发最新的那个（审查 21）
+HOLD_S = 0.45
+KEYS_HOLD_S = 0.45
+X_HOLD_S = 0.3
+STICK_STALE_S = 0.6
+MODE_HB_S = 3.0
+TICK_S = 0.04
+RELAX_CLEAR_DELAY_S = 0.1
+MOVE_MIN_GAP_S = 0.04
 WALK_STOP_WAIT_S = 1.0
-WALK_VERIFY_S = 3.0       # 「开始走」回执之后再回读这么久，看到 policy_enabled 才算真的开起来
+WALK_VERIFY_S = 3.0
 WALK_VERIFY_POLL_S = 0.1
 CMD_TIMEOUT_S = 3.0
-BINDINGS_STALE_S = 10.0   # pad.bindings 这么旧了，按图上的键之前先拉一次（三 V14；padd 每秒重读配置 padd:806-817）
-LOW_BATTERY = 10          # 不再用：电量低不拦「站起来」（用户 10-18 电池只警告，见 studio/battery.py）
-PADD_UNIT = "/etc/systemd/system/padd.service"        # 单元装在这里：官方 scripts/board-test.sh:800-806
+BINDINGS_STALE_S = 10.0
+LOW_BATTERY = 10
+PADD_UNIT = "/etc/systemd/system/padd.service"
 PADD_DROPIN_DIR = "/etc/systemd/system/padd.service.d"
-PADD_INPUT_ACK = "/run/padd/input-settings.json"      # padd 用上幅度设置以后写的回执（fork padd/src/input_settings.rs:63-74）
-# 走单独的小线程池（4 条：三 V13），不跟配对、蓝牙、一次性请求这些慢调用挤
+PADD_INPUT_ACK = "/run/padd/input-settings.json"
 FAST_OPS = ("move", "stop", "sticks", "keys", "mode", "action_hold", "action_stop", "drive", "watch")
 FAST_WORKERS = 4
-GONE_KEEP = 500           # 记住多少个断开 / 关掉的连接
+GONE_KEEP = 500
 INF = float("inf")
 
-POSTURE_CN = {"absent": "主程序没在跑", "starting": "主程序在启动", "commissioning": "调试模式", "sitting": "坐着",
-              "limp": "软着", "walking": "在走", "policy": "站着（准备好走了）", "holding": "站着（保持）",
-              "homing": "在站起来", "unknown": "姿势读不出来", "servo_session": "在调舵机"}
+POSTURE_CN = {"absent": "robotd stopped", "starting": "robotd starting", "commissioning": "Commissioning", "sitting": "Sitting",
+              "limp": "Torque Off", "walking": "Walking", "policy": "Standing (Ready to Walk)", "holding": "Standing (Hold)",
+              "homing": "Standing up", "unknown": "Posture unknown", "servo_session": "Servo Tuning"}
 DRIVING = ("policy", "walking")
 MODES = ("drive", "head", "body")
-MODE_CN = {"drive": "走路", "head": "头模式", "body": "身体模式"}
-DRIVE_MODE_CN = {"walk": "走路", "roller": "轮滑"}     # robot.setMode / robot.policies 的 mode（十字上按住 3 秒切）
+MODE_CN = {"drive": "Walk Mode", "head": "Head Mode", "body": "Body Mode"}
+DRIVE_MODE_CN = {"walk": "Walk", "roller": "Roller"}
 HELD_KEYS = ("lt", "rt", "x")
-KEY_CN = {"a": "A", "x": "X", "lb": "LB", "rb": "RB", "dpad_down": "十字下", "lt": "LT", "rt": "RT"}
+KEY_CN = {"a": "A", "x": "X", "lb": "LB", "rb": "RB", "dpad_down": "D-Pad Down", "lt": "LT", "rt": "RT"}
 BIND_KEYS = ("a", "x", "lb", "rb", "dpad_down")
-# 官方默认绑定（fork robotd-params lib.rs:175-215）；读不到 pad.bindings 时按它
 DEFAULT_BIND = {"a": "ground_pick", "x": "roulade", "lb": "kick_left", "rb": "kick_right", "dpad_down": "sit_toggle"}
 HEAD_ZERO = {"neck_pitch": 0.0, "head_pitch": 0.0, "head_yaw": 0.0, "head_roll": 0.0}
-POSE_OFF = {"active": False}                                   # 一定写 active:false（默认是 true）
+POSE_OFF = {"active": False}
 POSE_CENTER = {"z": 0.0, "roll": 0.0, "pitch": 0.0, "active": True}
 _FLAG = re.compile(r"--(max-linear-backward|max-linear|max-angular)(?:=|\s+)(\S+)")
 _FLAG_HEAD = re.compile(r"--max-head(?:=|\s+)(\S+)")
 _FLAG_PATH = re.compile(r"--(input-settings|config)(?:=|\s+)(\S+)")
-NO_SIT_INFO = "读不到它是不是坐着（robot.policies 读不到或者太旧）：等几秒再点。猜错了会让坐着的鸭子站起来"
-MIRROR_SVG = "实体手柄连着：图上只跟着它显示，网页上按的不收（跟实体手柄抢会被它每 0.1 秒发的指令盖掉）"
-MODE_IDLE = "策略没在跑：摇杆不会让头 / 身体动（Y / B 照样能切；点「开始走」以后才管用）"
+NO_SIT_INFO = "Cannot read sitting state (robot.policies missing or stale): wait a few seconds and retry"
+MIRROR_SVG = "Physical gamepad is connected: on-screen controls mirror it and do not accept input"
+MODE_IDLE = "Policy is not running: sticks will not move head/body (Y/B still switch modes; click 'Start Walking' to activate)"
 
 
 def plain_refusal(reason):
-    """robotd 拒绝时的原文 → 人话（fork 的中文原因原样给）。"""
+    """Translate robotd refusal message to clear user-facing text."""
     r = str(reason or "")
     low = r.lower()
     if "policy is not driving" in low:
-        return "策略没在跑：先点「开始走」（或者按手柄 Start 两次）"
+        return "Policy is not running: click 'Start Walking' first (or press Start twice on gamepad)"
     if "home pose" in low and "still" in low:
-        return "它还在回站姿，等一秒再点"
+        return "Still returning to standing posture; wait a second and retry"
     if "no skill named" in low:
-        return f"这只鸭子没有这个技能（原文：{r}）"
+        return f"This duck does not have this skill ({r})"
     if "no skills configured" in low:
-        return "这只鸭子没配技能"
+        return "No skills configured on this duck"
     if "no voice" in low:
-        return "这只鸭子没有声音：音频关了，或者声音包是空的（在鸭子上运行 sounds ensure-bank）"
+        return "No voice available: audio is off or sound bank is empty (run sounds ensure-bank on the duck)"
     if "read-only" in low:
-        return "主程序现在是只读的（调试模式），动作都不接受"
+        return "robotd is currently read-only (commissioning mode); motion commands rejected"
     if "roller onnx models are not installed" in low:
-        return "这只鸭子没装轮滑模型：切不了，还是走路"
+        return "Roller ONNX models are not installed on this duck: staying in Walk mode"
     if "nothing to switch between" in low:
-        return "这只鸭子没装走路的策略：没有可切的"
+        return "No walking policies installed to switch between"
     if "requires stationary home" in low:
-        return "要站好不动（回到站姿、没在做技能）才能切"
-    return f"主程序没接受：{r}" if r else "主程序没接受（没说原因）"
+        return "Must be standing stationary at home (no active skill) to switch modes"
+    return f"robotd refused: {r}" if r else "robotd refused (no reason given)"
 
 
 def _exec_line(texts):
-    """padd 单元文件和 drop-in [(路径, 文本)] 里最后生效的 ExecStart（空的 ExecStart= 是「清掉前面的」）。"""
+    """Find the last effective ExecStart in padd unit + drop-ins [(path, text)]."""
     exec_line, exec_src = None, None
     for path, text in texts:
         for raw in str(text or "").splitlines():
@@ -172,7 +119,7 @@ def _exec_line(texts):
 
 
 def parse_speed_limits(texts):
-    """padd 单元文件和 drop-in 的文本 [(路径, 文本)] → {"v", "w", "src"}。写坏的数（比如 1.2.3）跳过，不抛（审查二 I3）。"""
+    """Parse padd unit/drop-ins [(path, text)] -> {"v", "w", "src"}."""
     exec_line, exec_src = _exec_line(texts)
     found, bad = {}, []
     for k, v in _FLAG.findall(exec_line or ""):
@@ -188,21 +135,19 @@ def parse_speed_limits(texts):
     v = min([found[k] for k in ("max-linear", "max-linear-backward") if k in found] or [MAX_V])
     w = found.get("max-angular", MAX_W)
     if found:
-        src = f"padd 的配置（{exec_src}）"
+        src = f"padd config ({exec_src})"
     elif texts:
-        src = "官方默认（padd.service 里没改）"
+        src = "Default (unmodified in padd.service)"
     else:
-        src = "官方默认（读不到 padd 的配置）"
+        src = "Default (padd config unreadable)"
     if bad:
-        src += f"；看不懂的参数没用：{'、'.join(bad)}"
+        src += f"; ignored invalid flags: {', '.join(bad)}"
     capped = v > V_CEIL or w > W_CEIL
-    return {"v": min(v, V_CEIL), "w": min(w, W_CEIL), "src": src + ("，超过上限的按上限算" if capped else "")}
+    return {"v": min(v, V_CEIL), "w": min(w, W_CEIL), "src": src + (" (clamped to safety ceiling)" if capped else "")}
 
 
 def parse_padd_inputs(texts):
-    """ExecStart 里的 --max-head、--input-settings、--config（三 V9、V18）。fork 的 drop-in 长这样
-    （fork packaging/gamepad.py:94）：startup_gate.py … --exec …/padd --socket … --config /etc/robot/feetech-ft5/robotd.toml
-    --max-head 2.5 --input-settings /etc/robot/feetech-ft5/pad-settings.json。写坏的数跳过、不抛。"""
+    """Parse --max-head, --input-settings, --config from ExecStart."""
     exec_line, exec_src = _exec_line(texts)
     out = {"max_head": None, "input_settings": None, "config": None, "bad": [], "src": exec_src}
     for v in _FLAG_HEAD.findall(exec_line or ""):
@@ -221,8 +166,7 @@ def parse_padd_inputs(texts):
 
 
 def _padd_settings(d):
-    """padd 认不认这份幅度设置（fork padd/src/input_settings.rs:7-21）：只能有 mouth_percent、head_rad 两个字段
-    （deny_unknown_fields：多一个字段整份拒，审查 R10），嘴 0–100，头只认 0.5 / 1.0 / 2.5。认 → (头, 嘴)，不认 → None。"""
+    """Validate padd input settings JSON: exact keys mouth_percent (0-100) and head_rad (0.5/1.0/2.5)."""
     if not isinstance(d, dict) or set(d) != {"mouth_percent", "head_rad"}:
         return None
     m, h = d["mouth_percent"], d["head_rad"]
@@ -234,21 +178,18 @@ def _padd_settings(d):
 
 
 def input_limits(inputs, settings_text=None, settings_error=None, ack=None):
-    """跟 padd 一样算头、嘴的幅度（fork padd/src/input_settings.rs:9-27、36-46、63-80）：先是嘴 100%、头 --max-head（没写就 2.5）；
-    --input-settings 文件 padd 认（_padd_settings）就两个都用文件里的，不认就保持前面的。
-    ack：padd 自己写的回执里的 settings（_read_inputs 核过写回执的 padd 还活着、文件对得上）——那是 padd 正在用的数，以它为准。
-    → {"head", "mouth"（百分比）, "src"}。"""
+    """Compute head/mouth limits matching padd's rules -> {"head", "mouth", "src"}."""
     head = inputs.get("max_head") or HEAD_RAD
-    src = f"--max-head {head:g}" if inputs.get("max_head") else "官方默认（头 2.5 rad、嘴 100%）"
+    src = f"--max-head {head:g}" if inputs.get("max_head") else "Default (head 2.5 rad, mouth 100%)"
     mouth = 100.0
     path = inputs.get("input_settings")
     got = _padd_settings(ack) if path and ack is not None else None
     if got is not None:
         head, mouth = got
-        src = f"padd 正在用的（它的回执 {PADD_INPUT_ACK}）"
+        src = f"Active in padd ({PADD_INPUT_ACK})"
     elif path:
         if settings_error is not None:
-            src += f"；{path} 读不出来（{settings_error}），按前面的"
+            src += f"; {path} unreadable ({settings_error}), using fallback"
         else:
             try:
                 got = _padd_settings(json.loads(settings_text or ""))
@@ -256,13 +197,13 @@ def input_limits(inputs, settings_text=None, settings_error=None, ack=None):
                 got = None
             if got is not None:
                 head, mouth = got
-                src = f"padd 的幅度设置（{path}）"
+                src = f"padd input settings ({path})"
             else:
-                src += f"；{path} 里的 padd 不认（只能有 mouth_percent、head_rad 两项，头只认 0.5 / 1.0 / 2.5，嘴 0–100），按前面的"
+                src += f"; {path} rejected by padd (requires exact keys mouth_percent 0-100, head_rad in 0.5/1.0/2.5), using fallback"
     if inputs.get("bad"):
-        src += f"；看不懂的参数没用：{'、'.join(inputs['bad'])}"
+        src += f"; ignored invalid flags: {', '.join(inputs['bad'])}"
     if head > HEAD_CEIL:
-        head, src = HEAD_CEIL, src + f"，头超过 {HEAD_CEIL:g} rad 的按 {HEAD_CEIL:g} 算"
+        head, src = HEAD_CEIL, src + f", head clamped to {HEAD_CEIL:g} rad"
     return {"head": head, "mouth": mouth, "src": src}
 
 
@@ -271,20 +212,18 @@ def _dz(v):
 
 
 def sticks_to_intent(mode, lx, ly, rx, ry, lim, head_rad):
-    """网页摇杆（-1..1，x 向右、y 向下为正，跟 TouchStick 一样）→ 发给 robotd 的那一帧（审查三 附 2，照 fork padd 原样，
-    正负号也照抄：padd:1437-1439「the prototype's alpha mapping, signs included … verified on hardware there」）。
-    padd 的坐标 y 向上为正：LX = dz(lx)、LY = −dz(ly)、RX = dz(rx)、RY = −dz(ry)。返回 (method, params)。"""
+    """Map normalized sticks (-1..1, +x right, +y down) to robotd intent (method, params), matching padd signs."""
     LX, LY, RX, RY = _dz(lx), -_dz(ly), _dz(rx), -_dz(ry)
-    r = lambda x: round(x, 4) + 0.0    # noqa: E731 —— +0.0 去掉 -0.0
-    if mode == "head":                  # padd:1427-1445
+    r = lambda x: round(x, 4) + 0.0    # noqa: E731 -- +0.0 strips -0.0
+    if mode == "head":
         return "robot.head", {"neck_pitch": r(RY * head_rad), "head_pitch": r(-LY * head_rad),
                               "head_yaw": r(-LX * head_rad), "head_roll": r(RX * head_rad)}
-    if mode == "body":                  # padd:1447-1460，再夹到训练范围（fork lib.rs:2320-2325）
+    if mode == "body":
         z = LY * (BODY_Z_UP if LY >= 0 else BODY_Z_DOWN)
         clampa = lambda a: max(-BODY_TRAIN_ANGLE, min(BODY_TRAIN_ANGLE, a))   # noqa: E731
         return "robot.pose", {"z": r(max(-BODY_Z_DOWN, min(BODY_Z_UP, z))), "roll": r(clampa(RX * BODY_ANGLE)),
                               "pitch": r(clampa(RY * BODY_ANGLE)), "active": True}
-    v, w = lim["v"], lim["w"]           # padd:1415-1426：vx = LY×0.3、vy = −LX×0.3、vyaw = −RX×1.5，右摇杆的 Y 不用
+    v, w = lim["v"], lim["w"]
     return "robot.move", {"vx": r(LY * v), "vy": r(-LX * v), "vyaw": r(-RX * w)}
 
 
@@ -642,56 +581,49 @@ class DriveMixin:
                 except (Unreachable, Timeout) as e:
                     with self._lk:
                         if self._latch[kind] is None:
-                            self._latch[kind] = lat                 # 还算网页置着：过 1 秒再试，最多 3 次
+                            self._latch[kind] = lat                 # Still latched: retry in 1s, up to 3 times
                         if req["tries"] < 2:
                             self._clears.append(dict(req, due=self.clock() + 1.0, tries=req["tries"] + 1))
-                    self.log.warn("头 / 身体没能回正", cat="安全", step=method, raw=str(e),
-                                  hint=("1 秒后再试" if req["tries"] < 2 else "试了 3 次都没发出去：") +
-                                  "身体模式留着的话鸭子推不走，按一下手柄 B 两次、或者卸力再站起来")
+                    self.log.warn("Failed to center head / body", cat="Safety", step=method, raw=str(e),
+                                  hint=("Retrying in 1s" if req["tries"] < 2 else "Failed after 3 attempts: ") +
+                                  "If Body Mode stays active, the duck won't walk; press B twice on gamepad or torque off and re-stand")
 
     def _mode_op(self, args, conn, by):
-        """页面按了图上的 Y / B（切头模式 / 身体模式 / 回到走路），或者在头 / 身体模式时每秒报一次「还在」（三 V6、V11）。
-        进模式不发任何东西（跟 padd 一样）；网页正在走就先发一次停。离开模式清掉这个页面置过的头 / 身体。
-        策略没在跑也能切（padd 也能），只是摇杆帧会被丢掉（三 V12）。"""
+        """Switch between Walk / Head / Body modes (Y/B buttons) or send mode heartbeat."""
         mode = args.get("mode")
         if mode not in MODES:
-            raise Refused(f"不认识的模式：{mode}")
+            raise Refused(f"Unknown mode: {mode}")
         seq = self._seq(args)
         now = self.clock()
         stop_first = False
         with self._lk:
             if not self.motion_studio.request_current():
-                return {"dropped": "动作会话已经改变，旧模式请求已丢弃", "mode": self._mode_of(conn)}
+                return {"dropped": "Motion session changed; stale mode request dropped", "mode": self._mode_of(conn)}
             if conn in self._gone:
-                raise Refused("这个页面已经断开了")
+                raise Refused("This page has disconnected")
             cur = self._mode_of(conn)
             if mode != "drive":
                 if conn in self._closed:
-                    return {"dropped": "这个页面不在手柄区", "mode": cur}
+                    return {"dropped": "Page is not in the gamepad section", "mode": cur}
                 if self._pad_attached(now)[0]:
                     raise Refused(MIRROR_SVG)
             if args.get("hb"):
-                # 心跳（页面在头 / 身体模式时每秒一次）只续「还在」，**不进模式**：后端已经替页面退出了（卸力、策略停了、
-                # 3 秒没心跳、被接管、实体手柄连上），心跳不能把它要回来，模式以后端为准（审查 R3、三 V6）。
-                # 心跳不碰模式的序号：它不改模式，晚到的旧心跳也只会被拒
                 if mode == cur:
                     if mode != "drive":
                         self._modes[conn]["hb"] = now
                     return {"mode": cur}
                 why = (self._mode_exit.get(conn) or {}).get("why")
-                return {"mode": cur, "dropped": f"后端已经退出了{MODE_CN.get(mode, mode)}" + (f"（{why}）" if why else "")}
+                return {"mode": cur, "dropped": f"Backend already exited {MODE_CN.get(mode, mode)}" + (f" ({why})" if why else "")}
             q = self._seq_of(conn)
             if seq is not None:
                 if seq <= q["mode"]:
-                    return {"dropped": "旧的", "mode": cur}
+                    return {"dropped": "Stale request", "mode": cur}
                 q["mode"] = seq
             ex = self._mode_exit.get(conn)
             if mode == "drive":
-                self._mode_exit.pop(conn, None)         # 页面回到走路 = 它知道后端退出过了（前端跟着后端回走路时会发这一句）
+                self._mode_exit.pop(conn, None)
             elif cur == "drive" and ex is not None:
-                # 后端刚替这个页面退出了模式、页面还没回过「走路」：这时来的「进头 / 身体模式」多半是页面还没看到退出
-                # （心跳、没跟上快照），不能把它要回来（审查 R3、三 V6）。页面跟着回到走路以后再按就进得去
-                return {"dropped": f"后端已经退出了{MODE_CN[mode]}（{ex['why']}）：先回到走路，再按一次", "mode": cur}
+                return {"dropped": f"Backend already exited {MODE_CN[mode]} ({ex['why']}): return to Walk Mode and press again", "mode": cur}
             note = MODE_IDLE if mode != "drive" and self._posture() not in DRIVING else None
             if mode == cur:
                 if mode != "drive":
@@ -699,26 +631,23 @@ class DriveMixin:
                 return {"mode": cur, "note": note}
             if cur != "drive":
                 self._modes.pop(conn, None)
-                # 一律排（审查 R1）：这个页面第一帧头 / 身体可能还在路上，_flush_clears 在 _send_lk 里会等它写完 _latch
-                self._clears.append({"conn": conn, "why": f"退出{MODE_CN[cur]}", "due": now, "tries": 0})
+                self._clears.append({"conn": conn, "why": f"Exited {MODE_CN[cur]}", "due": now, "tries": 0})
             if mode != "drive":
                 self._modes[conn] = {"mode": mode, "hb": now}
                 d = self._driver
                 stop_first = self._web_driving and d is not None and d["conn"] == conn
-            q["stop"] = max(q["stop"], q["hi"])            # 换模式之前的摇杆帧作废
-        self.log.info(f"网页手柄 {'Y' if 'head' in (mode, cur) else 'B'} → {MODE_CN[mode]}（{by or '页面'}）"
-                      + (f"：{note}" if note else ""), cat="手柄", dedup=False)
+            q["stop"] = max(q["stop"], q["hi"])
+        self.log.info(f"Web gamepad {'Y' if 'head' in (mode, cur) else 'B'} -> {MODE_CN[mode]} ({by or 'page'})"
+                      + (f": {note}" if note else ""), cat="Gamepad", dedup=False)
         if stop_first:
-            self._stop_move({}, conn, by)                  # padd 在头 / 身体模式每拍发 move 0（padd:1427-1448）
+            self._stop_move({}, conn, by)
         self._flush_clears(force=True)
         return {"mode": mode, "note": note}
 
-    # ================= 卸力（审查二 I2） =================
+    # ================= Torque Off Guard =================
 
-    def note_relax(self, by=None, why="卸力了"):
-        """顶上「卸力」、空格、图上 Select 按下的那一刻：app 的 run_relax 在事件循环里同步调（只占锁、不碰网络，不抛）。
-        记下卸力时间（2 秒内不接受上力）、叫停正在做的动作、头 / 身体的清理排到卸力之后（三 V1 第 5 条）。
-        图上十字右（重启舵机，主程序会先全身卸力）收下以后也调，why 写它。"""
+    def note_relax(self, by=None, why="Torque disabled"):
+        """Called synchronously by app.run_relax on event loop when E-Stop / Space / Select is pressed."""
         try:
             with self._lk:
                 self._relax_at = self.clock()
@@ -730,12 +659,11 @@ class DriveMixin:
                     a["stop"].set()
             self._request_clear(None, why, RELAX_CLEAR_DELAY_S)
             self._test_evt.set()
-        except Exception:  # noqa: BLE001 —— 卸力路上不能因为手柄页出错
+        except Exception:  # noqa: BLE001
             pass
 
     def _relax_seen(self, view, now):
-        """feed_robot 里调（拿着锁）：卸力计数变了、或者回读扭矩从开变关（手柄 Select、robotctl、摔倒、低电量），都记成卸力。
-        返回 True = 这一下是新的卸力。"""
+        """Detect torque-off events from robotd status (press count or torque on->off transition)."""
         new = False
         presses = view.get("estop_presses")
         if isinstance(presses, int) and not isinstance(presses, bool):
@@ -755,27 +683,26 @@ class DriveMixin:
         return new
 
     def _drive_feed(self, view):
-        """feed_robot 里调（拿着锁，事件循环里：只改内存）：Studio 第一次看到主程序在 → 排一次 pose 复位；
-        姿势离开「准备好走」→ 退出模式、清掉头 / 身体（三 V1 第 8 条、V12）。"""
+        """Called on event loop from feed_robot (in-memory only)."""
         self.motion_studio.policy_feed(view)
         if self._pose_reset == "pending" and view.get("present") is True:
             self._pose_reset = "due"
             self._tick_evt.set()
         drv = self._posture() in DRIVING
         if not drv and not self.motion_studio.posture_allowed():
-            self.motion_studio.invalidate("策略离开准备好走的状态")
+            self.motion_studio.invalidate("Policy left Ready-to-Walk state")
         left = self._was_driving and not drv
         self._was_driving = drv
         if left and (self._modes or self._latch["head"] is not None or self._latch["body"] is not None):
-            self._request_clear(None, f"策略停了（现在{POSTURE_CN.get(self._posture(), self._posture())}）")
+            self._request_clear(None, f"Policy stopped (now {POSTURE_CN.get(self._posture(), self._posture())})")
 
     def _relax_block(self, now):
         r = self._robot or {}
         if r.get("estop_active"):
-            return "正在卸力，等它确认完再说"
+            return "Disabling torque; wait for confirmation"
         guard = self.w.get("relax_guard", RELAX_GUARD_S)
         if now - self._relax_at < guard:
-            return f"刚卸了力：{guard:g} 秒内不接受让它动的指令（防止刚卸力又被顶起来）"
+            return f"Torque recently disabled: motion commands blocked for {guard:g}s"
         return None
 
     # ================= 速度上限（审查 24）、头 / 嘴幅度（三 V9） =================
@@ -810,7 +737,7 @@ class DriveMixin:
             try:
                 text = self.read_text(inputs["input_settings"])
             except FileNotFoundError:
-                err = "文件不在"
+                err = "file not found"
             except Exception as e:  # noqa: BLE001
                 err = f"{type(e).__name__}: {e}"
             try:
@@ -819,11 +746,11 @@ class DriveMixin:
                 alive = isinstance(pid, int) and not isinstance(pid, bool) and self.exists(f"/proc/{pid}")
                 if alive and a.get("path") == inputs["input_settings"]:
                     ack = a.get("settings")
-            except Exception:  # noqa: BLE001 —— 没有回执（padd 没读过这个文件、电脑上）：自己读
+            except Exception:  # noqa: BLE001
                 pass
         return input_limits(inputs, text, err, ack), inputs["config"]
 
-    # ================= 网页摇杆 =================
+    # ================= Web Sticks =================
 
     def _seq(self, args):
         seq = args.get("seq")
@@ -832,55 +759,51 @@ class DriveMixin:
         return seq
 
     def _gate(self, conn, now):
-        """连续指令（摇杆的 move / head / pose、按住的键）共同的挡（在 _lk 里调）。
-        返回 None = 放行；返回 dict = 悄悄丢掉（页面已经走了）；不能做就抛 Refused（原因给页面看）。"""
+        """Common gate for continuous drive/stick/key commands (call under _lk)."""
         if conn in self._gone:
-            return {"dropped": "页面已经断开"}
+            return {"dropped": "Page disconnected"}
         if conn in self._closed:
-            return {"dropped": "这个页面不在手柄区"}
+            return {"dropped": "Page is not in the gamepad section"}
         attached, _ = self._pad_attached(now)
         if attached:
             if not self._pad_said:
                 self._pad_said = True
-                self.log.info("实体手柄连着，网页摇杆只跟着它动、不发指令", cat="手柄")
-            raise Refused("实体手柄连着：网页摇杆现在只跟着它动、不发指令（padd 哪怕没人碰也每 0.1 秒发一次「停」，"
-                          "网页的会被盖掉）。要用网页遥控，先把手柄关掉")
+                self.log.info("Physical gamepad is connected; web sticks are mirroring only", cat="Gamepad")
+            raise Refused("Physical gamepad is connected: web sticks mirror it only (padd sends zero velocity every 0.1s). Turn off the physical gamepad to use web control")
         self._pad_said = False
         ok, why = self._robot_ok(now)
-        if ok is not True:           # 审查 14：不知道主程序在不在运动模式，也不放行
-            raise Refused(f"现在不能遥控：{why or '读不到主程序的状态'}")
+        if ok is not True:
+            raise Refused(f"Cannot control right now: {why or 'robotd status unreadable'}")
         block = self._relax_block(now)
         if block:
             raise Refused(block)
         return None
 
     def _send_intent(self, chan, method, params, conn, by, seq, mode=None):
-        """发一帧连续指令（move / head / pose 通知）：过 _gate、按序号挡旧的、拿方向盘、同一通道 40 ms 内只发最新的。
-        检查和发送在 _send_lk 里，robotd 收到的顺序就是这里定的顺序。mode：头 / 身体帧发之前再看一眼模式没变（三 V6）。
-        返回 (结果 dict, 发出去了吗)。"""
+        """Send one continuous intent frame (move/head/pose) with sequencing, lease, and 40ms coalescing."""
         now = self.clock()
         motion_epoch = self.motion_studio.epoch
         with self._lk:
             if not self.motion_studio.request_current():
-                return {"dropped": "动作会话已经改变，旧指令已丢弃"}, False
+                return {"dropped": "Motion session changed; stale command dropped"}, False
             g = self._gate(conn, now)
             if g:
                 return g, False
             if mode is not None and self._mode_of(conn) != mode:
-                return {"dropped": f"模式对不上：后端现在是「{MODE_CN[self._mode_of(conn)]}」", "mode": self._mode_of(conn)}, False
+                return {"dropped": f"Mode mismatch: backend is in {MODE_CN[self._mode_of(conn)]}", "mode": self._mode_of(conn)}, False
             q = self._seq_of(conn)
             if seq is None:
-                seq = q["hi"] + 1        # 页面没给序号：按到达的先后排
+                seq = q["hi"] + 1
             if seq <= q["stop"] or seq <= q["sent"].get(chan, -1):
-                return {"dropped": "旧的指令（已经松手了）"}, False
+                return {"dropped": "Stale command (already released)"}, False
             self._take_lease(conn, by, now)
             q["hi"] = max(q["hi"], seq)
             q["latest"][chan] = max(q["latest"].get(chan, -1), seq)
             gap = MOVE_MIN_GAP_S - (now - self._last_sent_at.get(chan, -1e9))
         if self.robot is None:
-            raise Refused("这只鸭子没配主程序的地址")
+            raise Refused("robotd address is not configured")
         if self._clears:
-            self._flush_clears()         # 方向盘刚换了人：先把原来那个页面的头 / 身体清掉
+            self._flush_clears()
         if gap > 0:
             self._cancel_wait(gap)
         with self._send_lk:
@@ -888,13 +811,13 @@ class DriveMixin:
                 d, q = self._driver, self._seq_of(conn)
                 if (not self.motion_studio.request_current() or motion_epoch != self.motion_studio.epoch or conn in self._gone or conn in self._closed or seq != q["latest"].get(chan) or seq <= q["stop"]
                         or d is None or d["conn"] != conn or (mode is not None and self._mode_of(conn) != mode)):
-                    return {"dropped": "被更新的指令替掉了，或者已经松手"}, False
+                    return {"dropped": "Superseded by newer command or released"}, False
                 q["sent"][chan] = seq
                 self._last_sent_at[chan] = self.clock()
             try:
                 self._notify_output(method, params)
             except (Unreachable, Timeout) as e:
-                raise Refused(f"没发出去：{e}") from None
+                raise Refused(f"Send failed: {e}") from None
             with self._lk:
                 if chan in ("head", "body"):
                     nonzero = any(abs(v) > 1e-9 for k, v in params.items() if k != "active")
@@ -903,14 +826,13 @@ class DriveMixin:
         return {"merged": gap > 0}, True
 
     def _move(self, args, conn=None, by=None, mode="drive"):
-        """走路的一帧（旧的 move 通道和 sticks 的走路模式都走这里）。mode：这一帧是哪个模式下的，后端模式不是它就丢——
-        查完模式到发出去之间切到了头 / 身体模式，也不会在头 / 身体模式里发出速度（审查 R6、三 V6）。"""
+        """Send one walking velocity frame (legacy move or sticks in drive mode)."""
         try:
             vals = [float(args.get(k, 0) or 0) for k in ("vx", "vy", "vyaw")]
         except (TypeError, ValueError):
-            raise Refused("速度要是数字") from None
+            raise Refused("Velocity values must be numbers") from None
         if not all(math.isfinite(v) for v in vals):
-            raise Refused("速度不是有限的数")
+            raise Refused("Velocity values must be finite")
         lim = self._speed_limits()
         vx = max(-lim["v"], min(lim["v"], vals[0]))
         vy = max(-lim["v"], min(lim["v"], vals[1]))
@@ -925,40 +847,39 @@ class DriveMixin:
             self._web_driving = any((vx, vy, vyaw))
             self.virtual.update(last=[vx, vy, vyaw], at=self.clock())
         if start:
-            self.log.info(f"网页遥控开始开（{by or '页面'}，robot.move）", cat="手柄")
+            self.log.info(f"Web control driving started ({by or 'page'}, robot.move)", cat="Gamepad")
         return {"sent": [vx, vy, vyaw], "merged": r["merged"]}
 
     def _sticks(self, args, conn=None, by=None):
-        """网页手柄的摇杆（图上的两个、下面两个大的共用这一个通道，三 V6、V20）：{mode, lx, ly, rx, ry, seq}，
-        -1..1、x 向右、y 向下为正。后端按 padd 的公式换算（sticks_to_intent），模式以后端记的为准：对不上就丢、告诉页面。"""
+        """Handle web gamepad sticks: {mode, lx, ly, rx, ry, seq}."""
         mode = args.get("mode", "drive")
         if mode not in MODES:
-            raise Refused(f"不认识的模式：{mode}")
+            raise Refused(f"Unknown mode: {mode}")
         try:
             vals = [float(args.get(k, 0) or 0) for k in ("lx", "ly", "rx", "ry")]
         except (TypeError, ValueError):
-            raise Refused("摇杆要是数字") from None
+            raise Refused("Stick values must be numbers") from None
         if not all(math.isfinite(v) for v in vals):
-            raise Refused("摇杆不是有限的数")
+            raise Refused("Stick values must be finite")
         lx, ly, rx, ry = (max(-1.0, min(1.0, v)) for v in vals)
         now = self.clock()
         with self._lk:
             cur = self._mode_of(conn)
             if not self.motion_studio.request_current():
-                return {"dropped": "动作会话已经改变，旧摇杆请求已丢弃", "mode": cur}
+                return {"dropped": "Motion session changed; stale stick request dropped", "mode": cur}
             if conn in self._gone or conn in self._closed:
-                return {"dropped": "页面已经离开", "mode": cur}
+                return {"dropped": "Page left gamepad section", "mode": cur}
             if mode != cur:
                 why = (self._mode_exit.get(conn) or {}).get("why")
-                return {"dropped": f"模式对不上：后端现在是「{MODE_CN[cur]}」" + (f"（{why}）" if why else ""), "mode": cur}
+                return {"dropped": f"Mode mismatch: backend is in {MODE_CN[cur]}" + (f" ({why})" if why else ""), "mode": cur}
             if cur != "drive":
                 self._modes[conn]["hb"] = now
                 if self._posture() not in DRIVING:
-                    self._gate(conn, now)           # 镜像、卸力这些照样先说
+                    self._gate(conn, now)
                     return {"dropped": MODE_IDLE, "mode": cur}
                 a = self._action
                 if cur == "head" and a is not None and any(C.head_at(s, 0.0) is not None for s in a["steps"]):
-                    raise Refused(f"正在做「{a['name']}」（也在动头）：等它做完或者先松开")
+                    raise Refused(f"Running '{a['name']}' (also moves head): wait for it to finish or release")
         method, params = sticks_to_intent(cur, lx, ly, rx, ry, self._speed_limits(), self._inputs["head"])
         if cur == "drive":
             r = self._move(dict(params, seq=args.get("seq")), conn, by, mode="drive")
@@ -972,16 +893,14 @@ class DriveMixin:
         threading.Event().wait(s)
 
     def _stop_move(self, args=None, conn=None, by=None):
-        """松手：走路模式发一次 move 0；头模式头回正、身体模式身体回中（还在身体模式：{0,0,0,active:true}，三 附 2）。
-        不在服务端重复发：浏览器断了，robotd 的 deadman 500 ms 后自己清零（safety.rs:226-237），头 / 身体靠看门狗。
-        镜像时网页没在开就不发 move 0（不去打断实体手柄）；别的情况多发一次 0 不危险，照发。"""
+        """Release sticks: send move 0 in Walk Mode; re-center head/body in Head/Body Mode."""
         if self.robot is None:
             return {}
         args = args or {}
         with self._send_lk:
             with self._lk:
                 if not self.motion_studio.request_current():
-                    return {"dropped": "动作会话已经改变，旧停止请求已丢弃"}
+                    return {"dropped": "Motion session changed; stale stop request dropped"}
                 now = self.clock()
                 q = self._seq_of(conn)
                 seq = self._seq(args)
@@ -993,7 +912,7 @@ class DriveMixin:
                 mine = d is None or d["conn"] == conn
                 attached, _ = self._pad_attached(now)
                 if args.get("owned_only") is True and (d is None or not mine or attached or self._mode_of(conn) != "drive"):
-                    return {"dropped": "当前页面没有走路控制权，未发送停止帧"}
+                    return {"dropped": "Page does not hold walking control; stop frame not sent"}
                 if d is not None and d["conn"] == conn:
                     d["seen"] = now
                 send = self._web_driving or not attached
@@ -1007,44 +926,42 @@ class DriveMixin:
                 try:
                     self._notify_output("robot.move", {"vx": 0.0, "vy": 0.0, "vyaw": 0.0})
                 except (Unreachable, Timeout) as e:
-                    raise Refused(f"「停」没发出去（鸭子 0.5 秒收不到也会自己停）：{e}") from None
+                    raise Refused(f"Failed to send stop (robotd deadman stops in 0.5s): {e}") from None
             if center is not None:
                 try:
                     self._notify_output(center[0], dict(center[1]))
                 except (Unreachable, Timeout) as e:
                     with self._lk:
-                        lat.update(nonzero=True)            # 看门狗 0.6 秒后再试
-                    raise Refused(f"回正没发出去（0.6 秒后再试一次）：{e}") from None
+                        lat.update(nonzero=True)
+                    raise Refused(f"Failed to re-center (watchdog retries in 0.6s): {e}") from None
             with self._lk:
                 was = self._web_driving and mine
                 if mine and send:
                     self._web_driving = False
                     self.virtual.update(last=[0.0, 0.0, 0.0], at=self.clock())
         if was:
-            self.log.info("网页遥控松开了", cat="手柄")
+            self.log.info("Web control released", cat="Gamepad")
         return {"sent": send, **({"centered": True} if center is not None else {})}
 
-    # ================= 按住的键：LT / RT / X（三 V4） =================
+    # ================= Held Keys: LT / RT / X =================
 
     def _keys_op(self, args, conn, by):
-        """{held:[按着的], down:[这一下刚按下的], seq}。页面按下、松开时发，按住期间每 0.15 秒也发一次。
-        只认「后端已经记着的」和「这一下刚按下的」：后端中途叫停了（卸力、被接管……），页面的心跳再报着也不会自己续上，
-        要松开重按（回给页面 ended）。真正发给 robotd 的在后台线程（_keys_plan）。"""
+        """Handle held keys {held, down, seq}."""
         held, down = args.get("held"), args.get("down") or []
         if not isinstance(held, list) or not isinstance(down, list) or any(k not in HELD_KEYS for k in held + down):
-            raise Refused("held / down 只能是 lt、rt、x")
+            raise Refused("held / down must only contain lt, rt, x")
         seq = self._seq(args)
         now = self.clock()
         with self._lk:
             if not self.motion_studio.request_current():
-                return {"dropped": "动作会话已经改变，旧按键请求已丢弃", "held": []}
+                return {"dropped": "Motion session changed; stale key request dropped", "held": []}
             if conn in self._gone or conn in self._closed:
-                return {"dropped": "页面已经离开", "held": []}
+                return {"dropped": "Page left gamepad section", "held": []}
             st = self._keys.get(conn)
             q = self._seq_of(conn)
             if seq is not None:
                 if seq <= q["keys"]:
-                    return {"dropped": "旧的", "held": sorted(st["held"]) if st is not None and not st.get("end") else []}
+                    return {"dropped": "Stale request", "held": sorted(st["held"]) if st is not None and not st.get("end") else []}
                 q["keys"] = seq
             had = set(st["held"]) if st is not None and not st.get("end") else set()
             want = set(held)
@@ -1060,7 +977,7 @@ class DriveMixin:
                     raise Refused(base)
                 a = self._action
                 if pressed & {"lt", "rt"} and a is not None and any(C.mouth_at(s, 0.0) is not None for s in a["steps"]):
-                    raise Refused(f"正在做「{a['name']}」（也在动嘴）：等它做完或者先松开")
+                    raise Refused(f"Running '{a['name']}' (also moves mouth): wait for it to finish or release")
                 self._take_lease(conn, by, now)
             if st is None or st.get("end"):
                 if not keep:
@@ -1081,27 +998,25 @@ class DriveMixin:
             if keep:
                 self._touch_lease(conn, now)
         for k in sorted(pressed):
-            self.log.info(f"网页手柄 {KEY_CN[k]} 按下（{by or '页面'}）", cat="手柄", dedup=False)
+            self.log.info(f"Web gamepad {KEY_CN[k]} pressed ({by or 'page'})", cat="Gamepad", dedup=False)
         for k in sorted(released):
-            self.log.info(f"网页手柄 {KEY_CN[k]} 松开了", cat="手柄", dedup=False)
+            self.log.info(f"Web gamepad {KEY_CN[k]} released", cat="Gamepad", dedup=False)
         self._tick_evt.set()
         return {"held": sorted(keep), "ended": ended}
 
     def _keys_abort(self, conn, st, now):
-        """按住的键要不要中途叫停（在 _lk 里调）：原因照搬 _abort_reason。"""
         if conn in self._gone or conn in self._closed:
-            return "页面离开了"
+            return "Page left gamepad section"
         if self._pad_attached(now)[0]:
-            return "实体手柄连上了"
+            return "Physical gamepad connected"
         d = self._driver
         if d is None or d["conn"] != conn:
-            return "被别的页面接管了"
+            return "Taken over by another page"
         if self._relax_at >= st["started"] or (self._robot or {}).get("estop_active"):
-            return "卸力了"
+            return "Torque disabled"
         return self._base_block(now)
 
     def _keys_plan(self, now, sends, logs):
-        """后台线程每拍调（在 _lk 里）：按「按着哪些键」排这一拍要发的（fork padd:1351-1396、1182-1211）。"""
         for conn, st in list(self._keys.items()):
             why = st.get("end") or self._keys_abort(conn, st, now)
             if why:
@@ -1109,28 +1024,28 @@ class DriveMixin:
             else:
                 fresh = {k for k, at in st["held"].items() if now - at < (X_HOLD_S if k == "x" else KEYS_HOLD_S)}
             lt, rt, x = "lt" in fresh, "rt" in fresh, "x" in fresh
-            mouth = (lt or rt) and self._relax_block(now) is None       # 刚卸了力：只叫、不动嘴
+            mouth = (lt or rt) and self._relax_block(now) is None
             if mouth or st["mouth"]:
                 sends.append(("robot.mouth", {"open": round(self._inputs["mouth"] / 100.0, 3) if mouth else 0.0}, None))
                 st["mouth"] = mouth
             if rt and not st["rt"]:
-                sends.append(("robot.sound", {"tag": "chirp"}, None))        # RT 按下那一下（padd 是过 0.3 的上升沿）
+                sends.append(("robot.sound", {"tag": "chirp"}, None))
             st["rt"] = rt
             if lt:
                 sends.append(("robot.sound", {"tag": "wheee", "hold": True}, None))
                 st["wheee"] = True
             elif st["wheee"]:
-                sends.append(("robot.sound", {"tag": "wheee", "hold": False}, None))   # 不带 hold 等于 true（intents.rs:443-452）
+                sends.append(("robot.sound", {"tag": "wheee", "hold": False}, None))
                 st["wheee"] = False
             arm = self._x_armed.get(conn)
             if x and arm is not None and arm["x_down"] == st.get("x_down") \
                     and self._posture() in DRIVING and self._relax_block(now) is None:
-                sends.append(("robot.do", {"skill": arm["skill"]}, None))   # 连滚：robotd 只刷新 0.15 秒的窗口（control.rs:429-434）
+                sends.append(("robot.do", {"skill": arm["skill"]}, None))
             gone = set(st["held"]) - fresh
             if gone:
-                reason = why or "页面 0.45 秒没说还按着（松手、切页或断网）"
-                logs.append(("安全" if why in (None, "卸力了") else "手柄",
-                             f"网页手柄 {'、'.join(KEY_CN[k] for k in sorted(gone))} 停了：{reason}"))
+                reason = why or "Page missed 0.45s hold heartbeat (released, navigated away, or disconnected)"
+                logs.append(("Safety" if why in (None, "Torque disabled") else "Gamepad",
+                             f"Web gamepad {', '.join(KEY_CN[k] for k in sorted(gone))} stopped: {reason}"))
                 for k in gone:
                     st["held"].pop(k, None)
                 if "x" in gone:
@@ -1141,12 +1056,9 @@ class DriveMixin:
                 del self._keys[conn]
 
     def _key_press(self, args, conn, by):
-        """网页手柄图上的一次性键：A / X / LB / RB / 十字下（三 V14、V16）。按 pad.bindings 做（读不到用官方默认）：
-        绑的是 sit_toggle → 按坐没坐走「站起来 / 坐下」；空 = 关掉了；有 error = 这只鸭子没有。X 按下这一下的请求被接受了，
-        按住才连滚（_keys_plan 每拍发通知，方案 C）。"""
         key = args.get("key")
         if key not in BIND_KEYS:
-            raise Refused(f"不认识的键：{key}")
+            raise Refused(f"Unknown key: {key}")
         now = self.clock()
         if args.get("src") == "svg" and self._pad_attached(now)[0]:
             raise Refused(MIRROR_SVG)
@@ -1157,19 +1069,16 @@ class DriveMixin:
         row = mv["keys"][key]
         name = KEY_CN[key]
         if not row["ok"]:
-            self.log.info(f"网页手柄 {name}：不能按（{row['why']}）", cat="手柄")
+            self.log.info(f"Web gamepad {name}: disabled ({row['why']})", cat="Gamepad")
             raise Refused(row["why"])
-        self.log.info(f"网页手柄 {name} → {row['does']}（{by or '页面'}）", cat="手柄", dedup=False)
-        label = f"网页手柄 {name} → {row['does']}"
+        self.log.info(f"Web gamepad {name} -> {row['does']} ({by or 'page'})", cat="Gamepad", dedup=False)
+        label = f"Web gamepad {name} -> {row['does']}"
         if row["op"] == "skill":
             with self._lk:
                 st = self._keys.get(conn)
-                x_down0 = st.get("x_down") if st is not None else None    # 这一下 X 是哪一下（keys 通道可能还没到：None）
+                x_down0 = st.get("x_down") if st is not None else None
             r = self._motion_cmd("skill", {"name": row["skill"]}, conn, by, label=label)
             if key == "x":
-                # arm 绑在发请求的那一下 X 上（审查 R5）：_keys_plan 只在「现在按着的这一下」的 x_down 跟它一样时才连滚。
-                # 快速点一下、松手以后请求才回话：记下的是上一下的 x_down，下一下 X 新按下时 _keys_op 先扔掉它，也对不上，
-                # 下一下的请求被拒了也不会照着它连滚。keys 通道比请求晚到（x_down0 是 None）：X 还按着就用现在这一下
                 with self._lk:
                     st = self._keys.get(conn)
                     if x_down0 is None and st is not None and not st.get("end") and "x" in st["held"]:
@@ -1181,7 +1090,6 @@ class DriveMixin:
         return self._motion_cmd(row["op"], {}, conn, by, label=label)
 
     def _start(self, args, conn, by):
-        """网页手柄图上的 Start（三 V7、V8）：按现在的姿势挑「停下（站好）/ 开始走 / 站起来」，跟页面看到的（expect）不一样就拒。"""
         now = self.clock()
         if args.get("src") == "svg" and self._pad_attached(now)[0]:
             raise Refused(MIRROR_SVG)
@@ -1189,46 +1097,41 @@ class DriveMixin:
             st = self._motion_view(now)["start"]
         expect = args.get("expect")
         if expect is not None and expect != st["op"]:
-            self.log.info(f"网页手柄 Start：页面以为是「{expect}」，后端判的是「{st['label']}」，没发", cat="手柄")
-            raise Refused(f"状态刚变了，再按一次（现在按 Start 会「{st['label']}」）")
+            self.log.info(f"Web gamepad Start: page expected '{expect}', backend chose '{st['label']}', skipped", cat="Gamepad")
+            raise Refused(f"State just changed, press again (Start will now '{st['label']}')")
         if not st["ok"]:
-            self.log.info(f"网页手柄 Start：不能按（{st['why']}）", cat="手柄")
+            self.log.info(f"Web gamepad Start: disabled ({st['why']})", cat="Gamepad")
             raise Refused(st["why"])
-        self.log.info(f"网页手柄 Start → {st['label']}（{by or '页面'}）", cat="手柄", dedup=False)
-        return self._motion_cmd(st["op"], {}, conn, by, label=f"网页手柄 Start → {st['label']}")
+        self.log.info(f"Web gamepad Start -> {st['label']} ({by or 'page'})", cat="Gamepad", dedup=False)
+        return self._motion_cmd(st["op"], {}, conn, by, label=f"Web gamepad Start -> {st['label']}")
 
     def _reboot(self, args, conn, by):
-        """网页手柄图上的十字右：重启全部舵机（照官方：按一下就发、不用确认）。不看方向盘、不占「上一个还没回话」：
-        跟卸力一样是救急的路。主程序先全身卸力再重启（fork handover 版 main.rs:2731-2758），收下以后这边记一次卸力。"""
         now = self.clock()
         if args.get("src") == "svg" and self._pad_attached(now)[0]:
             raise Refused(MIRROR_SVG)
         with self._lk:
             mv = self._motion_view(now)
         row = mv["reboot"]
-        what = "网页手柄 十字右 → 重启全部舵机"
+        what = "Web gamepad D-Pad Right -> Reboot all servos"
         if not row["ok"]:
-            self.log.info(f"网页手柄 十字右：不能按（{row['why']}）", cat="手柄")
+            self.log.info(f"Web gamepad D-Pad Right: disabled ({row['why']})", cat="Gamepad")
             with self._lk:
                 self._last_cmd = {"what": what, "by": by, "ok": False, "reason": row["why"], "at": now}
             raise Refused(row["why"])
-        self.log.info(f"{what}（{by or '页面'}）", cat="手柄", dedup=False)
+        self.log.info(f"{what} ({by or 'page'})", cat="Gamepad", dedup=False)
         try:
             r = self._call(what, "robot.rebootMotors", {"ids": []}, by, {"posture": mv["posture"]})
         except Refused as e:
             with self._lk:
                 self._last_cmd = {"what": what, "by": by, "ok": False, "reason": str(e), "at": self.clock()}
             raise
-        self.note_relax(by, "重启舵机（主程序先全身卸力）")
+        self.note_relax(by, "Reboot servos (robotd disables torque first)")
         note = r.get("reason") if isinstance(r, dict) else None
         with self._lk:
             self._last_cmd = {"what": what, "by": by, "ok": True, "reason": note, "at": self.clock()}
         return {"accepted": True, "reason": note, "did": "reboot"}
 
     def _drive_mode(self, args, conn, by):
-        """网页手柄图上十字上按住 3 秒：走路 ⇄ 轮滑（照官方 padd:766-806）。3 秒在页面上算，到了发 {expect: 要切到的}；
-        跟后端判的不一样就拒（状态刚变了）。主程序收下会叫一声（走路）/ 两声（轮滑）、回站姿、换上那个模式的策略
-        （fork handover 版 main.rs:2870-2930）；没装轮滑模型它会拒。"""
         now = self.clock()
         if args.get("src") == "svg" and self._pad_attached(now)[0]:
             raise Refused(MIRROR_SVG)
@@ -1236,25 +1139,25 @@ class DriveMixin:
             mv = self._motion_view(now)
             row = mv["drive_mode"]
             target = row["target"]
-            what = f"网页手柄 十字上（按住 3 秒）→ 切到{DRIVE_MODE_CN.get(target, '另一个模式')}"
+            what = f"Web gamepad D-Pad Up (hold 3s) -> Switch to {DRIVE_MODE_CN.get(target, 'other mode')}"
             why = row["why"]
             expect = args.get("expect")
             if why is None and expect is not None and expect != target:
-                why = f"状态刚变了，再按住一次（现在会{row['does'].replace('按住 3 秒：', '')}）"
+                why = f"State just changed, hold again ({row['does'].replace('Hold 3s: ', '')})"
             if why is None and self._cmd_busy:
-                why = "上一个指令还没回话，等一下"
+                why = "Previous command still waiting for reply; wait a moment"
             if why is None:
                 held = self._lease_holder(now)
                 if held is not None and held["conn"] != conn:
-                    why = f"{held['by'] or '另一个页面'}正在推摇杆：等它松手，或者点「接管」"
+                    why = f"{held['by'] or 'Another page'} is driving sticks: wait for release or click 'Take Over'"
             if why is not None:
                 self._last_cmd = {"what": what, "by": by, "ok": False, "reason": why, "at": now}
             else:
                 self._cmd_busy = True
         if why is not None:
-            self.log.info(f"网页手柄 十字上：不能切（{why}）", cat="手柄")
+            self.log.info(f"Web gamepad D-Pad Up: cannot switch ({why})", cat="Gamepad")
             raise Refused(why)
-        self.log.info(f"{what}（{by or '页面'}）", cat="手柄", dedup=False)
+        self.log.info(f"{what} ({by or 'page'})", cat="Gamepad", dedup=False)
         try:
             r = self._call(what, "robot.setMode", {"mode": target}, by, {"posture": mv["posture"], "mode": row["current"]})
         except Refused as e:
@@ -1266,12 +1169,12 @@ class DriveMixin:
                 self._cmd_busy = False
         note = r.get("reason") if isinstance(r, dict) else None
         if note and "already" in note.lower():
-            note = f"已经是{DRIVE_MODE_CN[target]}了"
+            note = f"Already in {DRIVE_MODE_CN[target]} mode"
         with self._lk:
             self._last_cmd = {"what": what, "by": by, "ok": True, "reason": note, "at": self.clock()}
         return {"accepted": True, "reason": note, "did": "drive_mode", "target": target}
 
-    # ================= 后台线程：按住的键、看门狗、清理（25 Hz，没事做就睡） =================
+    # ================= Background Tick: Held Keys, Watchdogs, Cleanup =================
 
     def _tick_work(self):
         return bool(self.motion_studio.session or self.motion_studio._pending_cleanup or self._keys or self._clears or self._modes or self._pose_reset == "due"
@@ -1281,12 +1184,12 @@ class DriveMixin:
         while not self._tick_stop.is_set():
             try:
                 self._tick_once()
-            except Exception as e:  # noqa: BLE001 —— 这个线程不能悄悄死掉：按住的键、看门狗都靠它
+            except Exception as e:  # noqa: BLE001
                 key = f"{type(e).__name__}: {e}"[:200]
                 if key not in self._tick_said:
                     self._tick_said.add(key)
-                    self.log.error("手柄页的后台线程出错（按住的键、看门狗）", cat="手柄", raw=key, exc=True,
-                                   hint="这是 Studio 的问题，导出诊断包发出来；线程会接着跑")
+                    self.log.error("Gamepad background tick error (held keys / watchdogs)", cat="Gamepad", raw=key, exc=True,
+                                   hint="Studio internal error; export diagnostics. Thread will keep running")
             with self._lk:
                 busy = self._tick_work()
             if busy:
@@ -1298,13 +1201,12 @@ class DriveMixin:
     def _tick_once(self):
         if self._update_blocked():
             with self._lk:
-                held=bool(self._modes or self._keys or self._latch['head'] or self._latch['body'])
-            if held:self._request_clear(None,'软件 / 主程序更新保护仍在',say=False)
+                held = bool(self._modes or self._keys or self._latch['head'] or self._latch['body'])
+            if held:
+                self._request_clear(None, 'Software / robotd update protection still active', say=False)
         self.motion_studio.tick()
-        self._flush_clears()                       # 它自己拿 _send_lk：放在下面那把锁之前（Lock 不能重入）
-        sends, logs = [], []                       # sends：(方法, 参数, 标记 None / "pose_reset" / "watchdog")
-        # 决定和发送在同一把 _send_lk 里（审查 R2，跟 _flush_clears、_stop_move 一个写法）：看门狗决定「回中（active:true）」
-        # 以后、发出去之前，别的线程不能插进来先发退出（active:false），再被这个回中重新打开——那样 _latch 已经清了，再也没人清
+        self._flush_clears()
+        sends, logs = [], []
         with self._send_lk:
             with self._lk:
                 now = self.clock()
@@ -1312,19 +1214,19 @@ class DriveMixin:
                     self._pose_reset = "sending"
                     sends.append(("robot.pose", dict(POSE_OFF), "pose_reset"))
                 if self._pad_attached(now)[0] and (self._modes or self._keys or self._latch["head"] or self._latch["body"]):
-                    self._request_clear(None, "实体手柄连上了")               # 三 V1 第 6 条（configd 那条路也算）
+                    self._request_clear(None, "Physical gamepad connected")
                 for kind, center in (("head", HEAD_ZERO), ("body", POSE_CENTER)):
                     lat = self._latch[kind]
                     if lat is not None and lat["nonzero"] and now - lat["at"] > STICK_STALE_S:
                         lat.update(nonzero=False, at=now)
                         sends.append(("robot.head" if kind == "head" else "robot.pose", dict(center), "watchdog"))
-                        logs.append(("安全", f"{'头' if kind == 'head' else '身体'}的摇杆 {STICK_STALE_S:g} 秒没有新的一帧（页面卡住了？）："
-                                           f"{'头回正' if kind == 'head' else '身体回中'}"))
+                        logs.append(("Safety", f"{'Head' if kind == 'head' else 'Body'} stick had no new frame for {STICK_STALE_S:g}s (page stalled?): "
+                                               f"{'head centered' if kind == 'head' else 'body reset to neutral'}"))
                 for c, m in list(self._modes.items()):
                     if now - m["hb"] > MODE_HB_S:
-                        why = f"页面 {MODE_HB_S:g} 秒没报还在{MODE_CN[m['mode']]}"
-                        logs.append(("安全", f"{why}：退出"))
-                        self._request_clear(c, why, say=False)          # 同一件事只记「安全」这一行（V19）
+                        why = f"Page missed {MODE_HB_S:g}s heartbeat in {MODE_CN[m['mode']]}"
+                        logs.append(("Safety", f"{why}: exited"))
+                        self._request_clear(c, why, say=False)
                 self._keys_plan(now, sends, logs)
             for method, params, tag in (sends if self.robot is not None else []):
                 try:
@@ -1336,28 +1238,28 @@ class DriveMixin:
                             self._pose_reset = "pending" if self._pose_reset_tries < 3 else "failed"
                     if method not in self._tick_said:
                         self._tick_said.add(method)
-                        self.log.warn(f"网页手柄的 {method} 没发出去", cat="手柄", step=method, raw=str(e),
-                                      hint="主程序 robotd 不在？嘴、头没收到也不危险：robotd 自己不动")
+                        self.log.warn(f"Web gamepad {method} failed to send", cat="Gamepad", step=method, raw=str(e),
+                                      hint="Is robotd offline? Missing mouth/head frames are harmless")
                     continue
                 self._tick_said.discard(method)
                 if tag == "pose_reset":
                     with self._lk:
                         self._pose_reset = "done"
-                    self.log.info("Studio 连上主程序：发了一次 robot.pose {\"active\": false}（清掉上一次可能留下的身体模式）",
-                                  cat="手柄")
+                    self.log.info("Studio connected to robotd: sent robot.pose {\"active\": false} to clear any prior Body Mode",
+                                  cat="Gamepad")
         for cat, msg in logs:
             self.log.write(msg, cat=cat, level="info", dedup=False)
 
     def _drive_close(self):
-        """Studio 关闭（pad.close 里调，在线程里）：先停后台线程、等它停下，再尽力把头 / 身体清掉、按住的键松开（三 V1 第 9 条）。"""
+        """Called on Studio shutdown: stop tick thread and clear latched head/body/keys."""
         self._tick_stop.set()
         self._tick_evt.set()
         t = self._tick_thread
         if t is not None and t is not threading.current_thread():
-            t.join(0.5)       # 等它这一拍发完：不然它排好的「张嘴」可能落在下面的「合嘴」后面，嘴一直张着（审查 R8）
+            t.join(0.5)
         self.motion_studio.close()
         try:
-            self._request_clear(None, "Studio 关了")
+            self._request_clear(None, "Studio closed")
             self._flush_clears(force=True)
             sends = []
             with self._lk:
@@ -1374,37 +1276,39 @@ class DriveMixin:
                             self._notify_output(method, params)
                         except (Unreachable, Timeout):
                             pass
-        except Exception:  # noqa: BLE001 —— 关的路上尽力而为
+        except Exception:  # noqa: BLE001
             pass
 
-    # ================= 站起来 / 开始走 / 坐下 / 技能 / 声音：能不能按 =================
+    # ================= Stand / Walk / Sit / Skills / Sounds =================
 
     def _update_blocked(self):
-        try:return getattr(self,'update_guard',lambda:False)() is True
-        except Exception:return True
+        try:
+            return getattr(self, 'update_guard', lambda: False)() is True
+        except Exception:
+            return True
 
     def _base_block(self, now, *, ignore_mapping=False):
-        """跟姿势无关、什么动作都不能做的情况（声音也挡：调试模式下主程序只读，fork main.rs:5379-5396）。"""
-        if self._update_blocked():return '软件 / 主程序更新保护仍在'
+        if self._update_blocked():
+            return 'Software / robotd update protection still active'
         mapping = getattr(self, 'mapping', None)
         if not ignore_mapping and mapping is not None and mapping.blocked:
-            return '手柄映射／回中确认中，动作输出已暂停，网页卸力仍可使用'
+            return 'Gamepad mapping / center confirmation in progress; motion paused (web E-Stop still available)'
         r = self._robot or {}
         if self._robot_at is None or now - self._robot_at > 3:
-            return "Studio 还没收到主程序的状态"
+            return "Studio has not received robotd status yet"
         if r.get("paused"):
-            return "正在调舵机：主程序停着（舵机页的会话还开着）。点页面顶上的「交还主程序」才交还"
+            return "Servo tuning active: robotd is paused. Click 'Hand Back to robotd' in the top bar first"
         if r.get("present") is False:
-            return "主程序 robotd 没在跑"
+            return "robotd is not running"
         bus = r.get("bus") if isinstance(r.get("bus"), dict) else None
         if bus is None or r.get("bus_at") is None or now - r["bus_at"] > 3:
-            return "读不到主程序的状态"
+            return "Cannot read robotd status"
         if bus.get("phase") in STARTING_PHASES:
-            return "主程序还在启动"
+            return "robotd is still starting up"
         if bus.get("mode") == "commissioning":
-            return "调试模式：主程序这时只读，动作都不接受"
+            return "Commissioning mode: robotd is read-only and rejects motion commands"
         if bus.get("mode") != "motion":
-            return f"主程序在 {bus.get('mode')} 模式"
+            return f"robotd is in {bus.get('mode')} mode"
         return None
 
     def _policies(self):
@@ -1412,8 +1316,7 @@ class DriveMixin:
         return p if isinstance(p, dict) else None
 
     def _known_skills(self):
-        """robot.do 认的名字：ground_pick（装了这个槽）+ sit_toggle（装了 sitstand）+ skills（robotd main.rs:4136-4156）。
-        读不到 robot.policies 返回 None。"""
+        """Recognized robot.do names: ground_pick + sit_toggle + skills. Returns None if robot.policies unreadable."""
         p = self._policies()
         if p is None:
             return None
@@ -1431,20 +1334,17 @@ class DriveMixin:
         return "servo_session" if r.get("paused") else (r.get("posture") or "unknown")
 
     def _skill_why(self, name, need_drive, known, pol):
-        """一个技能现在能不能做（技能按钮、组合动作里的技能、组合动作跑到那一步时都用这一个：审查二 一般 6）。"""
         if known is None:
-            return "读不到这只鸭子有哪些技能（robot.policies 只在运动模式下问）"
+            return "Cannot read duck skills (robot.policies is only queried in motion mode)"
         if name not in known:
-            return f"这只鸭子没有「{C.SKILL_CN.get(name, name)}」"
+            return f"This duck does not have '{C.SKILL_CN.get(name, name)}'"
         if need_drive:
             return need_drive
         if name == "roller_stand" and pol.get("mode") != "roller":
-            return "装了滑轮、切到轮滑模式才用（手柄十字上按住 3 秒切换）"
+            return "Requires roller hardware and Roller mode (hold D-Pad Up 3s)"
         return None
 
     def _bind_map(self):
-        """五个能绑的键现在各绑了什么（三 V14）：{键: {"skill", "error", "overridden", "src"}}。pad.bindings 读不到、
-        或者列表里没有这个键，用官方默认（robotd-params lib.rs:175-215）。"""
         rows = {b.get("button"): b for b in self.bindings or [] if isinstance(b, dict)}
         out = {}
         for k in BIND_KEYS:
@@ -1454,22 +1354,20 @@ class DriveMixin:
                           "src": "pad.bindings"}
             else:
                 out[k] = {"skill": DEFAULT_BIND[k], "error": None, "overridden": False,
-                          "src": "官方默认" + ("（读不到 pad.bindings）" if self.bindings is None else "")}
+                          "src": "Default" + (" (pad.bindings unreadable)" if self.bindings is None else "")}
         return out
 
     def _key_rows(self, buttons, sitting, skills, skills_why, known, need_drive, pol):
-        """网页手柄图上 A / X / LB / RB / 十字下 各做什么、现在能不能按（推给页面画图，按的时候 _key_press 用同一份）。"""
         out = {}
         for k, b in self._bind_map().items():
             skill = b["skill"]
             row = {"key": k, "skill": skill, "src": b["src"], "overridden": b["overridden"], "op": None,
-                   "does": C.SKILL_CN.get(skill, skill) if skill else "（关掉了）"}
+                   "does": C.SKILL_CN.get(skill, skill) if skill else "(Disabled)"}
             if b["error"]:
-                row.update(ok=False, why=f"绑的「{skill}」这只鸭子用不了：{b['error']}")
+                row.update(ok=False, why=f"Bound '{skill}' is unavailable: {b['error']}")
             elif not skill:
-                row.update(ok=False, why="这个键被关掉了（robotd.toml 的 [pad] 里设成了空）")
+                row.update(ok=False, why="Key is disabled (empty in robotd.toml [pad])")
             elif skill == "sit_toggle":
-                # 不直接发 robot.do sit_toggle：按坐没坐走「站起来 / 坐下」（审查二 S2，三 V14）
                 if sitting is None:
                     row.update(ok=False, why=NO_SIT_INFO, op="sit")
                 else:
@@ -1483,14 +1381,14 @@ class DriveMixin:
         return out
 
     def _motion_view(self, now):  # noqa: C901
-        """推给页面：每个按钮能不能按、为什么不能。服务端按的时候也用这一份再判一遍。"""
+        """Compute button availability and reasons for UI and server-side validation."""
         base = self._base_block(now)
         relax = self._relax_block(now)
         block = base or relax
         pose = self._posture()
         pol = self._policies() or {}
         sit_raw = pol.get("sitting")
-        sitting = sit_raw if isinstance(sit_raw, bool) else None      # None = 读不到（审查二 S2：不靠猜）
+        sitting = sit_raw if isinstance(sit_raw, bool) else None
         homed = pol.get("homed") if isinstance(pol.get("homed"), bool) else None
         r = self._robot or {}
         bus = r.get("bus") if isinstance(r.get("bus"), dict) else {}
@@ -1498,85 +1396,81 @@ class DriveMixin:
         torque_on = (bus.get("native") or {}).get("torque_state_confirmed") is True
         batt = r.get("battery_pct")
         job = self._job_alive()
-        # 还没站稳（state.posture 判 homing）：主程序的 home_start_guard 说了原因就带上（比如「机身未直立」），不然人不知道在等什么
         guard = bus.get("home_start_guard") if isinstance(bus.get("home_start_guard"), dict) else {}
-        unsteady = "还在站起来，站稳了再点" + (f"（{guard['reason']}）" if guard.get("ready") is False
-                                             and isinstance(guard.get("reason"), str) and guard["reason"] else "")
+        unsteady = "Still standing up; wait until steady" + (f" ({guard['reason']})" if guard.get("ready") is False
+                                                           and isinstance(guard.get("reason"), str) and guard["reason"] else "")
 
         def b(op, label, call, why):
             return {"op": op, "label": label, "call": call, "ok": why is None, "why": why}
 
-        # 站起来：坐着要 sit_toggle（还要策略在跑、到了 HOME），没坐着才 init；坐没坐读不到就不让点
         stuck = None
         if block:
-            stand = b("stand", "站起来", None, block)
+            stand = b("stand", "Stand Up", None, block)
         elif sitting is None:
-            stand = b("stand", "站起来", None, NO_SIT_INFO)
+            stand = b("stand", "Stand Up", None, NO_SIT_INFO)
         elif sitting:
             if policy_on and torque_on and (homed is True or bus.get("homed") is True):
-                stand = b("stand", "站起来", "robot.do sit_toggle",
-                          None if "sit_toggle" in (self._known_skills() or []) else "这只鸭子没装坐下 / 站起的模型")
+                stand = b("stand", "Stand Up", "robot.do sit_toggle",
+                          None if "sit_toggle" in (self._known_skills() or []) else "Sit/stand model is not installed on this duck")
             else:
-                stuck = ("坐着、但策略没在跑（多半是坐着时卸了力）：网页现在站不起来——发 init 会跟坐下的锁存打架，"
-                         "发 sit_toggle 主程序又要策略在跑才收。先把它扶起来放平再点「站起来」，或者用手柄 Start")
-                stand = b("stand", "站起来", None, stuck)
+                stuck = ("Sitting with policy stopped (likely torque-off while sitting): cannot stand from web — "
+                         "support the duck upright and click 'Stand Up', or press Start on physical gamepad")
+                stand = b("stand", "Stand Up", None, stuck)
         elif pose == "limp":
-            # 电量低不拦（用户 10-18：电池只警告）：只在按钮下面提示一句，照样能点。
-            # 以前那句「站起来很快又会自己坐下关机」在我们的鸭子上不对：按 robotd 配置的 [safety] battery_empty_shutdown 说（任务 1 附）
-            stand = b("stand", "站起来", "robot.init", None)
+            stand = b("stand", "Stand Up", "robot.init", None)
             if isinstance(batt, (int, float)) and not isinstance(batt, bool) and batt < 15:
                 if self.battery_shutdown is True:
-                    stand["note"] = f"电量只剩 {batt:.0f}%，先充电再玩；没电它到 6.6 V 会自己坐下关机"
+                    stand["note"] = f"Low battery ({batt:.0f}%): charge soon; auto-shutdown at 6.6 V"
                 else:
-                    stand["note"] = f"电量只剩 {batt:.0f}%，先充电再玩；没电它不会自己坐下"
+                    stand["note"] = f"Low battery ({batt:.0f}%): charge soon"
         elif pose == "homing":
-            stand = b("stand", "站起来", None, unsteady)
+            stand = b("stand", "Stand Up", None, unsteady)
         elif pose in ("holding", "policy", "walking"):
-            stand = b("stand", "站起来", None, "已经站着了")
+            stand = b("stand", "Stand Up", None, "Already standing")
         else:
-            stand = b("stand", "站起来", None, f"读不出它现在的姿势（{POSTURE_CN.get(pose, pose)}）")
-        # 开始走 / 停下（停下谁都能点、卸力后也能点）
+            stand = b("stand", "Stand Up", None, f"Cannot read current posture ({POSTURE_CN.get(pose, pose)})")
+
         if pose in DRIVING and not base:
-            walk = b("walk_stop", "停下（站好）", "robot.stop → robot.enable {on:false}", None)
+            walk = b("walk_stop", "Stop (Stand)", "robot.stop -> robot.enable {on:false}", None)
         elif block:
-            walk = b("walk", "开始走", None, block)
+            walk = b("walk", "Start Walking", None, block)
         elif job:
-            walk = b("walk", "开始走", None, "正在搜索 / 配对手柄（会占蓝牙）：等它做完再开始走")
+            walk = b("walk", "Start Walking", None, "Gamepad scan/pairing in progress (uses Bluetooth); wait for completion")
         elif stuck:
-            walk = b("walk", "开始走", None, "坐着又没在跑策略：看「站起来」那里的说明")
+            walk = b("walk", "Start Walking", None, "Sitting without policy running: see 'Stand Up' hint")
         elif sitting is None:
-            walk = b("walk", "开始走", None, NO_SIT_INFO)
+            walk = b("walk", "Start Walking", None, NO_SIT_INFO)
         elif sitting:
-            walk = b("walk", "开始走", None, "坐着：先点「站起来」")
+            walk = b("walk", "Start Walking", None, "Sitting: click 'Stand Up' first")
         elif pose == "holding":
-            walk = b("walk", "开始走", "robot.enable {on:true}", None)
+            walk = b("walk", "Start Walking", "robot.enable {on:true}", None)
         elif pose == "limp":
-            walk = b("walk", "开始走", None, "软着：先点「站起来」")
+            walk = b("walk", "Start Walking", None, "Torque off: click 'Stand Up' first")
         elif pose == "homing":
-            walk = b("walk", "开始走", None, unsteady)
+            walk = b("walk", "Start Walking", None, unsteady)
         else:
-            walk = b("walk", "开始走", None, f"读不出它现在的姿势（{POSTURE_CN.get(pose, pose)}）")
-        # 坐下：没坐着（读得到）、策略在跑、到了 HOME、没在走
+            walk = b("walk", "Start Walking", None, f"Cannot read current posture ({POSTURE_CN.get(pose, pose)})")
+
         known = self._known_skills()
         if block:
-            sit = b("sit", "坐下", None, block)
+            sit = b("sit", "Sit Down", None, block)
         elif sitting is None:
-            sit = b("sit", "坐下", None, NO_SIT_INFO)
+            sit = b("sit", "Sit Down", None, NO_SIT_INFO)
         elif sitting:
-            sit = b("sit", "坐下", None, "已经坐着了")
+            sit = b("sit", "Sit Down", None, "Already sitting")
         elif known is not None and "sit_toggle" not in known:
-            sit = b("sit", "坐下", None, "这只鸭子没装坐下的模型（sitstand）")
+            sit = b("sit", "Sit Down", None, "Sit/stand model (sitstand) is not installed on this duck")
         elif pose == "policy" and policy_on:
-            sit = b("sit", "坐下", "robot.do sit_toggle", None if homed is not False else "它还在回站姿，等一秒")
+            sit = b("sit", "Sit Down", "robot.do sit_toggle", None if homed is not False else "Returning to home posture; wait a second")
         elif pose == "walking":
-            sit = b("sit", "坐下", None, "在走：先松开摇杆，等它停下")
+            sit = b("sit", "Sit Down", None, "Walking: release sticks and wait for stop")
         elif pose == "holding":
-            sit = b("sit", "坐下", None, "坐下要策略在跑（官方规定）：先点「开始走」，再点坐下")
+            sit = b("sit", "Sit Down", None, "Sitting down requires policy running: click 'Start Walking' first")
         elif pose == "limp":
-            sit = b("sit", "坐下", None, "软着：先点「站起来」")
+            sit = b("sit", "Sit Down", None, "Torque off: click 'Stand Up' first")
         else:
-            sit = b("sit", "坐下", None, f"现在{POSTURE_CN.get(pose, pose)}，坐不了")
-        # 网页手柄的 Start：在走 / 准备好走 → 停下；站着保持 → 开始走；别的 → 站起来（三 V7，附 1 第一行）
+            sit = b("sit", "Sit Down", None, f"Cannot sit while {POSTURE_CN.get(pose, pose)}")
+
         if walk["op"] == "walk_stop":
             pick = walk
         elif pose == "holding":
@@ -1584,35 +1478,32 @@ class DriveMixin:
         else:
             pick = stand
         start = {"op": pick["op"], "label": pick["label"], "ok": pick["ok"], "why": pick["why"], "call": pick["call"]}
-        # 十字右：重启全部舵机。官方按一下就发、robotd 从不拒（过载保护跳了的鸭子正要它），所以卸力之后也能按
-        reboot = {"ok": base is None, "why": base, "does": "重启全部舵机：鸭子先软下来（扶住），之后按 Start 站回来"}
-        # 十字上按住 3 秒：走路 ⇄ 轮滑。现在是哪个看 robot.policies 的 mode（官方 padd 是开机问一次 robot.mode）
+        reboot = {"ok": base is None, "why": base, "does": "Reboot all servos: duck goes limp (support it), then press Start to stand"}
         cur = pol.get("mode") if pol.get("mode") in DRIVE_MODE_CN else None
         target = {"walk": "roller", "roller": "walk"}.get(cur)
-        mode_why = block or (None if target else "读不到现在是走路还是轮滑（robot.policies 读不到）")
+        mode_why = block or (None if target else "Cannot read Walk/Roller mode (robot.policies unreadable)")
         drive_mode = {"ok": mode_why is None, "why": mode_why, "current": cur, "target": target,
-                      "does": f"按住 3 秒：切到{DRIVE_MODE_CN[target]}" if target else "按住 3 秒：走路 ⇄ 轮滑"}
-        # 技能
+                      "does": f"Hold 3s: Switch to {DRIVE_MODE_CN[target]}" if target else "Hold 3s: Walk / Roller"}
+
         need_drive = None
         if block:
             need_drive = block
         elif pose not in DRIVING:
-            need_drive = "要「准备好走」（策略在跑）才能做：先点「开始走」" if pose == "holding" else \
-                f"现在{POSTURE_CN.get(pose, pose)}：先站起来、点「开始走」"
+            need_drive = "Requires 'Ready to Walk' (policy running): click 'Start Walking' first" if pose == "holding" else \
+                f"Currently {POSTURE_CN.get(pose, pose)}: stand up and click 'Start Walking' first"
         elif sitting is None:
             need_drive = NO_SIT_INFO
         elif sitting:
-            need_drive = "坐着：先站起来"
+            need_drive = "Sitting: stand up first"
         elif homed is False:
-            need_drive = "它还在回站姿，等一秒"
+            need_drive = "Returning to home posture; wait a second"
         skills = []
         for name in [n for n in (known or []) if n != "sit_toggle"]:
             why = self._skill_why(name, need_drive, known, pol)
             skills.append({"name": name, "label": C.SKILL_CN.get(name, name), "ok": why is None, "why": why})
-        skills_why = None if known is not None else "读不到这只鸭子有哪些技能（robot.policies 只在运动模式下问）"
-        # 声音（叫一声不动关节，卸力后也能叫：main.rs:4300-4307）
+        skills_why = None if known is not None else "Cannot read duck skills (robot.policies is only queried in motion mode)"
         sounds = [{"tag": t, "label": lab, "ok": base is None, "why": base} for t, lab in C.SOUNDS.items()]
-        # 动作、组合动作
+
         attached, _ = self._pad_attached(now)
         held_mouth = any({"lt", "rt"} & set(st["held"]) for st in self._keys.values() if not st.get("end"))
         head_mode = any(m["mode"] == "head" for m in self._modes.values()) or bool((self._latch["head"] or {}).get("nonzero"))
@@ -1623,7 +1514,7 @@ class DriveMixin:
             if C.needs_policy(c["steps"]):
                 why = need_drive
             if why is None and attached:
-                why = "实体手柄连着：它每一拍都发一次嘴和速度，会盖掉动作。先把手柄关掉"
+                why = "Physical gamepad is connected and overrides mouth/velocity: turn it off first"
             if why is None:
                 why = base or relax
             if why is None:
@@ -1633,12 +1524,12 @@ class DriveMixin:
                         if why:
                             break
             if why is None and held_mouth and any(C.mouth_at(s, 0.0) is not None for s in c["steps"]):
-                why = "正在按着 LT / RT 张嘴：先松开"
+                why = "LT / RT is holding mouth open: release first"
             if why is None and head_mode and any(C.head_at(s, 0.0) is not None for s in c["steps"]):
-                why = "头模式开着、摇杆在管头：先按 Y 回到走路"
+                why = "Head Mode is active: press Y to return to Walk Mode first"
             text = C.describe(c["steps"])
             if why is None and limp and not C.needs_policy(c["steps"]):
-                text += "（软着：嘴不会动，站好了才动）"
+                text += " (Torque off: mouth won't move until standing)"
             return {"id": c["id"], "name": c["name"], "builtin": builtin, "text": text,
                     "seconds": round(C.duration(c["steps"]), 1), "ok": why is None, "why": why}
 
@@ -1647,12 +1538,11 @@ class DriveMixin:
         a = self._action
         running = None if a is None else {"id": a["id"], "name": a["name"], "by": a["by"], "step": a["step"],
                                           "steps": len(a["steps"]), "elapsed_s": round(now - a["started"], 1)}
-        # LT / RT：嘴按 fork 的规矩（三 V10）——只要主程序在运动模式就能按；软着、刚卸力时只有声音
         trig_why = base
         if trig_why is None and a is not None and any(C.mouth_at(s, 0.0) is not None for s in a["steps"]):
-            trig_why = f"正在做「{a['name']}」（也在动嘴）：等它做完"
+            trig_why = f"Running '{a['name']}' (also moves mouth): wait for it to finish"
         triggers = {"ok": trig_why is None, "why": trig_why, "mouth_pct": self._inputs["mouth"],
-                    "note": "软着：只有声音，嘴不会动（站好了才动嘴）" if trig_why is None and (limp or relax) else None}
+                    "note": "Torque off: sound only, mouth won't move until standing" if trig_why is None and (limp or relax) else None}
         last = None
         if self._last_cmd is not None and now - self._last_cmd["at"] < 15:
             last = {k: v for k, v in self._last_cmd.items() if k != "at"}
@@ -1669,7 +1559,7 @@ class DriveMixin:
                 "sounds": sounds, "actions": actions, "combos": combos, "running": running, "last": last,
                 "last_action": last_action, "busy": self._cmd_busy}
 
-    # ================= 站起来 / 开始走 / 坐下 / 技能 / 声音：按 =================
+    # ================= Command Execution =================
 
     def _call(self, what, method, params, by, ctx=None, posture_target=None, ordered=False, verify=None):
         if posture_target is None:
@@ -1678,10 +1568,8 @@ class DriveMixin:
         with (nullcontext() if ordered else self._send_lk):
             with self._lk:
                 if not motion.request_current():
-                    raise Refused("动作会话已经改变，旧命令请求已丢弃")
+                    raise Refused("Motion session changed; stale command dropped")
                 recording = motion.session and motion.state == "recording"
-                # Old robotd/manual fixtures without state evidence retain their
-                # original control path. Automation always requires complete data.
                 legacy = (not recording and not ordered and not motion.posture.pending
                           and "state" not in (self._robot or {}))
                 if recording:
@@ -1693,29 +1581,25 @@ class DriveMixin:
                 motion._flush_outputs()
             with self._lk:
                 if recording and (not motion.session or motion.session.get("invalid")):
-                    raise Refused("动作会话已经结束，坐站请求已取消")
+                    raise Refused("Motion session ended; sit/stand request cancelled")
                 token = motion.begin_posture(posture_target, manual=not recording and not ordered)
                 origin = motion.recording_origin()
             if not token["command"]:
                 with self._lk:
                     motion.posture.accepted(token, self.clock())
-                return {"accepted": True, "reason": "已经达到目标姿态"}
+                return {"accepted": True, "reason": "Already in target posture"}
             return self._call_rpc(what, method, params, by, ctx, posture_token=token, record_origin=origin)
 
     def _call_rpc(self, what, method, params, by, ctx=None, posture_token=None, record_origin=None,
                   verify=None):
-        """一个要回话的请求：记「发出 → 回执 · 耗时」（log_cmd，分类「命令」），拒绝的原因翻成人话抛 Refused。
-
-        verify：回执之后再查一次真实状态；返回原因就按失败记日志并抛 Refused。用给「开始走」这种
-        回执 accepted 但主程序可能没真的启动命令（见 _verify_policy_started），别再写「成功」骗人。
-        """
+        """Execute an RPC call, log timing, and translate errors to Refused."""
         if self.robot is None:
-            raise Refused("这只鸭子没配主程序的地址")
-        if self._update_blocked() and not neutral_robot_command(method,params):
-            raise Refused('软件 / 主程序更新保护仍在，旧动作请求已取消')
+            raise Refused("robotd address is not configured")
+        if self._update_blocked() and not neutral_robot_command(method, params):
+            raise Refused('Software / robotd update protection still active; motion request cancelled')
         with self._lk:
             if not self.motion_studio.request_current():
-                raise Refused("动作会话已经改变，旧命令请求已丢弃")
+                raise Refused("Motion session changed; stale command dropped")
         if method == "robot.sound":
             record_origin = self.motion_studio.recording_origin()
         skill_fence = self.motion_studio.note_skill() if method == "robot.do" and posture_token is None else None
@@ -1724,35 +1608,35 @@ class DriveMixin:
                 r = self.robot.call(method, params, CMD_TIMEOUT_S)
             except Unreachable as e:
                 if posture_token:
-                    self.motion_studio.posture_reply(posture_token, None, reason="连接中断")
-                t.fail(f"没发出去：{e}", hint="主程序 robotd 不在？看总览页")
-                raise Refused(f"没发出去：{e}") from None
+                    self.motion_studio.posture_reply(posture_token, None, reason="Connection lost")
+                t.fail(f"Send failed: {e}", hint="Is robotd offline? Check Overview")
+                raise Refused(f"Send failed: {e}") from None
             except Timeout:
                 if posture_token:
-                    self.motion_studio.posture_reply(posture_token, None, reason="回执超时")
-                t.fail(f"主程序 {CMD_TIMEOUT_S:g} 秒没回话", hint="它可能卡住了：看日志里 robotd 那几行，必要时卸力")
-                raise Refused(f"主程序 {CMD_TIMEOUT_S:g} 秒没回话：它可能卡住了") from None
+                    self.motion_studio.posture_reply(posture_token, None, reason="Reply timeout")
+                t.fail(f"robotd did not reply within {CMD_TIMEOUT_S:g}s", hint="It may be stalled: check robotd logs and E-Stop if needed")
+                raise Refused(f"robotd did not reply within {CMD_TIMEOUT_S:g}s") from None
             except RpcError as e:
                 if posture_token:
                     self.motion_studio.posture_reply(posture_token, False)
                 why = plain_refusal(e.message)
-                t.fail(f"主程序报错：{e.message}", raw={"code": e.code, "message": e.message}, hint=why)
+                t.fail(f"robotd error: {e.message}", raw={"code": e.code, "message": e.message}, hint=why)
                 raise Refused(why) from None
             if isinstance(r, dict) and r.get("accepted") is False:
                 if posture_token:
                     self.motion_studio.posture_reply(posture_token, False)
                 self.motion_studio.rejected_skill(skill_fence)
                 why = plain_refusal(r.get("reason"))
-                t.fail(f"主程序没接受：{r.get('reason')}", raw=r, hint=why)
+                t.fail(f"robotd rejected: {r.get('reason')}", raw=r, hint=why)
                 raise Refused(why)
             if verify is not None:
                 why = verify()
                 if why:
-                    t.fail(f"主程序收下了，但没真的执行：{why}", raw=r, hint=why)
+                    t.fail(f"robotd accepted, but execution unconfirmed: {why}", raw=r, hint=why)
                     raise Refused(why)
             if posture_token:
                 if not isinstance(r, dict) or r.get("accepted") is not True:
-                    self.motion_studio.posture_reply(posture_token, None, reason="回执格式不明确")
+                    self.motion_studio.posture_reply(posture_token, None, reason="Ambiguous reply format")
                     raise Refused(self.motion_studio.posture.error)
                 self.motion_studio.posture_reply(posture_token, True, origin=record_origin)
             t.ok(r, note=(r.get("reason") or "") if isinstance(r, dict) else "")
@@ -1795,41 +1679,39 @@ class DriveMixin:
                 if r.get("policy_enabled") is True:
                     return None
             self._cancel_wait(step)
-        return self._policy_refusal(bus) or "主程序没把走路策略开起来（可能还在回中或者没扶正）"
+        return self._policy_refusal(bus) or "robotd did not enable walking policy (may still be homing or tilted)"
 
     def _motion_cmd(self, op, args, conn, by, label=None):  # noqa: C901
-        """一次性的命令：不拿方向盘（审查二 I1）。别人正在推摇杆时不让点（停下、叫一声除外）；一次只发一个
-        （停下、叫一声除外：声音不动关节，不占「上一个还没回话」，三 V15）。label：网页手柄图上按的，日志里写「网页手柄 A → …」。"""
         now = self.clock()
-        what = {"stand": "站起来", "walk": "开始走", "walk_stop": "停下（站好）", "sit": "坐下"}.get(op)
+        what = {"stand": "Stand Up", "walk": "Start Walking", "walk_stop": "Stop (Stand)", "sit": "Sit Down"}.get(op)
         urgent = op == "walk_stop"
         exclusive = op not in ("walk_stop", "sound")
         with self._lk:
             if not self.motion_studio.request_current():
-                return {"dropped": "动作会话已经改变，旧命令请求已丢弃"}
+                return {"dropped": "Motion session changed; stale command dropped"}
             if self._cmd_busy and exclusive:
-                raise Refused("上一个指令还没回话，等一下")
+                raise Refused("Previous command still waiting for reply; wait a moment")
             mv = self._motion_view(now)
             if op == "skill":
                 name = args.get("name")
                 row = next((s for s in mv["skills"] if s["name"] == name), None)
                 if row is None:
-                    raise Refused(mv["skills_why"] or f"这只鸭子没有「{C.SKILL_CN.get(name, name)}」")
-                what = f"技能：{row['label']}"
+                    raise Refused(mv["skills_why"] or f"This duck does not have '{C.SKILL_CN.get(name, name)}'")
+                what = f"Skill: {row['label']}"
                 ok, why = row["ok"], row["why"]
             elif op == "sound":
                 tag = args.get("tag")
                 row = next((s for s in mv["sounds"] if s["tag"] == tag), None)
                 if row is None:
-                    raise Refused(f"不认识的声音：{tag}")
-                what = f"叫一声：{row['label']}"
+                    raise Refused(f"Unknown sound: {tag}")
+                what = f"Sound: {row['label']}"
                 ok, why = row["ok"], row["why"]
             else:
                 btn = next((x for x in mv["buttons"].values() if x["op"] == op), None)
                 if btn is None:
                     pose = mv["posture_cn"]
-                    msg = {"walk": "已经「准备好走」了：推摇杆就走" if mv["posture"] in DRIVING else f"现在{pose}，「开始走」用不了",
-                           "walk_stop": f"现在{pose}，没在走"}.get(op, "现在不能按这个")
+                    msg = {"walk": "Already 'Ready to Walk': push sticks to walk" if mv["posture"] in DRIVING else f"Currently {pose}; 'Start Walking' unavailable",
+                           "walk_stop": f"Currently {pose}; not walking"}.get(op, "Cannot run this command right now")
                     self._last_cmd = {"what": label or what, "by": by, "ok": False, "reason": msg, "at": now}
                     raise Refused(msg)
                 ok, why = btn["ok"], btn["why"]
@@ -1837,7 +1719,7 @@ class DriveMixin:
             if ok and op not in ("sound", "walk_stop"):
                 held = self._lease_holder(now)
                 if held is not None and held["conn"] != conn:
-                    ok, why = False, f"{held['by'] or '另一个页面'}正在推摇杆：等它松手，或者点「接管」"
+                    ok, why = False, f"{held['by'] or 'Another page'} is driving sticks: wait for release or click 'Take Over'"
             if not ok:
                 self._last_cmd = {"what": what, "by": by, "ok": False, "reason": why, "at": now}
                 raise Refused(why)
@@ -1851,19 +1733,15 @@ class DriveMixin:
                 if stand_call == "robot.init":
                     r = self._call(what, "robot.init", {}, by, ctx)
                 else:
-                    r = self._call(what + "（坐着：sit_toggle）", "robot.do", {"skill": "sit_toggle"}, by, ctx, posture_target="stand")
+                    r = self._call(what + " (sitting: sit_toggle)", "robot.do", {"skill": "sit_toggle"}, by, ctx, posture_target="stand")
             elif op == "walk":
-                # 回执 accepted 不等于策略真的开起来：在同一个日志条目里回读 busStatus 确认，
-                # 没起来就把主程序的真原因报出来（不再写「成功」）
                 r = self._call(what, "robot.enable", {"on": True, "toggle": False}, by, ctx,
                                verify=self._verify_policy_started)
             elif op == "walk_stop":
                 with self._lk:
                     d = self._driver
-                self._halt("点了停下", d["conn"] if d else None, clear_all=True)   # 三 V1 第 7 条：谁置的头 / 身体都清
-                self._call("停下：先把速度清零", "robot.stop", {}, by, ctx)
-                # 走着的时候先等速度归零（最多 1 秒）再回站姿（review-impl-plan I2「走着」一行）。
-                # 按次数等，不看注入的时钟：时钟停了（测试、或者别的毛病）也不会卡死在这里
+                self._halt("Clicked Stop", d["conn"] if d else None, clear_all=True)
+                self._call("Stop: zero velocity", "robot.stop", {}, by, ctx)
                 for _ in range(int(WALK_STOP_WAIT_S / 0.05)):
                     applied = (self._robot or {}).get("applied")
                     if not (isinstance(applied, list) and any(abs(v) > 0.01 for v in applied if isinstance(v, (int, float)))):
@@ -1889,7 +1767,7 @@ class DriveMixin:
             self._last_cmd = {"what": what, "by": by, "ok": True, "reason": note, "at": self.clock()}
         return {"accepted": True, "reason": note, "did": op}
 
-    # ================= 动作、组合动作（按住才做，松手就停） =================
+    # ================= Actions & Combos =================
 
     def _find_combo(self, cid):
         for c in C.ACTIONS + C.BUILTIN_COMBOS + self._user_combos:
@@ -1898,39 +1776,36 @@ class DriveMixin:
         return None
 
     def _action_start(self, args, conn, by):
-        """press：页面这一次按下的序号（代码审查 C7）。之后的 action_hold 带同一个序号才算续命：页面上一次按下留下的
-        定时器（回执回来之前又松开、又按下）续不了这一次的命。"""
         cid = args.get("id")
         combo = self._find_combo(cid)
         if combo is None:
-            raise Refused(f"不认识的动作：{cid}")
+            raise Refused(f"Unknown action: {cid}")
         press = self._seq({"seq": args.get("press")})
         now = self.clock()
         with self._lk:
             if not self.motion_studio.request_current():
-                return {"dropped": "动作会话已经改变，旧动作请求已丢弃"}
+                return {"dropped": "Motion session changed; stale action request dropped"}
             a = self._action
             if a is not None:
                 if a["conn"] == conn and a["id"] == cid:
                     a["hold"] = now
                     a["press"] = press
                     return {"running": cid}
-                raise Refused(f"正在做「{a['name']}」（{a['by'] or '页面'}）：等它做完或者先松开")
+                raise Refused(f"Running '{a['name']}' ({a['by'] or 'page'}): wait for it to finish or release")
             mv = self._motion_view(now)
             row = next((x for x in mv["actions"] + mv["combos"] if x["id"] == cid), None)
             if row is None or not row["ok"]:
-                raise Refused((row or {}).get("why") or "现在做不了")
-            self._take_lease(conn, by, now)          # 离开了手柄页的连接拿不到（三 V5：不再有 action 的口子）
+                raise Refused((row or {}).get("why") or "Cannot run right now")
+            self._take_lease(conn, by, now)
             a = {"id": cid, "name": combo["name"], "conn": conn, "by": by, "started": now, "hold": now, "press": press,
                  "stop": threading.Event(), "why": None, "step": 0, "steps": list(combo["steps"]),
                  "motion_epoch": self.motion_studio.epoch}
             self._action = a
-        self.log.info(f"开始做动作「{combo['name']}」（{by or '页面'}）", cat="手柄", raw=C.describe(combo["steps"]), dedup=False)
+        self.log.info(f"Started action '{combo['name']}' ({by or 'page'})", cat="Gamepad", raw=C.describe(combo["steps"]), dedup=False)
         threading.Thread(target=self._run_action, args=(a,), name="pad-action", daemon=True).start()
         return {"started": cid, "seconds": round(C.duration(combo["steps"]), 1)}
 
     def _action_hold(self, conn, press=None):
-        """页面说「还按着」。带了序号、跟这个动作开始时的不一样：是上一次按下留下的，不续（代码审查 C7）。"""
         press = self._seq({"seq": press})
         with self._lk:
             a = self._action
@@ -1941,7 +1816,7 @@ class DriveMixin:
                 return {"running": a["id"]}
         return {"running": None}
 
-    def _action_stop(self, conn, why="松开了"):
+    def _action_stop(self, conn, why="Released"):
         with self._lk:
             a = self._action
             if a is None or (conn is not None and a["conn"] != conn):
@@ -1954,30 +1829,31 @@ class DriveMixin:
         now = self.clock()
         with self._lk:
             if a["stop"].is_set():
-                return a["why"] or "停了"
+                return a["why"] or "Stopped"
             if now - a["hold"] > HOLD_S:
-                return f"页面 {HOLD_S:g} 秒没说「还按着」（松手、切页或断网）"
+                return f"Page missed {HOLD_S:g}s hold heartbeat (released, navigated away, or disconnected)"
             if self._relax_at >= a["started"]:
-                return "卸力了"
+                return "Torque disabled"
             r = self._robot or {}
             if r.get("estop_active"):
-                return "卸力了"
-            if needs_policy and relaxed(r.get("bus")) is True:     # 只动嘴的（三 V10）软着也照做：robotd 自己不动
-                return "扭矩关了（软了）"
+                return "Torque disabled"
+            if needs_policy and relaxed(r.get("bus")) is True:
+                return "Torque off (limp)"
             if self._pad_attached(now)[0]:
-                return "实体手柄连上了"
+                return "Physical gamepad connected"
             d = self._driver
             if d is None or d["conn"] != a["conn"]:
-                return "被别的页面接管了"
+                return "Taken over by another page"
             base = self._base_block(now)
             if base:
                 return base
             if needs_policy and self._posture() not in DRIVING:
-                return "策略停了"
+                return "Policy stopped"
         return None
 
     def _notify_output(self, method, params):
-        if self._update_blocked() and not neutral_robot_command(method,params):return False
+        if self._update_blocked() and not neutral_robot_command(method, params):
+            return False
         if method == "robot.do":
             self.motion_studio.note_skill()
         self.robot.notify(method, params)
@@ -1997,10 +1873,10 @@ class DriveMixin:
         steps, needs = a["steps"], C.needs_policy(a["steps"])
         moves_head = any(C.head_at(s, 0.0) is not None for s in steps)
         moves_mouth = any(C.mouth_at(s, 0.0) is not None for s in steps)
-        result, level = "做完了", "info"
+        result, level = "Completed", "info"
         try:
             if self.robot is None:
-                raise _Abort("这只鸭子没配主程序的地址")
+                raise _Abort("robotd address is not configured")
             for i, step in enumerate(steps):
                 with self._lk:
                     a["step"] = i
@@ -2008,17 +1884,17 @@ class DriveMixin:
                 if why:
                     raise _Abort(why)
                 if step["do"] == "sound":
-                    self._call(f"动作「{a['name']}」：叫一声", "robot.sound", {"tag": step["tag"]}, a["by"])
+                    self._call(f"Action '{a['name']}': sound", "robot.sound", {"tag": step["tag"]}, a["by"])
                 elif step["do"] == "skill":
                     with self._lk:
                         mv = self._motion_view(self.clock())
                     row = next((s for s in mv["skills"] if s["name"] == step["name"]), None)
-                    why = (row or {}).get("why") if row else f"这只鸭子没有「{C.SKILL_CN.get(step['name'], step['name'])}」"
+                    why = (row or {}).get("why") if row else f"This duck does not have '{C.SKILL_CN.get(step['name'], step['name'])}'"
                     if why:
                         raise _Abort(why)
-                    if self._abort_reason(a, needs):     # 查完到发出之间也可能卸力：发之前再看一眼
+                    if self._abort_reason(a, needs):
                         raise _Abort(self._abort_reason(a, needs))
-                    self._call(f"动作「{a['name']}」：{C.SKILL_CN.get(step['name'], step['name'])}", "robot.do",
+                    self._call(f"Action '{a['name']}': {C.SKILL_CN.get(step['name'], step['name'])}", "robot.do",
                                {"skill": step["name"]}, a["by"])
                 t0 = self.clock()
                 dur = C.step_seconds(step)
@@ -2036,36 +1912,34 @@ class DriveMixin:
                         self._notify_quiet("robot.mouth", {"open": m}, action=a)
                     a["stop"].wait(C.TICK_S)
         except _Abort as e:
-            result, level = f"停了：{e}", "info"
+            result, level = f"Stopped: {e}", "info"
         except Refused as e:
-            result, level = f"没做完：{e}", "warn"
+            result, level = f"Incomplete: {e}", "warn"
         except (Unreachable, Timeout) as e:
-            result, level = f"没做完：发不出去（{e}）", "warn"
-        except Exception as e:  # noqa: BLE001 —— 不该发生；发生了也要回正、合嘴、说清楚
-            result, level = f"Studio 出错：{type(e).__name__}: {e}", "error"
-            self.log.error(f"动作「{a['name']}」出错", cat="手柄", raw=f"{type(e).__name__}: {e}", exc=True,
-                           hint="这是 Studio 的问题，导出诊断包发出来")
+            result, level = f"Incomplete: send failed ({e})", "warn"
+        except Exception as e:  # noqa: BLE001
+            result, level = f"Studio error: {type(e).__name__}: {e}", "error"
+            self.log.error(f"Action '{a['name']}' error", cat="Gamepad", raw=f"{type(e).__name__}: {e}", exc=True,
+                           hint="Studio internal error; export diagnostics")
         finally:
-            # 头的目标没有过期、嘴不带时间戳：不回正、不合上就会一直留着（pad_combo.py 文件头）。
-            # 这个动作里有头 / 嘴的步就都发一次（不管做到哪一步了）；打断之后不再发 robot.do / robot.sound
             for used, method, params in ((moves_head, "robot.head", {"neck_pitch": 0.0, "head_pitch": 0.0, "head_yaw": 0.0, "head_roll": 0.0}),
                                          (moves_mouth, "robot.mouth", {"open": 0.0})):
                 if used and self.robot is not None:
                     try:
                         self._notify_quiet(method, params, action=a, cleanup=True)
                     except (Unreachable, Timeout) as e:
-                        self.log.warn("动作结束时没能回正 / 合嘴", cat="手柄", step=method, raw=str(e),
-                                      hint="头可能还歪着、嘴可能还张着：再按一次那个动作，或者让它坐下再站起来")
+                        self.log.warn("Failed to re-center head / close mouth after action", cat="Gamepad", step=method, raw=str(e),
+                                      hint="Head or mouth may remain offset; trigger the action again or sit & stand")
             with self._lk:
                 if self._action is a:
                     self._action = None
                 self._last_action = {"id": a["id"], "name": a["name"], "by": a["by"], "result": result,
-                                     "ok": result == "做完了", "at": self.clock()}
-            cat = "安全" if ("卸力" in result or "没说" in result or "软了" in result) else "手柄"
-            self.log.write(f"动作「{a['name']}」{result}", cat=cat, level=level, step=f"第 {a['step'] + 1}/{len(steps)} 步",
+                                     "ok": result == "Completed", "at": self.clock()}
+            cat = "Safety" if ("Torque" in result or "missed" in result or "limp" in result) else "Gamepad"
+            self.log.write(f"Action '{a['name']}' {result}", cat=cat, level=level, step=f"Step {a['step'] + 1}/{len(steps)}",
                            dedup=False)
 
-    # ================= 自己编的组合动作：存、删（编辑界面下一轮做） =================
+    # ================= User Combos: Save & Delete =================
 
     def _combo_save(self, args):
         builtin = {c["id"] for c in C.ACTIONS + C.BUILTIN_COMBOS}
@@ -2073,22 +1947,22 @@ class DriveMixin:
         with self._lk:
             others = [c for c in self._user_combos if c["id"] != combo["id"]]
             if len(others) >= C.MAX_USER_COMBOS:
-                raise Refused(f"最多存 {C.MAX_USER_COMBOS} 个，先删掉几个")
+                raise Refused(f"Maximum {C.MAX_USER_COMBOS} custom combos allowed; delete some first")
             new = others + [combo]
         path = C.save_user_combos(self.state_dir, new)
         with self._lk:
             self._user_combos = new
-        self.log.info(f"存了组合动作「{combo['name']}」", cat="手柄", step=path, raw=C.describe(combo["steps"]))
+        self.log.info(f"Saved custom combo '{combo['name']}'", cat="Gamepad", step=path, raw=C.describe(combo["steps"]))
         return {"saved": combo["id"]}
 
     def _combo_delete(self, args):
         cid = args.get("id")
         with self._lk:
             if not any(c["id"] == cid for c in self._user_combos):
-                raise Refused("没有这个自己编的组合动作（内置的删不了）")
+                raise Refused("Custom combo not found (built-in combos cannot be deleted)")
             new = [c for c in self._user_combos if c["id"] != cid]
         C.save_user_combos(self.state_dir, new)
         with self._lk:
             self._user_combos = new
-        self.log.info(f"删了组合动作 {cid}", cat="手柄")
+        self.log.info(f"Deleted custom combo {cid}", cat="Gamepad")
         return {"deleted": cid}

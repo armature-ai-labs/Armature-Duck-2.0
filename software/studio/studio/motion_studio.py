@@ -22,7 +22,7 @@ from .audio_interaction import MusicRhythm
 from .rpc import Timeout, Unreachable
 
 HEARTBEAT_S = .5
-SKILL_UNSUPPORTED = "模型技能还没有可验证的完成状态：首版录制不支持技能、连滚或含技能的组合动作"
+SKILL_UNSUPPORTED = "Model skills do not have a verifiable completion state yet: v1 recording does not support skills, barrel rolls, or combos containing skills"
 CONTROL_OPS = {"move", "sticks", "stop", "keys", "mode", "key", "skill", "sound", "action_start", "action_hold", "action_stop"}
 PREP_OPS = {"stand", "walk", "walk_stop", "sit", "start", "reboot", "drive_mode"}
 
@@ -133,23 +133,23 @@ class MotionStudio:
         source = audio.snapshot() if audio is not None else {}
         if (source.get("available") is not True or source.get("listening") is not True
                 or source.get("music") is not True or source.get("error")):
-            return "监听、音乐模式或语音服务已关闭；重新开启后请再点「随乐律动」"
+            return "Listening, music mode, or voice service is off; re-enable and click 'Music Rhythm' again"
         try:
             _, phase, sitting = phase_evidence(p._robot or {}, now)
         except Refused:
-            return "随乐律动需要新鲜的策略阶段和坐姿回读"
+            return "Music Rhythm requires fresh policy phase and sitting state readback"
         if phase not in ("walk", "stand") or sitting:
-            return "随乐律动需要站稳并准备好走"
+            return "Music Rhythm requires standing steady and ready to walk"
         status = p._status
         if (not isinstance(status, dict) or not isinstance(status.get("pads"), list)
                 or p._status_at is None or not 0 <= now - p._status_at < 15
                 or p._status_error or (p._robot or {}).get("pad_status_error")):
-            return "实体手柄状态读不出：随乐律动已停止，请恢复状态后重新开始"
+            return "Physical gamepad status unreadable: Music Rhythm stopped, restore status and restart"
         if any(not isinstance(row, dict) or type(row.get("connected")) is not bool
                for row in status["pads"]):
-            return "实体手柄状态不明确：请恢复状态后重新开始"
+            return "Physical gamepad status ambiguous: restore status and restart"
         if any(row["connected"] for row in status["pads"]):
-            return "实体手柄连着：先关闭实体手柄"
+            return "Physical gamepad is connected: turn off the physical gamepad first"
         return None
 
     def posture_allowed(self):
@@ -171,7 +171,7 @@ class MotionStudio:
         try:
             _, phase, sitting, _, _ = evidence(view, now)
         except Refused as e:
-            why = f"坐站完成回读中断：{e}；已取消后续动作"
+            why = f"Posture completion readback interrupted: {e}; subsequent motion cancelled"
             if self.posture.pending:
                 self.posture.error = self.posture.error or why
             return why
@@ -179,7 +179,7 @@ class MotionStudio:
         if not self.posture.pending and target is not None:
             matches = phase == "sit" and sitting if target == "sit" else phase in ("walk", "stand") and not sitting
             if not matches:
-                return "姿态在坐站步骤后被改变：已取消后续动作"
+                return "Posture changed after sit/stand step: subsequent motion cancelled"
         return None
 
     def begin_posture(self, target, manual=False):
@@ -192,16 +192,16 @@ class MotionStudio:
             if (why or view.get("present") is not True or bus.get("policy_enabled") is not True
                     or (bus.get("native") or {}).get("torque_state_confirmed") is not True
                     or (p._policies() or {}).get("enabled") is not True):
-                raise Refused(why or "坐站需要实时策略启用和扭矩确认")
+                raise Refused(why or "Sit/Stand requires live policy enabled and torque confirmed")
             if "sit_toggle" not in (p._known_skills() or []):
-                raise Refused("这只鸭子没装坐站模型")
+                raise Refused("This duck does not have a sit/stand model installed")
             if self.session:
                 if manual:
-                    raise Refused("手动坐站前必须先取消自动会话")
+                    raise Refused("Cancel the automated session before manual sit/stand")
                 s = self.session
                 if (s.get("invalid") or now - s["heartbeat"] > HEARTBEAT_S or s["conn"] in p._gone
                         or s["conn"] in p._closed or p._pad_attached(now)[0] is not False):
-                    raise Refused(s.get("invalid") or "页面已离开、心跳过期或实体手柄接管，坐站请求已取消")
+                    raise Refused(s.get("invalid") or "Page left, heartbeat expired, or physical gamepad took over; sit/stand cancelled")
             token = self.posture.begin(target, view, now, manual=manual)
             if token is not None and self.session:
                 self.session["posture_control"] = True
@@ -221,7 +221,7 @@ class MotionStudio:
             elif accepted is False:
                 self.posture.rejected(token)
             else:
-                self.posture.uncertain(token, reason or "主程序没有确认", self.pad.clock())
+                self.posture.uncertain(token, reason or "robotd did not confirm", self.pad.clock())
                 self.invalidate(self.posture.error)
             self.pad._tick_evt.set()
 
@@ -249,7 +249,7 @@ class MotionStudio:
             previous = self._skill_pending, self._skill_reset_seen
             self._skill_fence += 1
             self._skill_pending, self._skill_reset_seen = True, False
-            self.invalidate("模型技能已发出，但没有可验证的完成状态")
+            self.invalidate("Model skill dispatched without verifiable completion state")
             return self._skill_fence, previous
 
     def rejected_skill(self, fence):
@@ -328,17 +328,17 @@ class MotionStudio:
                     # restore the old session or suppress neutral cleanup.
                     if s is target:
                         self.session, self.state = None, "idle"
-                        self.last_result = s.get("invalid") or ("页面超过 500 毫秒没有动作心跳"
-                            if self._heartbeat_expired(s, self.pad.clock()) else "回放完成")
+                        self.last_result = s.get("invalid") or ("Page missed motion heartbeat for >500 ms"
+                            if self._heartbeat_expired(s, self.pad.clock()) else "Playback complete")
                     continue
                 if not cleanup and self.pad._update_blocked():
-                    self.invalidate('软件 / 主程序更新保护仍在')
+                    self.invalidate('Software / robotd update protection still active')
                     continue
                 if not cleanup and (s is not target or s.get("invalid")
                                     or self._heartbeat_expired(s, self.pad.clock())):
                     continue
                 if not cleanup and policy_identity(self.pad) != target["identity"]:
-                    self.invalidate("模型或控制配置已改变")
+                    self.invalidate("Model or control config changed")
                     continue
                 if not cleanup and self.background_music():
                     # The previous send can block while real evidence goes stale.
@@ -359,11 +359,11 @@ class MotionStudio:
                 continue
             try:
                 if self.pad.robot is None:
-                    raise Unreachable("robotd 未配置")
+                    raise Unreachable("robotd not configured")
                 self.pad.robot.notify(method, dict(params))
             except (Unreachable, Timeout) as e:
                 with self.pad._lk:
-                    self.error = f"动作指令没发出去：{e}"
+                    self.error = f"Motion command failed to send: {e}"
                     if cleanup:
                         self._cleanup_failed(method, params)
                     elif self.session is target:
@@ -385,54 +385,54 @@ class MotionStudio:
     def ready_why(self, conn, now, starting=False, posture_start=False):
         p = self.pad
         if p._closing:
-            return "Studio 正在关闭"
+            return "Studio is shutting down"
         if conn is None or conn in p._gone or (conn in p._closed and
                                                (starting or not self.background_music(conn))):
-            return "页面不在手柄控制区：滚到遥控区再开始"
+            return "Page is not in the gamepad control section: scroll to Remote Control to start"
         attached, why = p._pad_attached(now)
         if attached is not False:
-            return "实体手柄连着或状态读不出：先关闭实体手柄" + (f"（{why}）" if why else "")
+            return "Physical gamepad connected or status unreadable: turn off physical gamepad first" + (f" ({why})" if why else "")
         base = p._base_block(now) or p._relax_block(now)
         if base:
             return base
         allow_posture = posture_start or (not starting and self.posture_allowed())
         if self.posture.pending and (starting or not allow_posture):
-            return self.posture.error or "当前坐站仍会完成：等新鲜回读确认，或手动停下策略再开始走"
+            return self.posture.error or "Current sit/stand will still complete: wait for fresh readback or stop policy manually before starting"
         if self._skill_pending:
             if self._skill_reset_seen:
-                return "已确认策略停下：点击上方「开始走」，等新鲜回读确认「准备好走」后再开始"
-            return "上个模型技能没有可验证的完成状态：先手动停下策略、再重新开始走，等新鲜回读确认准备好"
+                return "Policy stop confirmed: click 'Start Walking' above and wait for 'Ready to Walk' before starting"
+            return "Previous model skill has no verifiable completion state: stop policy manually, restart walking, and wait for ready readback"
         pol = p._policies() or {}
         b = (p._robot or {}).get("bus") or {}
         if (p._posture() not in (("policy", "walking", "sitting") if allow_posture else ("policy", "walking")) or pol.get("enabled") is not True
                 or (not allow_posture and pol.get("sitting") is not False) or pol.get("homed") is not True
                 or b.get("policy_enabled") is not True or b.get("homed") is not True
                 or (b.get("native") or {}).get("torque_state_confirmed") is not True):
-            return "先让鸭子站稳并进入「准备好走」（策略在跑）"
+            return "Stand the duck up steady and enter 'Ready to Walk' (policy running) first"
         if p._job_alive() or p._cmd_busy:
-            return "还有指令或配对任务没结束，等它完成"
+            return "Another command or pairing task is still running; wait for it to finish"
         held = p._lease_holder(now)
         if held is not None and held["conn"] != conn:
-            return f"{held['by'] or '另一个页面'}正在遥控：先接管"
+            return f"{held['by'] or 'Another page'} is controlling: take over first"
         if starting and (p._action is not None or any(not st.get("end") and st["held"] for st in p._keys.values())):
-            return "先松开动作和按住的键，等动作结束"
+            return "Release active actions and held keys until motion stops"
         if starting and p._web_driving:
-            return "先松开摇杆，站好后再开始"
+            return "Release the joystick and stand steady before starting"
         return None
 
     def snapshot(self, conn, now):
         s = self.session
         why = self.ready_why(conn, now, starting=True)
         if self.draft:
-            why = why or "还有尚未保存的草稿：先保存或丢弃"
+            why = why or "Unsaved draft present: save or discard it first"
         if self._storage_busy:
-            why = why or "正在保存或整理动作文件"
+            why = why or "Saving or organizing motion files"
         record_why, idle_why = why, why
         if s:
             if not (self.state == "idle_motion" and s["conn"] == conn):
-                record_why = record_why or "已有录制或回放会话"
+                record_why = record_why or "Recording or playback session already active"
             if not (self.state == "recording" and s["conn"] == conn and not s.get("lively")):
-                idle_why = idle_why or "已有录制、回放或灵动会话"
+                idle_why = idle_why or "Recording, playback, or idle motion session already active"
         owner_conn = s["conn"] if s else (self.draft.get("conn") if self.draft else None)
         owner_by = s["by"] if s else (self.draft.get("by") if self.draft else None)
         draft = None if self.draft is None else {k: self.draft[k] for k in ("duration_s", "events", "reason")}
@@ -443,7 +443,7 @@ class MotionStudio:
                 "elapsed_s": round(self.elapsed(now), 3), "duration_s": s.get("duration", 0.) if s else self.elapsed(now),
                 "loop": s.get("loop", 0) if s else 0, "loops": s.get("loops", 1) if s else 1,
                 "recordings": copy.deepcopy(self.recordings), "draft": draft,
-                "library_warning": (f"有 {self.store.skipped} 段动作记录损坏或格式不合法，已略过；其他记录可用"
+                "library_warning": (f"{self.store.skipped} corrupted or invalid motion recording(s) skipped; other recordings remain available"
                                     if self.store.skipped else None),
                 "record_available": {"ok": record_why is None, "why": record_why},
                 "idle_available": {"ok": idle_why is None, "why": idle_why}, "last_result": self.last_result,
@@ -469,7 +469,7 @@ class MotionStudio:
             if self._orphan_draft(conn):
                 self.draft["conn"] = conn
                 return
-            raise Refused(f"{owner.get('by') or '另一个页面'}拥有这次会话：先接管遥控")
+            raise Refused(f"{owner.get('by') or 'Another page'} owns this session: take over control first")
 
     def _orphan_draft(self, conn):
         if self.session is not None or not self.draft or conn is None or conn in self.pad._gone or conn in self.pad._closed:
@@ -495,7 +495,7 @@ class MotionStudio:
         p, s = self.pad, self.session
         boundary_t = round(self.elapsed(), 6)
         conn = s["conn"] if s else conn
-        p._action_stop(conn, "动作录制 / 回放到达停止边界")
+        p._action_stop(conn, "Motion recording / playback reached stop boundary")
         if conn in p._keys:
             p._keys.pop(conn, None)
         p._x_armed.pop(conn, None)
@@ -522,14 +522,14 @@ class MotionStudio:
         elapsed = self._boundary(record=self.state == "recording" and meaningful)
         self.session = None
         if self.posture.pending:
-            reason += "；当前坐站仍会完成，后续动作已取消"
+            reason += "; current sit/stand will still complete, subsequent motion cancelled"
         self.last_result = reason
         if meaningful:
             self.draft = dict(s, duration_s=max(elapsed, s["events"][-1]["t"]), reason=reason)
             self.state = "draft"
         else:
             self.state = "idle"
-            self.last_result = ((reason + "；") if self.posture.pending else "") + "没有有效动作，没有生成草稿"
+            self.last_result = ((reason + "; ") if self.posture.pending else "") + "No effective motion recorded; no draft created"
 
     def _stop(self, reason):
         if self.state in ("recording", "record_paused"):
@@ -538,7 +538,7 @@ class MotionStudio:
             self._boundary()
             self.session = None
             self.state = "idle"
-            self.last_result = reason + ("；当前坐站仍会完成，后续动作已取消" if self.posture.pending else "")
+            self.last_result = reason + ("; current sit/stand will still complete, subsequent motion cancelled" if self.posture.pending else "")
 
     @staticmethod
     def _meaningful(event):
@@ -557,7 +557,7 @@ class MotionStudio:
             if not s or self.state != "recording" or (s.get("invalid") and not force):
                 return
             if not force and policy_identity(self.pad) != s["identity"]:
-                self.invalidate("模型或控制配置已改变")
+                self.invalidate("Model or control config changed")
                 return
             event = {"t": round(self.elapsed(), 6), "method": method, "params": copy.deepcopy(params)}
             self._append(s, method, params, event["t"], force=force)
@@ -570,7 +570,7 @@ class MotionStudio:
             return
         cost = len(json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 1
         if not force and (len(s["events"]) >= MAX_EVENTS - len(CLEANUP) or s["bytes"] + cost > MAX_BYTES - 4096):
-            s["invalid"] = "已达到事件数量或文件大小上限"
+            s["invalid"] = "Reached event count or file size limit"
             self.pad._tick_evt.set()
             return
         if len(s["events"]) < MAX_EVENTS:
@@ -596,7 +596,7 @@ class MotionStudio:
                 if not s:
                     return
                 if policy_identity(self.pad) != s["identity"]:
-                    self._stop("模型或控制配置已改变")
+                    self._stop("Model or control config changed")
                     self._refresh_request()
                     return
                 if op in PREP_OPS:
@@ -604,33 +604,33 @@ class MotionStudio:
                         self._own(conn)
                         if self.posture.pending:
                             if self.posture.pending["target"] != op:
-                                self._stop("手动坐站恢复接管，录制已结束")
+                                self._stop("Manual sit/stand took over; recording ended")
                                 self._refresh_request()
                                 return
-                            raise Refused(self.posture.error or "当前坐站仍会完成：请等待关节稳定")
+                            raise Refused(self.posture.error or "Current sit/stand is still completing: wait for joints to settle")
                         # Only sitstand, never init/enable, belongs in a recording.
                         if op == "stand" and (self.pad._policies() or {}).get("sitting") is not True:
-                            raise Refused("录制中的站起只接受坐姿起身；请先坐下")
+                            raise Refused("Standing up during recording is only allowed from sitting posture; sit down first")
                         if s.get("lively"):
                             s["lively"] = None
                             self._boundary(record=True)
                             self._refresh_request()
                         return
-                    self._stop("准备状态被改变，录制 / 回放已结束")
+                    self._stop("Prep state changed; recording / playback ended")
                     self._refresh_request()
                     return
                 self._own(conn)
                 if self._storage_busy:
-                    raise Refused("正在保存或整理动作文件，等它完成")
+                    raise Refused("Saving or organizing motion files; wait for completion")
                 if self.state == "record_paused":
-                    raise Refused("录制已暂停：先点「继续录制」再操作")
+                    raise Refused("Recording is paused: click 'Resume Recording' first")
                 if self.state in ("playing", "play_paused", "idle_motion"):
-                    self._stop("手动操作接管，自动动作已停止")
+                    self._stop("Manual control took over; automated motion stopped")
                     self._refresh_request()
                     return
                 if self.state == "recording":
                     if self.posture.pending:
-                        raise Refused(self.posture.error or "当前坐站仍会完成：请等待关节稳定")
+                        raise Refused(self.posture.error or "Current sit/stand is still completing: wait for joints to settle")
                     combo = self.pad._find_combo(args.get("id")) if op == "action_start" else None
                     key = args.get("key")
                     skill_key = op == "key" and (key in {"a", "x", "lb", "rb"} or
@@ -648,28 +648,28 @@ class MotionStudio:
         idle_kind = args.get("kind", "lively")
         if action == "idle_start":
             if idle_kind not in ("lively", "music"):
-                raise Refused("律动类型只能选择灵动或音乐")
+                raise Refused("Idle motion kind must be 'lively' or 'music'")
             if idle_kind == "music":
                 audio = getattr(self.pad, "audio", None)
                 status = audio.snapshot() if audio is not None else {}
                 if not status.get("available") or not status.get("listening") or not status.get("music"):
-                    raise Refused("先在语音面板开启「听音乐」，等待服务连接")
+                    raise Refused("Enable 'Music Mode' in the Voice panel first and wait for the service to connect")
         supplied_token = args.get("session_id")
         with self.pad._lk:
             entry_session, entry_epoch = self.session, self.epoch
             if supplied_token is not None and action != "heartbeat":
                 if self.session is None or self.session["id"] != supplied_token:
-                    return {"dropped": "旧的动作会话"}
+                    return {"dropped": "Stale motion session"}
         if action == "heartbeat":
             with self.pad._lk:
                 s = self.session
                 if (not s or s["conn"] != conn or s["id"] != args.get("session_id") or s.get("invalid")
                         or conn in self.pad._closed or conn in self.pad._gone):
-                    return {"dropped": "旧的或已关闭的动作会话"}
+                    return {"dropped": "Stale or closed motion session"}
                 if self.background_music(conn):
                     return {"session_id": s["id"]}
                 if self._heartbeat_expired(s, self.pad.clock()):
-                    s["invalid"] = "页面超过 500 毫秒没有动作心跳"
+                    s["invalid"] = "Page missed motion heartbeat for >500 ms"
                     self.pad._tick_evt.set()
                     return {"dropped": s["invalid"]}
                 s["heartbeat"] = self.pad.clock()
@@ -689,42 +689,42 @@ class MotionStudio:
             if action == "play":
                 clip = self.store.get(args.get("id"))
                 if type(args.get("loops", 1)) is not int or args.get("loops", 1) not in (1, 3, 5):
-                    raise Refused("回放次数只能是 1、3 或 5")
+                    raise Refused("Loop count must be 1, 3, or 5")
                 if clip["fingerprint"] != fp:
-                    raise Refused("模型或控制配置已改变：请重新录制")
+                    raise Refused("Model or control config changed: please re-record")
                 postures = [e["params"]["target"] for e in clip["events"] if e["method"] == "studio.posture"]
                 if args.get("loops", 1) > 1 and postures and postures[-1] != "stand":
-                    raise Refused("多次循环需要最后录回站姿；请补录站起后再循环")
+                    raise Refused("Multiple loops require ending in standing posture; record a stand-up at the end first")
         with self._ordered():
             with self.pad._lk:
                 # Starts/resumes can hash large models without locks. Their target must
                 # remain the exact session/epoch that existed when the request arrived.
                 if self.session is not entry_session or self.epoch != entry_epoch:
-                    return {"dropped": "动作会话已经改变，旧请求已丢弃"}
+                    return {"dropped": "Motion session changed; stale request dropped"}
                 if hashed_identity is not None and policy_identity(self.pad) != hashed_identity:
-                    self._stop("模型或控制配置在校验期间改变")
-                    raise Refused("模型或控制配置在校验期间改变：请重新操作")
+                    self._stop("Model or control config changed during verification")
+                    raise Refused("Model or control config changed during verification: please retry")
                 if supplied_token is not None and (self.session is None or self.session["id"] != supplied_token):
-                    return {"dropped": "旧的动作会话"}
+                    return {"dropped": "Stale motion session"}
                 self._own(conn)
                 if self._storage_busy:
-                    raise Refused("正在保存或整理动作文件，等它完成")
+                    raise Refused("Saving or organizing motion files; wait for completion")
                 s = self.session
                 if s and (s.get("invalid") or self._heartbeat_expired(s, self.pad.clock())):
-                    why = s.get("invalid") or "页面超过 500 毫秒没有动作心跳，会话已经结束"
+                    why = s.get("invalid") or "Page missed motion heartbeat for >500 ms; session ended"
                     self._stop(why)
                     raise Refused(why)
                 if action in ("record_start", "play", "idle_start"):
                     if self.draft:
-                        raise Refused("还有尚未保存的草稿：先保存或丢弃")
+                        raise Refused("Unsaved draft present: save or discard it first")
                     combine = s and s["conn"] == conn and ((action == "record_start" and self.state == "idle_motion")
                                 or (action == "idle_start" and self.state == "recording"))
                     if s and not combine:
-                        raise Refused("已有录制或回放会话：先停止")
+                        raise Refused("Recording or playback session already active: stop it first")
                     if action == "play" and (self.pad._policies() or {}).get("sitting") is True:
                         first = next((e for e in clip["events"] if self._meaningful(e)), None)
                         if first is None or first["method"] != "studio.posture":
-                            raise Refused("这段动作在坐站步骤前有连续动作：请先站稳再回放")
+                            raise Refused("This recording has continuous motion before a sit/stand step: stand steady before playing")
                     why = self.ready_why(conn, self.pad.clock(), starting=True,
                                          posture_start=action == "play" and any(e["method"] == "studio.posture" for e in clip["events"]))
                     if why:
@@ -764,33 +764,33 @@ class MotionStudio:
                 if action in ("record_pause", "pause"):
                     wanted = "recording" if action == "record_pause" else "playing"
                     if self.state != wanted:
-                        raise Refused("当前会话不能暂停")
+                        raise Refused("Current session cannot be paused")
                     elapsed = self._boundary(record=wanted == "recording")
                     s["base"], s["lively"] = elapsed, None
                     self.state = "record_paused" if wanted == "recording" else "play_paused"
                     if self.posture.pending:
-                        self.last_result = "已暂停后续动作；当前坐站仍会完成，完成后才能继续"
+                        self.last_result = "Subsequent motion paused; current sit/stand will still complete before resuming"
                 elif action in ("record_resume", "resume"):
                     wanted = "record_paused" if action == "record_resume" else "play_paused"
                     if self.state != wanted or s is None or s.get("invalid"):
-                        raise Refused("会话已经结束或状态改变，不能继续")
+                        raise Refused("Session ended or state changed; cannot resume")
                     if self.posture.pending:
-                        raise Refused(self.posture.error or "当前坐站仍会完成：完成并确认关节稳定后才能继续")
+                        raise Refused(self.posture.error or "Current sit/stand is still completing: wait for joints to settle before resuming")
                     why = self.ready_why(conn, self.pad.clock())
                     if why or fp != s["fingerprint"]:
-                        self._stop(why or "模型或配置改变")
-                        raise Refused(why or "模型或配置改变：请重新录制")
+                        self._stop(why or "Model or config changed")
+                        raise Refused(why or "Model or config changed: please re-record")
                     s["anchor"] = self.pad.clock()
                     self.state = "recording" if wanted == "record_paused" else "playing"
                     if self.state == "playing" and not s.get("posture_barrier"):
                         self._restore_latches(s)
                 elif action == "record_finish":
                     if self.state not in ("recording", "record_paused"):
-                        raise Refused("现在没有正在录制的动作")
-                    self._finish("录制结束，尚未保存")
+                        raise Refused("No active recording to finish")
+                    self._finish("Recording finished, not yet saved")
                 elif action == "discard":
                     if self.state != "draft":
-                        raise Refused("现在没有待丢弃的草稿")
+                        raise Refused("No draft to discard")
                     self.draft, self.state = None, "idle"
                 elif action == "idle_stop":
                     if s and s.get("lively"):
@@ -798,26 +798,26 @@ class MotionStudio:
                             s["lively"] = None
                             self._boundary(record=True)
                         else:
-                            self._stop("灵动已停止")
+                            self._stop("Idle motion stopped")
                 elif action == "stop":
                     if s is None:
                         # A foreground start may still be hashing outside locks.
                         self.epoch += 1
-                    self._stop("页面停止了动作会话")
+                    self._stop("Motion session stopped by page")
                 else:
-                    raise Refused(f"不认识的动作录制操作：{action}")
+                    raise Refused(f"Unknown motion recording action: {action}")
                 return {"state": self.state, "session_id": self.session["id"] if self.session else None}
 
     def _storage(self, action, args, conn):
         with self.pad._lk:
             self._own(conn)
             if self._storage_busy:
-                raise Refused("正在保存或整理动作文件，等它完成")
+                raise Refused("Saving or organizing motion files; wait for completion")
             draft = self.draft
             if self.session:
-                raise Refused("录制或回放进行中：先停止再整理记录")
+                raise Refused("Recording or playback in progress: stop it before managing recordings")
             if action == "save" and draft is None:
-                raise Refused("现在没有待保存的草稿")
+                raise Refused("No draft to save")
             if action == "save":
                 clip = {"version": 2 if any(e["method"] == "studio.posture" for e in draft["events"]) else 1,
                         "id": uuid.uuid4().hex, "name": name(args.get("name")),
@@ -841,7 +841,7 @@ class MotionStudio:
             if action == "save" and self.draft is draft:
                 self.draft, self.state = None, "idle"
             self.error = None
-            self.last_result = {"save": "动作已保存", "rename": "名称已更新", "delete": "动作已删除"}[action]
+            self.last_result = {"save": "Motion saved", "rename": "Name updated", "delete": "Motion deleted"}[action]
             self._storage_busy = False
         return {"saved": action == "save", "recordings": rows}
 
@@ -862,17 +862,17 @@ class MotionStudio:
                 now = p.clock()
                 why = s.get("invalid") or self._posture_why(p._robot or {}, now) or self.ready_why(s["conn"], now)
                 if self._heartbeat_expired(s, now):
-                    why = why or "页面超过 500 毫秒没有动作心跳"
+                    why = why or "Page missed motion heartbeat for >500 ms"
                 if self.background_music():
                     why = why or self._music_ready_why(now)
                 if policy_identity(p) != s["identity"]:
-                    why = why or "模型或控制配置已改变"
+                    why = why or "Model or control config changed"
                 if why:
                     self._stop(why)
                     return
                 p._touch_lease(s["conn"], now)
                 if self.state == "recording" and self.elapsed(now) >= MAX_SECONDS:
-                    self._finish("已达到 60 秒上限，尚未保存")
+                    self._finish("Reached 60s limit, not yet saved")
                     return
                 if s.get("posture_barrier"):
                     if self.posture.pending or self.state != "playing":
@@ -887,7 +887,7 @@ class MotionStudio:
                     if self.state == "idle_motion" and s.get("idle_kind") == "music" and not producer.source_active:
                         # Source shutdown ends this lease; rhythm uncertainty only waits.
                         # The session boundary owns neutral cleanup, exactly once.
-                        self._stop("监听、音乐模式或语音服务已关闭；重新开启后请再点「随乐律动」")
+                        self._stop("Listening, music mode, or voice service is off; re-enable and click 'Music Rhythm' again")
                         return
                     for method, params in outputs:
                         self._send(method, params)
@@ -948,11 +948,11 @@ class MotionStudio:
             if why:
                 raise Refused(why)
             if "sit_toggle" not in (self.pad._known_skills() or []):
-                raise Refused("这只鸭子没装坐站模型")
-        self.pad._call("回放坐下" if target == "sit" else "回放站起", "robot.do", {"skill": "sit_toggle"},
+                raise Refused("This duck does not have a sit/stand model installed")
+        self.pad._call("Playback Sit" if target == "sit" else "Playback Stand", "robot.do", {"skill": "sit_toggle"},
                        s["by"], posture_target=target, ordered=True)
 
     def close(self):
         with self._ordered():
             with self.pad._lk:
-                self._stop("Studio 关闭了")
+                self._stop("Studio closed")
