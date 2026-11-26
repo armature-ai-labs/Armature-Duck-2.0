@@ -232,89 +232,84 @@ class _Abort(Exception):
 
 
 class DriveMixin:
-    # ================= 初始化 =================
+    # ================= Initialization =================
 
     def _drive_init(self, state_dir):
         self.state_dir = state_dir
-        self._send_lk = threading.Lock()      # 发给 robotd 的「检查 + 发送」在这把锁里：顺序就是落地的顺序（先拿它、再拿 _lk）
-        self._seqs = {}                       # 连接 → {"hi", "stop", "life", "mode", "latest":{通道}, "sent":{通道}}：换方向盘也不清
-        self._gone = {}                       # 断开的连接（mark_gone）→ True；永远拿不回方向盘
-        self._closed = {}                     # 离开手柄页的连接（drive off）→ True；drive open / on 才解开
+        self._send_lk = threading.Lock()      # Serializes check+send to robotd (acquire before _lk)
+        self._seqs = {}                       # conn -> {"hi", "stop", "life", "mode", "latest":{chan}, "sent":{chan}}
+        self._gone = {}                       # Disconnected conns -> True (never regain lease)
+        self._closed = {}                     # Conns outside gamepad area -> True
         self._halt_after_gone = {}
         self._conn_ids = itertools.count(1)
-        self._last_sent_at = {}               # 通道 → 上一次发出的时间（同一通道至少隔 40 ms）
+        self._last_sent_at = {}               # chan -> last sent monotonic time
         self._web_driving = False
         self.virtual = {"owner": None, "last": [0.0, 0.0, 0.0], "at": None}
         self._driver = None                   # {"conn", "by", "since", "seen"}
         self._cmd_busy = False
-        self._last_cmd = None                 # 最近一次站 / 走 / 坐 / 技能 / 声音的结果（推给所有页面）
+        self._last_cmd = None
         self._relax_presses = None
-        self._relax_noted = 0                 # note_relax 被调了几次（测急停用：测的时候顶上卸力按了就不算）
+        self._relax_noted = 0
         self._relax_at = -1e9
         self._torque_was = None
-        self._action = None                   # 正在做的动作 / 组合动作
+        self._action = None
         self._last_action = None
-        self._pad_said = False                # 「实体手柄连着，网页让位」这句只记一次
+        self._pad_said = False
         self._limits = parse_speed_limits([])
-        self._inputs = input_limits({})       # 头 / 嘴的幅度（三 V9）
-        self._imu_head, self._imu_head_why = None, None   # [pad_imu_head_control] enabled（三 V18）
+        self._inputs = input_limits({})
+        self._imu_head, self._imu_head_why = None, None
         self.list_dir = os.listdir
         self._user_combos = C.load_user_combos(state_dir, self.log)
-        # ---- 第三轮：网页手柄 ----
-        self._latch = {"head": None, "body": None}   # 网页置过的头 / 身体：{"conn", "nonzero", "at"}；None = 没置过或者清掉了
-        self._modes = {}                      # 连接 → {"mode": "head" / "body", "hb"}；不在里面 = 走路
-        self._mode_exit = {}                  # 连接 → {"why", "at"}：后端替它退出了模式（推给那个页面看）
-        self._clears = []                     # 待发的清理 [{"conn", "why", "due", "tries"}]（_request_clear 只改这里）
-        self._keys = {}                       # 连接 → 按住的键（见 _keys_op）
-        # 连接 → {"skill", "x_down"}：这一下 X（按下的时间 x_down）的请求被接受了、X 还按着，按住才连滚（审查 R5）
+        self._latch = {"head": None, "body": None}
+        self._modes = {}
+        self._mode_exit = {}
+        self._clears = []
+        self._keys = {}
         self._x_armed = {}
         self._was_driving = False
-        self._pose_reset = "pending"          # Studio 第一次看到主程序在：发一次 robot.pose {"active": false}
+        self._pose_reset = "pending"          # Send robot.pose {"active": false} once on first robotd connect
         self._pose_reset_tries = 0
         self._bindings_due = 0.0
         self._tick_evt = threading.Event()
         self._tick_stop = threading.Event()
-        self._tick_said = set()               # 后台线程同一种发不出去只记一次
+        self._tick_said = set()
         self._tick_thread = None
 
     def _drive_start(self):
-        """PadOps.__init__ 最后调：起 25 Hz 的后台线程（没事做时睡着，有事才醒）。留着句柄：关的时候要等它停（审查 R8）。"""
+        """Start 25 Hz background tick thread (called at end of PadOps.__init__)."""
         self._tick_thread = threading.Thread(target=self._tick_loop, name="pad-tick", daemon=True)
         self._tick_thread.start()
 
     def new_conn(self):
-        """给一个页面连接起名字（全局递增，不用 id(ws)：Python 会重用回收了的对象的 id，审查二 I4）。
-        **新连接默认「不在手柄区」**（总览重排审查 O1）：手柄并进总览以后，页面只有手柄那一块真的在屏幕上才发
-        drive {open}；没发过 open 的连接，摇杆、按住的键、头 / 身体、模式一律丢（一次性命令照旧不看这个：三 V5）。"""
+        """Assign monotonic connection ID; new connections start outside gamepad drive area (closed)."""
         conn = f"ws{next(self._conn_ids)}"
         with self._lk:
             self._remember(self._closed, conn)
         return conn
 
     def executor_for(self, args):
-        """app 用：move / sticks / keys 这些快的走单独的小线程池（审查二 一般 4、三 V13）；None = 默认线程池。"""
+        """Route fast drive/motion heartbeats to dedicated 4-worker pool."""
         fast_motion = (args or {}).get("op") == "motion" and (args or {}).get("action") in ("heartbeat", "stop", "pause", "record_pause", "idle_stop")
         return self._fast_pool if (args or {}).get("op") in FAST_OPS or fast_motion else None
 
-    # ================= 谁在开 =================
+    # ================= Lease & Ownership =================
 
     def _pad_attached(self, now):
-        """实体手柄连着吗：(True / False / None, 说明)。None = 认不出来（审查二 一般 3）。
-        旁路看到 attached 最直接；没有时看 configd 15 秒内的 pad.status（连着 + padd 在跑）。"""
+        """Check if physical gamepad is connected: (True/False/None, detail)."""
         if self.tap is not None and self._tap_on and self.tap_state == "attached":
             alive = getattr(self.tap, "alive", None)
             if alive is None or alive():
-                return True, "padd 旁路看到实体手柄"
+                return True, "Physical gamepad detected via padd tap"
         st = self._status if isinstance(self._status, dict) else None
         fresh = st is not None and self._status_at is not None and now - self._status_at < 15
         if fresh:
             if any(isinstance(p, dict) and p.get("connected") for p in st.get("pads") or []) and st.get("driver") == "active":
-                return True, "configd 说手柄连着、padd 在跑"
+                return True, "configd reports gamepad connected and padd active"
             return False, None
         if self._worker_error:
-            return None, f"看手柄的后台线程出错了（{self._worker_error}），刷新手柄页会重来"
+            return None, f"Gamepad status worker error ({self._worker_error}); refresh page to retry"
         if self.tap is not None and self._tap_on and self.tap_state in ("denied", "error"):
-            return None, f"configd 读不到，按键也读不到（{self.tap_why or self.tap_state}）"
+            return None, f"configd and button tap unreadable ({self.tap_why or self.tap_state})"
         return False, None
 
     def _owner(self, now):
@@ -331,8 +326,6 @@ class DriveMixin:
     def _seq_of(self, conn):
         q = self._seqs.get(conn)
         if q is None:
-            # keys：按住的键最后一个序号。放这里、不放在 _keys[conn] 里：那一项松开以后会被删掉，
-            # 删了以后比「松开」更旧的「按下」晚到就又按上了（审查 R4）
             q = self._seqs[conn] = {"hi": -1, "stop": -1, "life": -1, "mode": -1, "keys": -1, "latest": {}, "sent": {}}
             if len(self._seqs) > GONE_KEEP * 2:
                 for k in list(self._seqs)[:GONE_KEEP]:
@@ -346,14 +339,11 @@ class DriveMixin:
             table.pop(next(iter(table)))
 
     def _take_lease(self, conn, by, now, force=False, reopen=False):
-        """拿方向盘（在 _lk 里调）。断开的连接永远不给；离开了手柄页的（closed）只有 drive on（reopen）才给——
-        以前「按下动作也解开」的口子去掉了（三 V5：按下动作马上切页，off 先到、action_start 后到，动作照样开始）；
-        别人拿着、还新鲜：不给，除非 force（页面点了「接管」）。方向盘 6 秒没动静自动换人时，原来那个页面置过的头 / 身体、
-        按住的键、模式都清掉（三 V1 第 4 条），交给后台线程发。"""
+        """Acquire steering lease (call under _lk)."""
         if conn in self._gone:
-            raise Refused("这个页面已经断开了")
+            raise Refused("This page has disconnected")
         if conn in self._closed and not reopen:
-            raise Refused("这个页面不在手柄这一块（滚走了、切到别的页，或者还没滚到）：滚到手柄那里再按")
+            raise Refused("Page is not in the gamepad control section: scroll to Remote Control to drive")
         d = self._driver
         if d is not None and d["conn"] == conn:
             d["seen"] = now
@@ -364,14 +354,14 @@ class DriveMixin:
             return None
         held = self._lease_holder(now)
         if held is not None and not force:
-            raise Refused(f"{held['by'] or '另一个页面'}正在遥控（{now - held['since']:.0f} 秒了）。要接管就点「接管」")
+            raise Refused(f"{held['by'] or 'Another page'} is driving ({now - held['since']:.0f}s). Click 'Take Over' to control")
         if reopen:
             self._closed.pop(conn, None)
         self._driver = {"conn": conn, "by": by, "since": now, "seen": now}
         if d is not None and d["conn"] != conn and held is None:
-            self.log.info(f"网页遥控换人：{by or '页面'}（原来的 {d['by'] or '页面'} {now - d['seen']:.0f} 秒没动静，已自动松开）",
-                          cat="安全", dedup=False)
-            self._request_clear(d["conn"], "方向盘 6 秒没动静，换了人")
+            self.log.info(f"Web control transferred to {by or 'page'} (previous {d['by'] or 'page'} inactive for {now - d['seen']:.0f}s)",
+                          cat="Safety", dedup=False)
+            self._request_clear(d["conn"], "Lease expired after 6s inactivity")
         return held or d
 
     def _touch_lease(self, conn, now):
@@ -380,77 +370,71 @@ class DriveMixin:
             d["seen"] = now
 
     def _drive(self, args, conn, by):
-        """页面进手柄页（open）、离开（on:false）、点「接管」（on:true, force）。open / off 带页面的递增序号，
-        按连接记最后一个，比它旧的丢掉（三 V5：快线程池里 off 紧接着 open 可能先后颠倒）。"""
+        """Handle drive open, leave (on:false), and takeover (on:true, force)."""
         now = self.clock()
         seq = self._seq(args)
         if args.get("open"):
             with self._lk:
                 if conn in self._gone:
-                    raise Refused("这个页面已经断开了")
+                    raise Refused("This page has disconnected")
                 q = self._seq_of(conn)
                 if seq is not None and seq <= q["life"]:
-                    return {"dropped": "旧的（这个页面后来又离开 / 回来过）"}
+                    return {"dropped": "Stale open (page left/returned later)"}
                 if seq is not None:
                     q["life"] = seq
-                self._closed.pop(conn, None)            # 只解开 closed：不拿方向盘、不停（只开着页面不挡别人）
+                self._closed.pop(conn, None)
             return {"open": True}
         if args.get("on"):
             with self._lk:
                 attached, _ = self._pad_attached(now)
                 if attached:
-                    raise Refused("实体手柄连着：网页摇杆只跟着它动、只显示，打不开（打开了也会被它每 0.1 秒发的「停」盖掉）")
+                    raise Refused("Physical gamepad is connected: web sticks mirror it only")
                 q = self._seq_of(conn)
                 if seq is not None and seq <= q["life"]:
-                    return {"dropped": "旧的（这个页面后来又离开过手柄页）"}
+                    return {"dropped": "Stale drive on (page left gamepad section)"}
                 if seq is not None:
                     q["life"] = seq
                 prev = self._take_lease(conn, by, now, force=bool(args.get("force")), reopen=True)
             if prev is not None and prev.get("conn") != conn:
-                self.log.warn(f"{by or '一个页面'}接管了遥控（原来是 {prev.get('by') or '另一个页面'}）", cat="安全",
-                              hint="原来那个页面的摇杆、按键、动作马上就不管用了", dedup=False)
-                self._halt(f"被 {by or '另一个页面'} 接管了", prev.get("conn"))
+                self.log.warn(f"{by or 'A page'} took over remote control (was {prev.get('by') or 'another page'})", cat="Safety",
+                              hint="Sticks, buttons, and actions on the previous page are now disabled", dedup=False)
+                self._halt(f"Taken over by {by or 'another page'}", prev.get("conn"))
             return {"driver": by}
         with self._lk:
             q = self._seq_of(conn)
             if seq is not None and seq <= q["life"]:
-                return {"dropped": "旧的（这个页面后来又回到了手柄页）"}
+                return {"dropped": "Stale drive off (page returned later)"}
             if seq is not None:
                 q["life"] = seq
             if conn not in self._gone:
                 self._remember(self._closed, conn)
             top = max(q["hi"], seq if seq is not None else -1)
-            q["stop"] = max(q["stop"], top)                  # 离开之前发出的摇杆帧都作废
+            q["stop"] = max(q["stop"], top)
             q["hi"] = max(q["hi"], top)
             mine = self._driver is not None and self._driver["conn"] == conn
             background_music = self.motion_studio.background_music(conn)
             if mine and not background_music:
                 self._driver = None
         if background_music:
-            # The drive area closes and late manual frames stay fenced, while
-            # standalone music remains owned by this still-connected socket.
             pass
         elif mine:
-            self._halt("离开了手柄区", conn)            # 里面排清理、发
+            self._halt("Left gamepad section", conn)
         else:
-            self._request_clear(conn, "离开了手柄区")
+            self._request_clear(conn, "Left gamepad section")
             self._flush_clears(force=True)
-        # 页面说为什么离开（切到了别的页 / 滚出了手柄这一块 / 转到后台：总览重排审查 O1）。同一句 1 分钟内只记一次（日志去重），
-        # 来回滚不会刷屏；原因是页面给的，截短了只用来记日志
         why = str(args.get("why") or "")[:40]
-        self.log.info(f"{by or '页面'}离开了手柄区：{why or '没说原因'}", cat="手柄")
+        self.log.info(f"{by or 'Page'} left gamepad section: {why or 'no reason given'}", cat="Gamepad")
         return {}
 
     def mark_gone(self, conn):
-        """页面的 WebSocket 断了：app 在事件循环里**同步**调（只占锁、不碰网络）。之后这个连接晚到的指令一律丢，
-        也拿不回方向盘；它在做的动作马上叫停、它置过的头 / 身体交给后台线程清。真正发「停」在 drop_client（线程池里）。"""
+        """Called synchronously on WebSocket disconnect (in-memory only)."""
         if conn is None:
             return False
         with self._lk:
             if conn in self._gone:
                 return False
             self._remember(self._gone, conn)
-            self.motion_studio.invalidate("页面断开了", conn)
+            self.motion_studio.invalidate("Page disconnected", conn)
             self._closed.pop(conn, None)
             self._seq_of(conn)["stop"] = INF
             mine = self._driver is not None and self._driver["conn"] == conn
@@ -459,16 +443,16 @@ class DriveMixin:
             a = self._action
             act = a is not None and a["conn"] == conn
             if act:
-                a["why"] = a["why"] or "页面断了"
+                a["why"] = a["why"] or "Page disconnected"
                 a["stop"].set()
-            self._request_clear(conn, "页面断了")
-            self._mode_exit.pop(conn, None)         # 页面已经没了：不用再告诉它（审查 R9）
+            self._request_clear(conn, "Page disconnected")
+            self._mode_exit.pop(conn, None)
             need = (mine and self._web_driving) or act
             self._halt_after_gone[conn] = need
         return need
 
     def drop_client(self, conn, by=None):
-        """页面断了（app 在线程池里调，mark_gone 之后）：它在开就发一次「停」；它置过的头 / 身体清掉。没先调 mark_gone 也行。"""
+        """Called in worker thread after mark_gone to send stop and clear latched head/body."""
         with self._lk:
             need = self._halt_after_gone.pop(conn, None)
         if need is None:
@@ -476,16 +460,13 @@ class DriveMixin:
             with self._lk:
                 need = self._halt_after_gone.pop(conn, False)
         if need:
-            self.log.info(f"页面断了（{by or conn}）：网页遥控松开、发一次「停」", cat="安全", dedup=False)
-            self._halt("页面断了", conn)
+            self.log.info(f"Page disconnected ({by or conn}): releasing web control and sending stop", cat="Safety", dedup=False)
+            self._halt("Page disconnected", conn)
         else:
             self._flush_clears(force=True)
 
     def _halt(self, why, conn=None, clear_all=False):
-        """停下网页这边：conn 的动作打断、按住的键松开、头 / 身体清掉、模式退出，它的序号以内的帧作废、发一次 0。
-        clear_all：头 / 身体、按住的键、模式不管是哪个页面的都清（点「停下（站好）」：三 V1 第 7 条）。
-        镜像时（实体手柄连着）网页没在开就不发 move 0，免得打断实体手柄（审查二 一般 2）；头 / 身体的清理镜像时也发（三 V1）。
-        发不出去也没关系：robotd 0.5 秒收不到自己停。"""
+        """Stop web driving, abort actions, clear head/body latches, and send zero velocity."""
         self.motion_studio.invalidate(why, None if clear_all else conn)
         self.motion_studio.tick()
         self._action_stop(conn, why)
@@ -497,7 +478,7 @@ class DriveMixin:
                 now = self.clock()
                 if conn is not None:
                     q = self._seq_of(conn)
-                    q["stop"] = max(q["stop"], q["hi"])     # 不加 1：页面紧接着的下一帧照常（审查二 一般 1）
+                    q["stop"] = max(q["stop"], q["hi"])
                 was = self._web_driving
                 self._web_driving = False
                 attached, _ = self._pad_attached(now)
@@ -508,36 +489,32 @@ class DriveMixin:
                 try:
                     self._notify_output("robot.move", {"vx": 0.0, "vy": 0.0, "vyaw": 0.0})
                 except (Unreachable, Timeout) as e:
-                    self.log.warn("「停」没发出去", cat="安全", step="robot.move", raw=str(e),
-                                  hint="鸭子 0.5 秒收不到指令也会自己停（robotd 的 deadman）")
+                    self.log.warn("Failed to send 'stop'", cat="Safety", step="robot.move", raw=str(e),
+                                  hint="robotd deadman will stop automatically after 0.5s")
         self._flush_clears(force=True)
         if was:
-            self.log.info(f"网页遥控松开了（{why}）", cat="手柄")
+            self.log.info(f"Web control released ({why})", cat="Gamepad")
 
-    # ================= 头 / 身体的清理（三 V1）、模式 =================
+    # ================= Head / Body Cleanup & Modes =================
 
     def _mode_of(self, conn):
         m = self._modes.get(conn)
         return m["mode"] if m else "drive"
 
     def _request_clear(self, conn, why, delay=0.0, say=True):
-        """要把 conn 置过的头 / 身体清掉（conn=None：谁置的都清），同时退出它的头 / 身体模式、松开它按住的键。
-        **只改内存、不碰网络、不抛**：事件循环里（note_relax、feed_robot、mark_gone）也能调。真正发在 _flush_clears。
-        清理**一律排一条**，不看 _latch 现在有没有记录（审查 R1）：第一帧头 / 身体可能正在路上（过了检查、还没写 _latch）。
-        那一帧从第二次检查到写 _latch 都拿着 _send_lk，_flush_clears 也在 _send_lk 里才看 _latch，所以一定排在它后面、
-        看得到它写的；真没有记录的条目 flush 时直接扔掉。say=False：退出模式那一行由调用方自己记（同一件事只记一行）。"""
+        """Schedule head/body cleanup, mode exit, and key release (in-memory only, never throws)."""
         try:
             with self._lk:
                 now = self.clock()
                 self._clears.append({"conn": conn, "why": why, "due": now + delay, "tries": 0})
                 for c in [c for c, x in self._mode_exit.items() if now - x["at"] > 10]:
-                    self._mode_exit.pop(c, None)          # 只给页面看 10 秒：过期的删掉，不让它一直涨（审查 R9）
+                    self._mode_exit.pop(c, None)
                 for c in list(self._modes):
                     if conn is None or c == conn:
                         m = self._modes.pop(c)
                         self._mode_exit[c] = {"why": why, "at": now}
                         if say:
-                            self.log.info(f"退出{MODE_CN[m['mode']]}（{why}）", cat="手柄", dedup=False)
+                            self.log.info(f"Exited {MODE_CN[m['mode']]} ({why})", cat="Gamepad", dedup=False)
                 for c, st in self._keys.items():
                     if conn is None or c == conn:
                         st["end"] = st.get("end") or why
@@ -546,12 +523,11 @@ class DriveMixin:
                 else:
                     self._x_armed.pop(conn, None)
             self._tick_evt.set()
-        except Exception:  # noqa: BLE001 —— 卸力、断开的路上不能因为这里出错
+        except Exception:  # noqa: BLE001
             pass
 
     def _flush_clears(self, force=False):
-        """发到期的清理（在线程里调：后台线程、_halt、drive off、drop_client）。头发全 0、身体发 {"active": false}；
-        只发网页真置过的（_latch 里有记录的）。决定和发送都在 _send_lk 里：跟摇杆帧的「检查 + 发送」不会交错。"""
+        """Send due head=0 / pose={"active": false} cleanups under _send_lk."""
         if self.robot is None:
             with self._lk:
                 self._clears.clear()
@@ -576,8 +552,8 @@ class DriveMixin:
             for kind, method, params, req, lat in sends:
                 try:
                     self._notify_output(method, dict(params))
-                    self.log.info(("头回正" if kind == "head" else "身体回到标称、退出身体模式") + f"（{req['why']}）",
-                                  cat="手柄", raw=f"{method} {json.dumps(params)}", dedup=False)
+                    self.log.info(("Head centered" if kind == "head" else "Body reset to neutral, exited Body Mode") + f" ({req['why']})",
+                                  cat="Gamepad", raw=f"{method} {json.dumps(params)}", dedup=False)
                 except (Unreachable, Timeout) as e:
                     with self._lk:
                         if self._latch[kind] is None:
@@ -705,18 +681,17 @@ class DriveMixin:
             return f"Torque recently disabled: motion commands blocked for {guard:g}s"
         return None
 
-    # ================= 速度上限（审查 24）、头 / 嘴幅度（三 V9） =================
+    # ================= Speed Limits & Head / Mouth Range =================
 
     def _speed_limits(self, now=None):
-        """padd 的满杆速度是命令行参数（padd main.rs:158-168），padd.service 的 ExecStart 没带参数（padd/systemd/padd.service:36）
-        就是官方默认。文件在后台线程里读（_refresh_files），这里只拿缓存（审查二 一般 9）。"""
+        """Return cached padd full-stick speed limits (refreshed in background thread)."""
         return self._limits
 
     def _read_padd_texts(self):
         texts = []
         try:
             texts.append((PADD_UNIT, self.read_text(PADD_UNIT)))
-        except Exception:  # noqa: BLE001 —— 没这个文件 / 没权限：用官方默认
+        except Exception:  # noqa: BLE001 -- missing/unreadable: use default
             pass
         try:
             for name in sorted(self.list_dir(PADD_DROPIN_DIR)):
@@ -728,9 +703,7 @@ class DriveMixin:
         return texts
 
     def _read_inputs(self, texts):
-        """头 / 嘴幅度（三 V9）+ padd 读配置的地方（--config，没写就是 robotd.toml 默认路径：fork padd/src/main.rs 的 Args）。
-        先看 padd 自己写的回执 /run/padd/input-settings.json（fork input_settings.rs:63-74：它真用上了才写，里面是它正在用的数），
-        写回执的那个 padd 还活着、文件路径对得上就以它为准（审查 R10）；没有再自己按 padd 的规矩读文件。"""
+        """Read head/mouth input limits and padd --config path (preferring live /run/padd/input-settings.json ack)."""
         inputs = parse_padd_inputs(texts)
         text, err, ack = None, None, None
         if inputs["input_settings"]:
@@ -994,7 +967,7 @@ class DriveMixin:
                 st["held"][k] = now
             if "x" in pressed:
                 st["x_down"] = now
-                self._x_armed.pop(conn, None)     # 新的一下：上一下 X 的 arm 作废（审查 R5）
+                self._x_armed.pop(conn, None)     # New press: invalidate previous X arm
             if keep:
                 self._touch_lease(conn, now)
         for k in sorted(pressed):
@@ -1646,7 +1619,7 @@ class DriveMixin:
 
     @staticmethod
     def _policy_refusal(bus):
-        """robotd 没把策略开起来时给的原因：busStatus 的 last_enable_refusal / home_start_guard.reason。"""
+        """Extract policy refusal reason from busStatus (last_enable_refusal or home_start_guard.reason)."""
         if not isinstance(bus, dict):
             return None
         why = bus.get("last_enable_refusal")
@@ -1660,12 +1633,7 @@ class DriveMixin:
         return None
 
     def _verify_policy_started(self):
-        """robot.enable 只是收下请求（fork robotd："the policy starts when it is ready"），真正的启动在
-        控制循环里做，站姿 / IMU 没稳定时会被 home_start_guard 拒（不能进入保持：…）。所以回读
-        busStatus，看到 policy_enabled 才当成功；等不到就把主程序给的原话回给页面。
-
-        按次数等，不看注入的时钟：时钟停了（测试、或者别的毛病）也不会卡死在这里。
-        """
+        """Poll busStatus after robot.enable until policy_enabled is True or timeout (using iteration count)."""
         step = max(0.01, float(self.w.get("walk_verify_poll", WALK_VERIFY_POLL_S)))
         span = max(step, float(self.w.get("walk_verify", WALK_VERIFY_S)))
         bus = None

@@ -587,16 +587,16 @@ class ImuBackend:
                 text = getattr(e, "message", None) or str(e)
                 low = text.lower()
                 if "unknown variant" in low or "hold-home" in low and "unknown" in low:
-                    msg = "主程序版本太旧，标定模式还不会站：要更新主程序"
+                    msg = "Main firmware is too old for calibration-mode stand; update required"
                 elif "still" in low and "from home" in low:
-                    msg = f"有关节转不到站姿（{text}）：多半是方向反了或者被卡住，已经卸力。去舵机页核对方向"
+                    msg = f"Joint could not reach stand pose ({text}): likely reversed direction or obstructed; torque released. Check direction on the Servo page"
                 elif "relax" in low:
-                    msg = "站起来的途中被卸力打断了"
+                    msg = "Interrupted by torque-off while standing up"
                 else:
-                    msg = f"没站起来：{text}"
-                self.log.warn(f"标定模式站姿使能没成：{msg}", cat="IMU", raw=text, ctx={"by": by, "directions": dirs})
+                    msg = f"Failed to stand up: {text}"
+                self.log.warn(f"Calibration-mode stand enable failed: {msg}", cat="IMU", raw=text, ctx={"by": by, "directions": dirs})
                 raise Refused(msg) from e
-            self.log.info("标定模式站姿使能：站住了", cat="IMU", raw=json.dumps(r, ensure_ascii=False)[:400],
+            self.log.info("Calibration-mode stand enable: standing", cat="IMU", raw=json.dumps(r, ensure_ascii=False)[:400],
                           ctx={"by": by, "directions": dirs})
             return r
         finally:
