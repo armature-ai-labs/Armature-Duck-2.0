@@ -2,6 +2,7 @@
 
 [![Author](https://img.shields.io/badge/Author-Ronie%20Joseph-blue?logo=github)](https://github.com/roniejosephv-star)
 [![Organization](https://img.shields.io/badge/Org-Armature%20AI%20Labs-orange)](https://github.com/armature-ai-labs)
+[![AI Handoff](https://img.shields.io/badge/Handoff-AI%20%26%20Agent%20Guide-teal)](HANDOFF.md)
 [![Resume Setup](https://img.shields.io/badge/Resume-Setup%20Guide-orange)](RESUME_GUIDE.md)
 [![Getting Started](https://img.shields.io/badge/Guide-Getting%20Started-blue)](GETTING_STARTED.md)
 [![Hardware Wiring](https://img.shields.io/badge/Hardware-Wiring%20Guide-purple)](docs/HARDWARE_WIRING_GUIDE.md)
@@ -11,6 +12,8 @@
 
 An open-source autonomous bipedal robot duck replica project based on [Pollen Robotics' Microduck](https://pollen-robotics.com/microduck/), featuring a complete bill of materials, printable CAD assemblies, real-time control, and an English-localized web management console (**Microduck Studio**).
 
+> 🤖 **Connecting a Cloud LLM or AI Agent? Point it to the [AI Handoff Document (HANDOFF.md)](HANDOFF.md) so it immediately understands the entire system architecture, hardware inventory, and exact next steps!**
+> 
 > 🚀 **Resuming this project on a new computer? Read the [Resumption Guide (RESUME_GUIDE.md)](RESUME_GUIDE.md) to pick up exactly where we left off!**
 > 
 > 📖 **First-time builder? Read the [Getting Started Guide (GETTING_STARTED.md)](GETTING_STARTED.md) and [Hardware Wiring Guide](docs/HARDWARE_WIRING_GUIDE.md).**

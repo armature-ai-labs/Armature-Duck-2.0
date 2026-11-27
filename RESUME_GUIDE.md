@@ -114,6 +114,7 @@ python3 tools/deploy_to_duck.py --host 192.168.100.245
 ```
 
 For full details on the wiring harness and architecture:
+- 🤖 [AI & Developer Handoff Document](HANDOFF.md)
 - 📖 [Hardware Wiring Guide](docs/HARDWARE_WIRING_GUIDE.md)
 - 📐 [System Architecture Documentation](docs/SYSTEM_ARCHITECTURE.md)
 - 📊 [Full Electronics BOM Spreadsheet](BOM/Microduck_Replica_Electronics_BOM.xlsx)
