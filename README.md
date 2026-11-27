@@ -1,5 +1,7 @@
 # Armature Duck 2.0 (Indie Duck)
 
+[![Author](https://img.shields.io/badge/Author-Ronie%20Joseph-blue?logo=github)](https://github.com/roniejosephv-star)
+[![Organization](https://img.shields.io/badge/Org-Armature%20AI%20Labs-orange)](https://github.com/armature-ai-labs)
 [![Resume Setup](https://img.shields.io/badge/Resume-Setup%20Guide-orange)](RESUME_GUIDE.md)
 [![Getting Started](https://img.shields.io/badge/Guide-Getting%20Started-blue)](GETTING_STARTED.md)
 [![Hardware Wiring](https://img.shields.io/badge/Hardware-Wiring%20Guide-purple)](docs/HARDWARE_WIRING_GUIDE.md)
@@ -269,6 +271,18 @@ Paths are relative to this repository's root. Mechanical CAD is maintained in a 
 Code, simulation assets and bundled models have separate licences. See [licensing and attribution](NOTICE.md) and the [model terms](software/image/overlay/usr/share/doc/microduck/模型说明.txt); **the replica image is for personal non-commercial builds and must not be distributed with paid products**.
 
 This third-party project is not affiliated with or endorsed by Pollen Robotics.
+
+---
+
+## Author & Lead Maintainer
+
+**Armature Duck 2.0 (Indie Duck)** is developed and maintained by:
+
+- **Ronie Joseph** ([@roniejosephv-star](https://github.com/roniejosephv-star))  
+  *Lead Systems Developer, Hardware Architecture, Internationalization & Systems Integration*  
+  Email: [roniejosephv@gmail.com](mailto:roniejosephv@gmail.com) · GitHub: [roniejosephv-star](https://github.com/roniejosephv-star)
+- Published under **[Armature AI Labs](https://github.com/armature-ai-labs)**  
+  Website: [https://armatureailabs.com](https://armatureailabs.com) · Organization: [armature-ai-labs](https://github.com/armature-ai-labs)
 
 ### ❤️ Support the author
 

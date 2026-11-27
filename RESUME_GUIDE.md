@@ -117,3 +117,12 @@ For full details on the wiring harness and architecture:
 - 📖 [Hardware Wiring Guide](docs/HARDWARE_WIRING_GUIDE.md)
 - 📐 [System Architecture Documentation](docs/SYSTEM_ARCHITECTURE.md)
 - 📊 [Full Electronics BOM Spreadsheet](BOM/Microduck_Replica_Electronics_BOM.xlsx)
+
+---
+
+## Author & Lead Maintainer
+
+- **Ronie Joseph** ([@roniejosephv-star](https://github.com/roniejosephv-star))  
+  *Lead Developer & Creator* · [roniejosephv@gmail.com](mailto:roniejosephv@gmail.com)
+- Published under **[Armature AI Labs](https://github.com/armature-ai-labs)** ([armature-ai-labs](https://github.com/armature-ai-labs))
+

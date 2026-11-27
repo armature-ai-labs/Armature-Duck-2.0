@@ -159,3 +159,12 @@ python3 -I run_tests.py
 ## Need Help?
 - Browse technical guides in [`docs/`](docs/).
 - Open an Issue or Discussion on the [Armature Duck 2.0 GitHub repository](https://github.com/armature-ai-labs/Armature-Duck-2.0).
+
+---
+
+## Author & Lead Maintainer
+
+- **Ronie Joseph** ([@roniejosephv-star](https://github.com/roniejosephv-star))  
+  *Lead Systems Developer & Creator* · [roniejosephv@gmail.com](mailto:roniejosephv@gmail.com)
+- Published under **[Armature AI Labs](https://github.com/armature-ai-labs)** ([armature-ai-labs](https://github.com/armature-ai-labs))
+
