@@ -96,7 +96,7 @@ class HomeCoarseTest(unittest.TestCase):
         result = {'ok':True,'mode':'coarse','mount':[1.,0.,0.,0.]}
         b.last_result = result
         b._result_basis = b._sampling_basis(b.rd.bus.value)
-        with mock.patch.object(helper, 'imu_recalibrate') as switch, self.assertRaisesRegex(Refused, '卸力'):
+        with mock.patch.object(helper, 'imu_recalibrate') as switch, self.assertRaisesRegex(Refused, 'disable torque'):
             asyncio.run(b.handle({'op':'verify','confirmed':True,'mount_wxyz':result['mount']}))
         self.assertIs(b.last_result, result)
         switch.assert_not_called()
@@ -105,7 +105,7 @@ class HomeCoarseTest(unittest.TestCase):
         b = self.home()
         b._capture_basis = b._sampling_basis(b.rd.bus.value)
         b.rd.calib.value['calibration']['imu_mount_quat'] = [1.,0.,0.,0.]
-        with mock.patch('studio.imu.imu_calib.solve') as solve, self.assertRaisesRegex(Refused, '重新采静止'):
+        with mock.patch('studio.imu.imu_calib.solve') as solve, self.assertRaisesRegex(Refused, 're-sample'):
             asyncio.run(b.handle({'op':'solve','mode':'coarse','samples':[{'g':[0,0,-1]}]}))
         solve.assert_not_called()
 
@@ -115,7 +115,7 @@ class HomeCoarseTest(unittest.TestCase):
         def changed(*args, **kwargs):
             b.rd.calib.value['calibration']['imu_mount_quat'] = [1.,0.,0.,0.]
             return {'ok':True,'mode':'coarse','mount':[1.,0.,0.,0.]}
-        with mock.patch('studio.imu.imu_calib.solve', side_effect=changed), self.assertRaisesRegex(Refused, '已改变'):
+        with mock.patch('studio.imu.imu_calib.solve', side_effect=changed), self.assertRaisesRegex(Refused, 'changed'):
             asyncio.run(b.handle({'op':'solve','mode':'coarse','samples':[{'g':[0,0,-1]}]}))
         self.assertIsNone(b.last_result)
 
@@ -226,7 +226,7 @@ class HomeCoarseTest(unittest.TestCase):
         async def replacement():
             return fresh_bus
         b._bus_once = replacement
-        with mock.patch.object(helper, 'imu_recalibrate') as switch, self.assertRaisesRegex(Refused, '已改变'):
+        with mock.patch.object(helper, 'imu_recalibrate') as switch, self.assertRaisesRegex(Refused, 'changed'):
             asyncio.run(b.handle({'op':'verify','confirmed':True,'mount_wxyz':[1.,0.,0.,0.]}))
         switch.assert_not_called()
         self.assertIsNone(b.last_result)

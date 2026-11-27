@@ -1,8 +1,7 @@
-"""Studio 的启动入口：python3 -I run.py [参数]
+"""Studio entrypoint: python3 -I run.py [args]
 
-为什么要这个文件：用 -I（隔离模式）启动时，Python 不会把当前目录、用户目录里的包加进来，
-这正是我们要的（只用 deps/ 里钉死版本的依赖），但 `-m studio` 也就找不到包了。
-所以这里明确把 deps/ 和本目录放到最前面，再进 studio。
+Under -I (isolated mode), Python skips cwd and user site-packages, ensuring only pinned deps/ are used.
+This script prepends deps/ and the project root to sys.path before launching studio.
 """
 import os
 import sys

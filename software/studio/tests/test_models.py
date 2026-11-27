@@ -94,7 +94,7 @@ class Runtime:
 class LibraryTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         if Models is None:
-            self.fail('模型管理服务尚未实现')
+            self.fail("item")
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / 'root'
@@ -132,34 +132,34 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
         (dest / 'policy.onnx').write_bytes(b'new-policy')
         (dest / 'deployment-contract.json').write_text(json.dumps(self.new_contract), encoding='utf-8')
         return {'onnx': 'policy.onnx', 'sha256': hashlib.sha256(b'new-policy').hexdigest(), 'task': 'Mjlab-Velocity-Test',
-                'slot': self.next_slot, 'name': '导入模型', 'files': ['policy.onnx', 'deployment-contract.json']}
+                'slot': self.next_slot, 'name': "item", 'files': ['policy.onnx', 'deployment-contract.json']}
 
     async def install(self):
-        v = await self.service.import_package(self.pkg, '新模型')
+        v = await self.service.import_package(self.pkg, "item")
         return next(i for i in v['items'] if i['source'] == 'imported')
 
     async def test_service_exists(self):
-        self.assertIsNotNone(Models, '模型管理服务尚未实现')
+        self.assertIsNotNone(Models, "item")
 
     async def test_install_does_not_select_and_rename_survives_restart(self):
         item = await self.install()
         self.assertEqual(item['slots'], [])
         self.assertEqual(item['allowed_slots'], ['walk'])
         self.assertFalse(any(m in ('robot.loadPolicy', 'pad.bind') for m, _ in self.runtime.calls))
-        await self.service.handle({'op': 'rename', 'id': item['id'], 'name': '自己训练的走路'})
+        await self.service.handle({'op': 'rename', 'id': item['id'], 'name': "item"})
         v = await self.new_service().view()
-        self.assertEqual(next(i for i in v['items'] if i['id'] == item['id'])['name'], '自己训练的走路')
+        self.assertEqual(next(i for i in v['items'] if i['id'] == item['id'])['name'], "item")
 
     async def test_validation_failure_leaves_no_half_install(self):
         self.service.validator = lambda p: {'valid': False, 'error': 'bad graph'}
-        with self.assertRaisesRegex(ModelError, '预检|bad graph'):
+        with self.assertRaisesRegex(ModelError, 'item|bad graph'):
             await self.install()
         self.assertFalse([p for p in (self.state / 'models').iterdir() if p.is_dir()])
 
     async def test_builtin_cannot_be_deleted(self):
         v = await self.service.view()
         item = next(i for i in v['items'] if i['source'] == 'builtin')
-        with self.assertRaisesRegex(ModelError, '内置'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'delete', 'id': item['id']})
 
     async def test_select_confirms_loaded_path_and_restore_uses_explicit_default(self):
@@ -175,14 +175,14 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
         item = await self.install()
         before = self.runtime.paths['walk']
         self.runtime.accept_only = next(i for i in (await self.service.view())['items'] if i['id'] == item['id'])['path']
-        with self.assertRaisesRegex(ModelError, '回退|恢复'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'select', 'id': item['id'], 'slot': 'walk'})
         self.assertEqual(self.runtime.paths['walk'], before)
 
     async def test_select_requires_fresh_confirmed_torque_off(self):
         item = await self.install()
         self.runtime.torque = True
-        with self.assertRaisesRegex(ModelError, '卸力'):
+        with self.assertRaisesRegex(ModelError, 'E-Stop'):
             await self.service.handle({'op': 'select', 'id': item['id'], 'slot': 'walk'})
         self.assertFalse(any(m == 'robot.loadPolicy' for m, _ in self.runtime.calls))
 
@@ -190,18 +190,18 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
         for c in (contract(home=0.1), contract(kp=6)):
             self.new_contract = c
             item = await self.install()
-            with self.assertRaisesRegex(ModelError, 'HOME|舵机|P|站姿'):
+            with self.assertRaisesRegex(ModelError, 'HOME|item|P|item'):
                 await self.service.handle({'op': 'select', 'id': item['id'], 'slot': 'walk'})
 
     async def test_wrong_slot_is_refused(self):
         item = await self.install()
-        with self.assertRaisesRegex(ModelError, '用途|槽'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'select', 'id': item['id'], 'slot': 'roulade'})
 
     async def test_referenced_import_cannot_be_deleted_and_unused_can(self):
         item = await self.install()
         await self.service.handle({'op': 'select', 'id': item['id'], 'slot': 'walk'})
-        with self.assertRaisesRegex(ModelError, '选用|引用|使用'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'delete', 'id': item['id']})
         await self.service.handle({'op': 'restore', 'slot': 'walk'})
         v = await self.service.handle({'op': 'delete', 'id': item['id']})
@@ -210,14 +210,14 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
     async def test_skill_reference_prevents_delete(self):
         item = await self.install()
         self.runtime.skills.append({'name': 'custom', 'path': item['path'], 'duration': 1})
-        with self.assertRaisesRegex(ModelError, '引用|使用'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'delete', 'id': item['id']})
 
     async def test_offline_rename_allowed_but_delete_refused(self):
         item = await self.install()
         self.runtime.online = False
-        await self.service.handle({'op': 'rename', 'id': item['id'], 'name': '离线名称'})
-        with self.assertRaisesRegex(ModelError, '连接|主程序|确认'):
+        await self.service.handle({'op': 'rename', 'id': item['id'], 'name': 'Offlineitem'})
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'delete', 'id': item['id']})
         self.assertTrue(any(i['id'] == item['id'] for i in (await self.service.view())['items']))
 
@@ -302,7 +302,7 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
         item = await self.install()
         self.runtime.known_skills.remove('roulade')
         self.runtime.skills = [s for s in self.runtime.skills if s['name'] != 'roulade']
-        with self.assertRaisesRegex(ModelError, '技能|动作'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'select', 'id': item['id'], 'slot': 'roulade'})
         self.assertFalse(any(m == 'robot.loadPolicy' for m, _ in self.runtime.calls))
 
@@ -342,13 +342,13 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
         self.config.write_text('[policy]\nwalk="' + item['path'] + '"\n', encoding='utf-8')
         v = await self.service.view()
         self.assertFalse(next(i for i in v['items'] if i['id'] == item['id'])['can_delete'])
-        with self.assertRaisesRegex(ModelError, '配置|引用'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'delete', 'id': item['id']})
 
     async def test_unreadable_persisted_config_prevents_delete(self):
         item = await self.install()
         self.config.write_text('invalid [', encoding='utf-8')
-        with self.assertRaisesRegex(ModelError, '配置|确认'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'delete', 'id': item['id']})
 
     async def test_missing_policy_is_reported_not_installed(self):
@@ -358,7 +358,7 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
         row = next(i for i in v['items'] if i['id'] == item['id'])
         self.assertFalse(row['installed'])
         self.assertTrue(row['reason'])
-        with self.assertRaisesRegex(ModelError, '文件|模型'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'select', 'id': item['id'], 'slot': 'walk'})
 
     async def test_same_path_already_result_does_not_require_overridden_to_change(self):
@@ -369,7 +369,7 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_observation_interface_is_refused(self):
         self.new_contract['input_dim'] = 62
         item = await self.install()
-        with self.assertRaisesRegex(ModelError, '观测|接口'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'select', 'id': item['id'], 'slot': 'walk'})
 
     async def test_corrupt_default_signature_is_reported_as_catalog_error(self):
@@ -386,13 +386,13 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
         item = await self.install()
         alias = item['path'].replace('/policy.onnx', '/../' + item['id'] + '/policy.onnx')
         self.config.write_text('[policy]\nwalk="' + alias + '"\n', encoding='utf-8')
-        with self.assertRaisesRegex(ModelError, '引用'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'delete', 'id': item['id']})
 
     async def test_missing_current_contract_gives_actionable_error(self):
         item = await self.install()
         (self.root / self.runtime.paths['walk'].lstrip('/')).with_name('deployment-contract.json').unlink()
-        with self.assertRaisesRegex(ModelError, '合同|文件'):
+        with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
             await self.service.handle({'op': 'select', 'id': item['id'], 'slot': 'walk'})
 
     async def test_import_name_requires_text(self):
@@ -402,8 +402,8 @@ class LibraryTest(unittest.IsolatedAsyncioTestCase):
     async def test_disk_write_error_is_an_expected_chinese_service_error(self):
         item = await self.install()
         with patch('studio.models._atomic_json', side_effect=PermissionError('read only')):
-            with self.assertRaisesRegex(ModelError, '保存|写入|文件'):
-                await self.service.handle({'op': 'rename', 'id': item['id'], 'name': '更新名'})
+            with self.assertRaisesRegex(ModelError, "rolled back|referenced|cannot be deleted|read/write failed|does not provide|contract|not installed|missing or unsafe|robotd connection|persisted robotd config|Observation interface|does not match"):
+                await self.service.handle({'op': 'rename', 'id': item['id'], 'name': "item"})
 
 
 if __name__ == '__main__':

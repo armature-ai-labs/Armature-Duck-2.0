@@ -21,7 +21,7 @@ ROBOTD_SIZE=7275792
 ROBOTD_SOURCE='eecac1878136d3188370a5f6460b7d0521cf845d'
 ROBOTD_BUILD='replica-imu-verify-control.48'
 LEGACY_ROBOTD_SHA256='725b74cd93660a312970a44879abe5b75e8becf108499a1b8798961e48ca5f00'
-PREDECESSOR_PROCEDURE='已完成的 .47 配套驱动请先明确确认“恢复旧配套驱动”，再安装本版；操作说明：docs/native-update-20261104.md'
+PREDECESSOR_PROCEDURE='Confirm Restore Previous Companion Driver (.47) before installing this release; see docs/native-update-20261104.md'
 # Frozen from two independent, byte-identical builds and actual QEMU status.
 PADD_SHA256='dc1c7043a108964583fc09a11e3d6f87a25e259c346f7ce9154e77500a0881ec'
 PADD_SIZE=3522648
@@ -190,7 +190,7 @@ class BundleTransaction:
             except FileNotFoundError:return
             if (not stat.S_ISDIR(info.st_mode) or (os.name=='posix' and
                     (info.st_mode&0o005!=0o005 or info.st_mode&0o022 or (self.ctx.check_owner and info.st_uid!=0)))):
-                self.refuse('公开状态或兼容门的父目录不能由服务账户安全读取')
+                self.refuse('Parent directory of public status or compat gate is not safely readable by service account')
     def unit(self,name):return self.base.unit(name)
 
     def payload(self):
@@ -204,7 +204,7 @@ class BundleTransaction:
             self.legacy.validate_payload(robot,json.loads(self.read(base+'manifest.json',8192)),self.release.rsplit('/',1)[-1])
             return {ROBOTD:robot,PADD:pad,**UNITS,VOICE_GUARD:VOICE_GUARD_PROGRAM,COMPAT:COMPAT_BYTES}
         except (OSError,ValueError,TypeError,KeyError):
-            self.refuse('伴随升级包缺件或不属于已审核组件，不能退回单独 robotd 安装','controller_payload_invalid')
+            self.refuse('Companion bundle payload incomplete or unreviewed','controller_payload_invalid')
 
     def paths(self):return (ROBOTD,PADD,*UNITS,VOICE_GUARD,COMPAT)
 
@@ -243,10 +243,10 @@ class BundleTransaction:
                 immutable=('schema','bundle_schema','mode','target_robotd','target_padd','old_sha256','target_sha256',
                     'records','files','service_files','targets','services','controllers','original_services','original_process',
                     'padd_args','profile_sha256','protected')
-                if any(committed.get(k)!=prepared.get(k) for k in immutable):self.refuse('准备记录与已发布记录不属于同一事务','controller_tampered')
+                if any(committed.get(k)!=prepared.get(k) for k in immutable):self.refuse('Prepared record does not match committed transaction','controller_tampered')
                 return committed
             if (committed['phase']!='restored' or committed['active'] or committed['restore_pending'] or committed['cleanup_pending']):
-                self.refuse('新准备记录覆盖了尚未恢复的另一事务','controller_tampered')
+                self.refuse('New prepared record overwrote unrecovered transaction','controller_tampered')
             return prepared
         return self.load_record(JOURNAL)
 
@@ -303,7 +303,7 @@ class BundleTransaction:
             elif 'restore_origin_sha256' in m or 'restore_updater_sha256' in m:self.owned_restore_origin(m)
             return m
         except (OSError,ValueError,TypeError,KeyError,AttributeError):
-            self.refuse('伴随升级记录或备份无效，保留保护并恢复','controller_tampered')
+            self.refuse('Companion bundle record or backup invalid; preserving guard','controller_tampered')
 
     def legacy_terminal(self,m,prepared=None):
         # Only the published .47 vector shares these exact service/voice bytes.
@@ -324,7 +324,7 @@ class BundleTransaction:
         if (m['active'] or m['restore_pending'] or m['cleanup_pending']
                 or m['phase'] not in ('completed','restored') or not m['running_verified']
                 or (not historical and (self.base.has_exclusion() or self.present(PREPARED)))):
-            self.refuse('上一版 .47 配套驱动尚未完成：请使用该版已签名软件包的更新器恢复后再更新',
+            self.refuse('Previous .47 companion driver incomplete: restore using its signed package updater first',
                         'controller_recovery_required')
         if m['phase']=='completed':
             if not self.vector_current(m):raise ValueError('predecessor completed vector changed')
@@ -348,10 +348,10 @@ class BundleTransaction:
 
     def begin_restore(self,m):
         raw=self.read(JOURNAL,65536)
-        if json.loads(raw)!=m:self.refuse('上一版配套驱动记录已改变','controller_tampered')
+        if json.loads(raw)!=m:self.refuse('Previous companion driver record changed','controller_tampered')
         directory=STATE+'/'+m['transaction_id'];path=directory+'/restore-origin.json'
         if self.present(path):
-            if self.read(path,65536)!=raw:self.refuse('上一版恢复起点已改变','controller_tampered')
+            if self.read(path,65536)!=raw:self.refuse('Previous restore baseline changed','controller_tampered')
             self.base.sync_dir(directory)
         else:self.write(path,raw,0o600)
         self.save(m,'restoring',active=True,running_verified=False,
@@ -359,10 +359,10 @@ class BundleTransaction:
 
     def archive_legacy(self,m):
         raw=self.read(JOURNAL,65536)
-        if json.loads(raw)!=m:self.refuse('上一版配套驱动记录已改变','controller_tampered')
+        if json.loads(raw)!=m:self.refuse('Previous companion driver record changed','controller_tampered')
         directory=STATE+'/'+m['transaction_id'];history=directory+'/journal.json'
         if self.present(history):
-            if self.read(history,65536)!=raw:self.refuse('上一版配套驱动历史已改变','controller_tampered')
+            if self.read(history,65536)!=raw:self.refuse('Previous companion driver history changed','controller_tampered')
             self.base.sync_dir(directory)
         else:self.write(history,raw,0o600)
 
@@ -371,7 +371,7 @@ class BundleTransaction:
         if (value.get('LoadState'),value.get('ActiveState'),value.get('SubState'))==('not-found','inactive','dead'):return 'absent'
         if value.get('LoadState')=='loaded' and (value.get('ActiveState'),value.get('SubState')) in (
                 ('active','running'),('inactive','dead'),('failed','failed')):return value['ActiveState']
-        self.refuse('服务状态未知或仍在过渡：'+unit)
+        self.refuse('Service state unknown or transitioning: '+unit)
 
     def properties(self,unit):
         return self.h.show(self.op,unit,['User','Group','SupplementaryGroups','StateDirectory','RestrictAddressFamilies','FragmentPath','DropInPaths'])
@@ -381,43 +381,43 @@ class BundleTransaction:
         rows=[]
         for unit,names in KNOWN_OVERRIDES.items():
             if self.state(unit)=='absent':
-                self.refuse('缺少已审核 20261027 配套运行服务：'+unit)
+                self.refuse('Missing reviewed 20261027 companion service: '+unit)
             props=self.properties(unit);fragment=props.get('FragmentPath','')
             user={'padd':'padd','duck-echo':'radxa','microduck-studio':'radxa','mediad':'mediad'}[unit]
-            if props.get('User')!=user:self.refuse('服务账户不是已审核安装：'+unit)
+            if props.get('User')!=user:self.refuse('Service user does not match reviewed install: '+unit)
             if unit=='mediad' and set(props.get('RestrictAddressFamilies','').split()) not in (
                     {'AF_UNIX','AF_INET','AF_INET6'},{'AF_UNIX','AF_INET','AF_INET6','AF_NETLINK'}):
-                self.refuse('媒体地址族策略不是已审核前驱，不能覆盖自定义沙箱')
+                self.refuse('Media address-family policy is not reviewed predecessor')
             if unit=='mediad':
-                if sha(self.read(MEDIAD))!=MEDIAD_SHA256:self.refuse('媒体磁盘程序不是已审核前驱')
+                if sha(self.read(MEDIAD))!=MEDIAD_SHA256:self.refuse('Media binary is not reviewed predecessor')
                 rows.append(self.snapshot(MEDIAD))
             if fragment not in tuple(parent+'/'+unit+'.service' for parent in ('/etc/systemd/system','/lib/systemd/system','/usr/lib/systemd/system')):
-                self.refuse('不支持自定义服务安装路径：'+unit)
+                self.refuse('Custom service unit path unsupported: '+unit)
             rows.append(self.snapshot(fragment))
             for path in props.get('DropInPaths','').split():
                 prefix='/etc/systemd/system/'+unit+'.service.d/'
                 if not path.startswith(prefix) or path[len(prefix):] not in names|{DROPIN,'zzzzzzz-microduck-native-update.conf'}:
-                    self.refuse('存在未审核的服务覆盖：'+unit)
+                    self.refuse('Unreviewed service drop-in override: '+unit)
                 if not path.endswith('/'+DROPIN) and not path.endswith('/zzzzzzz-microduck-native-update.conf'):
                     if path.endswith('/50-microduck-camera-network.conf') and self.read(path)!=UNITS['/etc/systemd/system/mediad.service.d/'+DROPIN]:
-                        self.refuse('媒体网络配置不是已审核兼容修复')
+                        self.refuse('Media network config is not reviewed compat fix')
                     rows.append(self.snapshot(path))
         return rows
 
     def unchanged(self,m):
         self.base.unchanged(m)
         for row in m.get('service_files',[]):
-            if self.snapshot(row['path'])!=row:self.refuse('服务安装文件已被外部改变，保留现场','controller_user_files_changed')
+            if self.snapshot(row['path'])!=row:self.refuse('Service unit files modified externally; preserving state','controller_user_files_changed')
 
     def gid(self):
         text=self.read('/etc/group',65536).decode()
         rows=[line.split(':') for line in text.splitlines() if line.startswith('robot:')]
-        if len(rows)!=1 or not rows[0][2].isdigit():self.refuse('缺少固定 robot 组')
+        if len(rows)!=1 or not rows[0][2].isdigit():self.refuse('Missing robot group')
         return int(rows[0][2])
 
     def uid(self,name):
         rows=[line.split(':') for line in self.read('/etc/passwd',65536).decode().splitlines() if line.startswith(name+':')]
-        if len(rows)!=1 or len(rows[0])!=7 or not rows[0][2].isdigit():self.refuse('缺少固定服务账户：'+name)
+        if len(rows)!=1 or len(rows[0])!=7 or not rows[0][2].isdigit():self.refuse('Missing service account: '+name)
         return int(rows[0][2])
 
     def padd_data(self,path,mode,limit):
@@ -432,14 +432,14 @@ class BundleTransaction:
                 if ((not stat.S_ISREG(info.st_mode) if is_file else not stat.S_ISDIR(info.st_mode))
                         or (self.ctx.check_owner and (info.st_uid!=expected or info.st_mode&0o022))
                         or (is_file and os.name=='posix' and stat.S_IMODE(info.st_mode)!=mode)):
-                    self.refuse('手柄数据属主 / 权限不安全','controller_tampered')
-            if info.st_size>limit:self.refuse('手柄数据超出大小限制')
+                    self.refuse('Gamepad data ownership/permissions unsafe','controller_tampered')
+            if info.st_size>limit:self.refuse('Gamepad data exceeds size limit')
             fd=os.open(self.ctx.p(path),os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
             with os.fdopen(fd,'rb') as source:
-                if (os.fstat(source.fileno()).st_ino,os.fstat(source.fileno()).st_dev)!=(info.st_ino,info.st_dev):self.refuse('手柄数据读取期间改变')
+                if (os.fstat(source.fileno()).st_ino,os.fstat(source.fileno()).st_dev)!=(info.st_ino,info.st_dev):self.refuse('Gamepad data changed during read')
                 data=source.read(limit+1)
-            if len(data)>limit:self.refuse('手柄数据超出大小限制')
-            if self.ctx.check_owner and path==RUNTIME and info.st_gid!=self.gid():self.refuse('手柄运行时 robot 组无效')
+            if len(data)>limit:self.refuse('Gamepad data exceeds size limit')
+            if self.ctx.check_owner and path==RUNTIME and info.st_gid!=self.gid():self.refuse('Invalid robot group on gamepad runtime dir')
             return data
         except FileNotFoundError:return None
 
@@ -448,7 +448,7 @@ class BundleTransaction:
         if data is not None:
             value=json.loads(data)
             if (type(value.get('schema')) is not int or value['schema']!=1 or not isinstance(value.get('profiles'),dict)
-                    or len(value['profiles'])>32):self.refuse('现有手柄映射配置无效，保留配置并停止升级')
+                    or len(value['profiles'])>32):self.refuse('Existing gamepad mapping config invalid; stopping upgrade')
         return sha(data) if data is not None else None
 
     def runtime(self,pid):
@@ -456,7 +456,7 @@ class BundleTransaction:
         if data is None:return None
         value=json.loads(data)
         if (type(value.get('version')) is not int or value['version']!=1 or type(value.get('pid')) is not int
-                or value['pid']!=pid or type(value.get('output_blocked')) is not bool):self.refuse('映射运行时不属于已验证的新 padd')
+                or value['pid']!=pid or type(value.get('output_blocked')) is not bool):self.refuse('Mapping runtime does not belong to verified padd')
         return {'pid':pid,'sha256':sha(data)}
 
     def capture_runtime(self,m):
@@ -468,50 +468,50 @@ class BundleTransaction:
     def cleanup_runtime(self,m):
         if not self.present(RUNTIME):return
         owned=m.get('runtime_owned')
-        if owned is None or self.runtime(owned['pid'])!=owned:self.refuse('保留非本事务产生的映射运行时元数据')
+        if owned is None or self.runtime(owned['pid'])!=owned:self.refuse('Preserving mapping runtime metadata from another transaction')
         self.h.remove(self.ctx,RUNTIME);self.base.sync_dir('/run/padd')
 
     def process(self,unit,expected=None,args=None,groups=False):
         installed_path=PADD
         if unit=='mediad':expected=MEDIAD_SHA256;installed_path=MEDIAD
         before=self.unit(unit)
-        if self.state(unit)!='active':self.refuse('服务未稳定运行：'+unit)
+        if self.state(unit)!='active':self.refuse('Service not stably active: '+unit)
         pid=before.get('MainPID','')
-        if not pid.isdigit() or int(pid)<=0 or not before.get('InvocationID'):self.refuse('服务进程代次未知：'+unit)
+        if not pid.isdigit() or int(pid)<=0 or not before.get('InvocationID'):self.refuse('Service invocation ID unknown: '+unit)
         base='/proc/'+pid
         with open(self.ctx.p(base+'/stat'),encoding='utf-8') as source:start=source.read().rsplit(')',1)[1].split()[19]
         with open(self.ctx.p(base+'/cmdline'),'rb') as source:actual=source.read(8193).rstrip(b'\0').split(b'\0')
-        if args is not None and actual!=[s.encode() for s in args]:self.refuse('实际进程参数已改变：'+unit)
-        if unit=='mediad' and (not actual or actual[0]!=MEDIAD.encode()):self.refuse('实际媒体程序路径不属于已审核安装')
+        if args is not None and actual!=[s.encode() for s in args]:self.refuse('Process argv changed: '+unit)
+        if unit=='mediad' and (not actual or actual[0]!=MEDIAD.encode()):self.refuse('Media binary path not in reviewed install')
         if unit=='duck-echo':
             allowed=('/opt/microduck/software/current/duck-echo/duck_echo.py',self.release+'/duck-echo/duck_echo.py')
             if (len(actual)<3 or actual[0]!=b'/usr/bin/python3' or actual[1] not in [a.encode() for a in allowed]
                     or actual[2]!=b'daemon' or b'--control-socket' not in actual
                     or actual[actual.index(b'--control-socket')+1:]!=[b'/run/duck-echo/control.sock']):
-                self.refuse('实际语音进程未运行受管理的映射兼容入口')
+                self.refuse('Voice process not running managed compat entrypoint')
         if unit=='microduck-studio':
             wanted=[b'/usr/bin/python3',b'-I',b'run.py',b'--listen',b'0.0.0.0:8000',b'--state-dir',b'/var/lib/microduck-studio',b'--log-dir',b'/var/log/microduck-studio']
             if actual!=wanted or os.path.realpath(self.ctx.p(base+'/cwd'))!=os.path.realpath(self.ctx.p(self.release+'/studio')):
-                self.refuse('实际网页进程未运行受管理入口或状态目录')
+                self.refuse('Studio process not running managed entrypoint or state dir')
         if expected is not None:
             with open(self.ctx.p(base+'/exe'),'rb') as source:
                 info=os.fstat(source.fileno());digest=hashlib.file_digest(source,'sha256').hexdigest()
             installed=os.stat(self.ctx.p(installed_path),follow_symlinks=False)
             if (info.st_dev,info.st_ino)!=(installed.st_dev,installed.st_ino) or digest!=expected or sha(self.read(installed_path))!=expected:
-                self.refuse('实际 native inode / 摘要与磁盘不一致：'+unit)
+                self.refuse('Running binary inode/digest mismatch: '+unit)
         if groups:
             with open(self.ctx.p(base+'/status'),encoding='utf-8') as source:status=dict(line.split(':',1) for line in source if ':' in line)
-            if self.gid() not in [int(value) for value in status.get('Groups','').split()]:self.refuse('实际进程尚未取得 robot 组：'+unit)
+            if self.gid() not in [int(value) for value in status.get('Groups','').split()]:self.refuse('Process missing robot supplementary group: '+unit)
         with open(self.ctx.p(base+'/status'),encoding='utf-8') as source:status=dict(line.split(':',1) for line in source if ':' in line)
         user={'padd':'padd','mediad':'mediad','gamesir-xboxd':'root','duck-echo':'radxa','microduck-studio':'radxa'}[unit]
         if any(int(value)!=self.uid(user) for value in status.get('Uid','').split()) or len(status.get('Uid','').split())!=4:
-            self.refuse('实际服务账户不匹配：'+unit)
-        if self.unit(unit)!=before:self.refuse('验证期间服务进程被替换：'+unit)
+            self.refuse('Process service account mismatch: '+unit)
+        if self.unit(unit)!=before:self.refuse('Service process replaced during verification: '+unit)
         return {'unit':before,'start_ticks':start,'boot_id':self.ctx.boot_id()}
 
     def pad_arguments(self):
         pid=self.unit('padd').get('MainPID','')
-        if not pid.isdigit() or int(pid)<=0:self.refuse('原 padd 没有运行')
+        if not pid.isdigit() or int(pid)<=0:self.refuse('Previous padd is not running')
         with open(self.ctx.p('/proc/'+pid+'/cmdline'),'rb') as source:
             args=[s.decode() for s in source.read(8193).rstrip(b'\0').split(b'\0')]
         self.validate_pad_arguments(args)
@@ -519,16 +519,16 @@ class BundleTransaction:
 
     def validate_pad_arguments(self,args):
         if (not isinstance(args,list) or any(not isinstance(a,str) for a in args) or not args or args[0]!=PADD
-                or len(args)>15 or len(args)%2!=1):self.refuse('原 padd 参数不受支持')
+                or len(args)>15 or len(args)%2!=1):self.refuse('Previous padd arguments unsupported')
         flags=dict(zip(args[1::2],args[2::2]))
         if (len(flags)*2!=len(args)-1 or set(flags)-{'--socket','--config','--max-head','--input-settings'}
                 or flags.get('--socket')!='/run/robotd.sock' or flags.get('--config')!=self.legacy.CONFIG
                 or flags.get('--input-settings','/etc/robot/feetech-ft5/pad-settings.json')!='/etc/robot/feetech-ft5/pad-settings.json'):
-            self.refuse('原 padd 参数不属于固定安装')
+            self.refuse('Previous padd arguments do not match fixed install')
         if '--max-head' in flags:
             try:value=float(flags['--max-head'])
-            except ValueError:self.refuse('手柄幅度参数无效')
-            if not math.isfinite(value) or not 0<value<=10:self.refuse('手柄幅度参数无效')
+            except ValueError:self.refuse('Invalid gamepad scale argument')
+            if not math.isfinite(value) or not 0<value<=10:self.refuse('Invalid gamepad scale argument')
 
     def gate(self):
         # Relax changes Bringup::Ready to Limp and therefore clears homed in
@@ -537,29 +537,29 @@ class BundleTransaction:
         # Factory/startup transactions remain the unchanged v1 path.
         bus=self.ctx.rpc('robot.busStatus')
         if bus.get('mode')!='motion' or bus.get('phase')!='control':
-            self.refuse('先完成标定并进入普通运动控制，关闭策略并卸力，再安装配套驱动')
-        if self.base.gate()!='motion':self.refuse('主程序未稳定停在运动控制模式')
+            self.refuse('Complete calibration, enter motion control, disable policy and torque before companion update')
+        if self.base.gate()!='motion':self.refuse('robotd not stably in motion control mode')
 
     def unpublished_readiness(self,m):
         try:
             studio=self.legacy.json_socket(self.ctx.p('/run/microduck-studio/update.sock'),
                 {'op':'native-recovery-readiness','transaction_id':m['transaction_id']})
-            if studio.get('ready') is not True:self.refuse('网页仍有活动或不支持本事务的准备态恢复检查')
+            if studio.get('ready') is not True:self.refuse('Studio active or unsupported pre-update readiness')
             self.voice_health()
-        except (OSError,ValueError,TypeError,AttributeError):self.refuse('无法核验准备态恢复的网页 / 语音空闲')
+        except (OSError,ValueError,TypeError,AttributeError):self.refuse('Cannot verify Studio / voice idle state')
 
     def bridge(self,m):
         if self.present(self.legacy.ACTIVE) and self.read(self.legacy.ACTIVE,128)!=m['transaction_id'].encode():
-            self.refuse('旧版可见保护不属于本事务')
+            self.refuse('Legacy guard does not belong to this transaction')
         self.directory(self.legacy.STATE)
         # Persist the exclusion understood by old helpers BEFORE changing any
         # service or owned component. The v2 journal never replaces the v1 one.
         self.write(self.legacy.ACTIVE,m['transaction_id'].encode(),0o644)
         self.base.exclude_controller_starts(m)
         for path,body in [(self.legacy.GUARD,self.base.guard(m))]:
-            if self.present(path) and self.read(path,65536)!=body:self.refuse('主程序保护不属于本事务')
+            if self.present(path) and self.read(path,65536)!=body:self.refuse('robotd guard does not belong to this transaction')
             self.directory(os.path.dirname(path));self.write(path,body,0o644)
-        if self.ctx.run(['systemctl','daemon-reload'])[0]:self.refuse('保护配置未生效')
+        if self.ctx.run(['systemctl','daemon-reload'])[0]:self.refuse('Guard configuration not applied')
 
     def stop_services(self,m):
         errors=[]
@@ -569,11 +569,11 @@ class BundleTransaction:
                 state=self.state(unit)
                 if state=='active' or (rc and state!='absent'):errors.append(unit)
             except Exception:errors.append(unit)
-        if errors:self.refuse('停止或核验控制服务失败：'+'、'.join(errors))
+        if errors:self.refuse('Failed to stop/verify services: '+', '.join(errors))
 
     def stop_robot(self):
         if self.ctx.run(['systemctl','stop','robotd'],timeout=20)[0] or self.unit('robotd').get('ActiveState') not in ('inactive','failed'):
-            self.refuse('主程序未停止')
+            self.refuse('robotd did not stop')
 
     def owned(self,m):
         self.unchanged(m)
@@ -584,7 +584,7 @@ class BundleTransaction:
             old_ok=current==row
             new_ok=(current['existed'] and current['sha256']==wanted['sha256'] and (os.name!='posix' or current['mode']==wanted['mode'])
                     and (not self.ctx.check_owner or current['uid']==0))
-            if not old_ok and not new_ok:self.refuse('升级组件已被外部改变：'+row['path'],'controller_tampered')
+            if not old_ok and not new_ok:self.refuse('Upgrade component modified externally: '+row['path'],'controller_tampered')
 
     def protected_unchanged(self,m):
         current=json.loads(self.read(self.legacy.PROTECTED,65536)) if self.present(self.legacy.PROTECTED) else None
@@ -593,7 +593,7 @@ class BundleTransaction:
         if m.get('target_robotd') in (ROBOTD_SHA256,LEGACY_ROBOTD_SHA256) and m.get('restore_updater_sha256')==ROBOTD_SHA256:
             allowed.append(self.owned_restore_origin(m).get('protected_next'))
         if current not in allowed and not lost:
-            self.refuse('软件升级器的 native 进程基线被外部改变，保留现场')
+            self.refuse('Updater native process baseline changed externally')
 
     def install_bytes(self,path,data,mode,uid=0,gid=0):
         self.directory(os.path.dirname(path))
@@ -607,20 +607,20 @@ class BundleTransaction:
             self.base.sync_dir(os.path.dirname(path))
 
     def robot_verify(self,m,expected,mode):
-        if self.ctx.run(['systemctl','start','robotd'],timeout=20)[0]:self.refuse('主程序启动失败')
+        if self.ctx.run(['systemctl','start','robotd'],timeout=20)[0]:self.refuse('robotd failed to start')
         deadline=self.ctx.now()+40
         while True:
             try:
                 identity=self.base.process(expected,self.legacy.ARGS+(['--commissioning'] if mode=='commissioning' else []))
                 ipc=self.legacy.IPC_API if expected==ROBOTD_SHA256 else self.legacy.PREDECESSOR_IPC_API.get(expected)
-                if self.ctx.rpc('hello').get('api_version')!=ipc:self.refuse('主程序 IPC 不匹配')
+                if self.ctx.rpc('hello').get('api_version')!=ipc:self.refuse('robotd IPC mismatch')
                 if expected==ROBOTD_SHA256:
                     rc,out,_=self.ctx.run([ROBOTD,'deployment-info'])
-                    if rc or json.loads(out)!={'build':ROBOTD_BUILD,'model_api':2,'official_version':'0.15.1'}:self.refuse('主程序构建元数据不匹配')
-                if self.base.gate()!=mode:self.refuse('主程序模式不匹配')
+                    if rc or json.loads(out)!={'build':ROBOTD_BUILD,'model_api':2,'official_version':'0.15.1'}:self.refuse('robotd build metadata mismatch')
+                if self.base.gate()!=mode:self.refuse('robotd mode mismatch')
                 self.unchanged(m)
                 if self.base.process(expected,self.legacy.ARGS+(['--commissioning'] if mode=='commissioning' else []))!=identity:
-                    self.refuse('核验期间主程序进程代次改变')
+                    self.refuse('robotd process changed during verification')
                 return identity
             except (self.h.Stop,self.h.RpcError,OSError,ValueError):
                 if self.ctx.now()>=deadline:raise
@@ -629,9 +629,9 @@ class BundleTransaction:
     def normal_robot(self,m,expected):
         self.robot_verify(m,expected,'commissioning')
         self.stop_robot()
-        if not self.present(self.legacy.GUARD) or self.read(self.legacy.GUARD)!=self.base.guard(m):self.refuse('主程序保护文件已改变')
+        if not self.present(self.legacy.GUARD) or self.read(self.legacy.GUARD)!=self.base.guard(m):self.refuse('robotd guard file changed')
         self.h.remove(self.ctx,self.legacy.GUARD);self.base.sync_dir(os.path.dirname(self.legacy.GUARD))
-        if self.ctx.run(['systemctl','daemon-reload'])[0] or self.base.args()!=self.legacy.ARGS:self.refuse('主程序启动命令未恢复')
+        if self.ctx.run(['systemctl','daemon-reload'])[0] or self.base.args()!=self.legacy.ARGS:self.refuse('robotd ExecStart not restored')
         return self.robot_verify(m,expected,'motion')
 
     def vector_current(self,m):
@@ -646,29 +646,29 @@ class BundleTransaction:
         return True
 
     def target_health(self,m):
-        if sha(self.read(MEDIAD))!=MEDIAD_SHA256:self.refuse('媒体磁盘程序已改变')
+        if sha(self.read(MEDIAD))!=MEDIAD_SHA256:self.refuse('Media binary changed on disk')
         pad=self.process('padd',PADD_SHA256,m['padd_args'],groups=True)
         props=self.properties('padd')
-        if props.get('StateDirectory')!='padd':self.refuse('padd 状态目录未生效')
+        if props.get('StateDirectory')!='padd':self.refuse('padd StateDirectory not active')
         for unit in ('microduck-studio','duck-echo'):
             self.process(unit,groups=True)
-            if 'robot' not in self.properties(unit).get('SupplementaryGroups','').split():self.refuse('robot 附加组未生效：'+unit)
+            if 'robot' not in self.properties(unit).get('SupplementaryGroups','').split():self.refuse('robot group not active: '+unit)
         if m['services']['mediad']=='active':
             self.process('mediad')
             if set(self.properties('mediad').get('RestrictAddressFamilies','').split())!={'AF_UNIX','AF_INET','AF_INET6','AF_NETLINK'}:
-                self.refuse('媒体服务的地址族沙箱未生效')
+                self.refuse('Media address-family sandbox not active')
         # Padd itself is the authoritative capability source. Read its bounded
         # public state, without a token, and bind it to the verified live PID.
         owned=self.runtime(int(pad['unit']['MainPID']))
-        if owned is None:self.refuse('padd 实际映射接口尚未确认')
+        if owned is None:self.refuse('padd mapping interface not confirmed')
         if self.ctx.check_owner:
             info=os.lstat(self.ctx.p('/run/padd/mapping.sock'))
             if (not stat.S_ISSOCK(info.st_mode) or info.st_uid!=self.uid('padd') or info.st_gid!=self.gid()
-                    or stat.S_IMODE(info.st_mode)!=0o660):self.refuse('实际映射接口属主 / 权限无效')
+                    or stat.S_IMODE(info.st_mode)!=0o660):self.refuse('Mapping interface ownership/permissions invalid')
         capability=mapping_status(self.ctx.p('/run/padd/mapping.sock'))
         if (not isinstance(capability,dict) or capability.get('ok') is not True or type(capability.get('version')) is not int
                 or capability['version']!=1 or not isinstance(capability.get('status'),dict)
-                or capability['status'].get('output_blocked') is not False):self.refuse('实际手柄映射能力未就绪或仍处于校准暂停')
+                or capability['status'].get('output_blocked') is not False):self.refuse('Gamepad mapping capability not ready or paused')
         self.profile()
         return pad
 
@@ -683,13 +683,13 @@ class BundleTransaction:
                     self.ctx.sleep(.5)
         for unit,state in m['services'].items():
             if state=='active' and unit not in exclude:
-                if self.ctx.run(['systemctl','start',unit],timeout=20)[0]:self.refuse('恢复服务失败：'+unit)
+                if self.ctx.run(['systemctl','start',unit],timeout=20)[0]:self.refuse('Failed to restore service: '+unit)
                 current=wait(lambda:self.process(unit))
-                if current['unit']==m['original_services'].get(unit):self.refuse('服务没有创建新进程：'+unit)
+                if current['unit']==m['original_services'].get(unit):self.refuse('Service did not spawn new process: '+unit)
         def healthy():
             pad=self.target_health(m) if target else self.process('padd',m['records'][1]['sha256'],m['padd_args'])
             studio=self.legacy.json_socket(self.ctx.p('/run/microduck-studio/update.sock'),{'op':'readiness'})
-            if type(studio.get('ready')) is not bool:self.refuse('新网页内部状态接口尚未就绪')
+            if type(studio.get('ready')) is not bool:self.refuse('Studio internal status interface not ready')
             if 'duck-echo' not in exclude:
                 self.voice_health()
             return pad
@@ -698,13 +698,13 @@ class BundleTransaction:
     def voice_health(self):
         voice=self.legacy.json_socket(self.ctx.p('/run/duck-echo/control.sock'),{'method':'status'})
         if (voice.get('ok') is not True or (voice.get('status') or {}).get('listening') is not False
-                or (voice.get('status') or {}).get('music') is not False):self.refuse('语音实际状态接口尚未就绪或活动未关闭')
+                or (voice.get('status') or {}).get('music') is not False):self.refuse('Voice status interface not ready or still active')
 
     def complete(self,m,phase,robot,pad):
         self.unchanged(m)
         self.protected_unchanged(m)
         self.gate()
-        if self.base.process(robot['sha256'],self.legacy.ARGS)!=robot:self.refuse('提交前主程序进程代次改变')
+        if self.base.process(robot['sha256'],self.legacy.ARGS)!=robot:self.refuse('robotd process changed before commit')
         if phase=='completed':self.capture_runtime(m)
         baseline={'robotd':robot['unit'],'padd':pad['unit']}
         self.save(m,phase,active=True,restore_pending=True,cleanup_pending=True,protected_next=baseline,baseline_boot_id=self.ctx.boot_id())
@@ -724,7 +724,7 @@ class BundleTransaction:
         return errors
 
     def restore(self,m):
-        if self.protect(m):self.refuse('保护或停止失败，保留恢复状态','controller_recovery_required')
+        if self.protect(m):self.refuse('Guard/stop failed; recovery required','controller_recovery_required')
         self.owned(m);self.save(m,'restoring')
         # Keep the release-external legacy guard until the previous native
         # vector is actually running. A reboot cannot open old voice halfway.
@@ -738,48 +738,48 @@ class BundleTransaction:
         profile=self.profile()
         for index,row in enumerate(m['records']):
             if row['path'] not in last:restore_row(index,row)
-        if self.ctx.run(['systemctl','daemon-reload'])[0]:self.refuse('恢复服务配置失败')
+        if self.ctx.run(['systemctl','daemon-reload'])[0]:self.refuse('Failed to restore service config')
         robot=self.normal_robot(m,m['records'][0]['sha256'])
         pad=self.start_services(m,False,exclude=('duck-echo',))
         self.cleanup_runtime(m)
-        if self.profile()!=profile:self.refuse('恢复期间手柄持久配置改变，未覆盖配置')
+        if self.profile()!=profile:self.refuse('Gamepad profile changed during restore; not overwriting')
         for index,row in enumerate(m['records']):
             if row['path'] in last:restore_row(index,row)
-        if self.ctx.run(['systemctl','daemon-reload'])[0]:self.refuse('恢复旧语音配置失败')
-        if self.ctx.run(['systemctl','start','duck-echo'],timeout=20)[0]:self.refuse('恢复旧语音服务失败')
+        if self.ctx.run(['systemctl','daemon-reload'])[0]:self.refuse('Failed to restore voice config')
+        if self.ctx.run(['systemctl','start','duck-echo'],timeout=20)[0]:self.refuse('Failed to restore voice service')
         deadline=self.ctx.now()+40
         while True:
             try:self.process('duck-echo');self.voice_health();break
             except (self.h.Stop,OSError,ValueError,TypeError):
                 if self.ctx.now()>=deadline:raise
                 self.ctx.sleep(.5)
-        if any(self.snapshot(row['path'])!=row for row in m['records']):self.refuse('旧组件向量恢复回读不一致')
+        if any(self.snapshot(row['path'])!=row for row in m['records']):self.refuse('Previous component restore readback mismatch')
         self.complete(m,'restored',robot,pad)
 
     def prepare(self,payload,previous_bundle=None):
         # Never reinterpret a pending robotd-only transaction as a new bundle.
         previous=self.base.load()
         if previous and (previous['active'] or previous.get('restore_pending') or previous.get('cleanup_pending')):
-            self.refuse('先用原签名软件包恢复单独 robotd 更新')
-        if self.base.has_exclusion():self.refuse('存在未归属的旧更新保护')
+            self.refuse('Restore standalone robotd update using signed package first')
+        if self.base.has_exclusion():self.refuse('Unowned legacy update guard present')
         for path in (COMPAT,VOICE_GUARD,JOURNAL):self.public_parents(path)
         self.base.readiness();self.base.config();self.base.resources();self.gate()
         args=self.base.args()
-        if args!=self.legacy.ARGS:self.refuse('伴随升级仅支持已完成标定的运动模式')
+        if args!=self.legacy.ARGS:self.refuse('Companion update only supported in calibrated motion mode')
         robot_hash=sha(self.read(ROBOTD));pad_hash=sha(self.read(PADD))
         if robot_hash not in (*self.legacy.SUPPORTED_SHA256,ROBOTD_SHA256) or pad_hash not in SUPPORTED_PADD_SHA256:
-            self.refuse('当前 native 组件不属于已审核前驱版本')
+            self.refuse('Current native components do not match reviewed predecessor')
         robot=self.base.process(robot_hash,args);pad_args=self.pad_arguments();pad=self.process('padd',pad_hash,pad_args)
         service_files=self.configuration()
         for path in (*UNITS,VOICE_GUARD,COMPAT):
-            if self.present(path):self.refuse('受控配置路径已被占用，不能覆盖未知文件')
+            if self.present(path):self.refuse('Managed config path occupied by unknown file')
         states={unit:self.state(unit) for unit in SERVICES}
-        if any(states[unit]!='active' for unit in ('padd','duck-echo','microduck-studio')):self.refuse('配套控制服务必须稳定运行')
+        if any(states[unit]!='active' for unit in ('padd','duck-echo','microduck-studio')):self.refuse('Companion control services must be stably active')
         for unit,state in states.items():
             if state=='active':self.process(unit)
         profile=self.profile()
         protected=json.loads(self.read(self.legacy.PROTECTED,65536)) if self.present(self.legacy.PROTECTED) else None
-        if protected is not None and protected!={'robotd':robot['unit'],'padd':pad['unit']}:self.refuse('软件升级服务记录的 native 进程已改变')
+        if protected is not None and protected!={'robotd':robot['unit'],'padd':pad['unit']}:self.refuse('Recorded native processes changed')
         self.directory(STATE);ident=uuid.uuid4().hex;self.directory(STATE+'/'+ident,0o700)
         records=[]
         for index,path in enumerate(self.paths()):
@@ -821,23 +821,23 @@ class BundleTransaction:
 
     def run(self,action):
         if action=='status':return self.status()
-        self.op.take_lock('配套驱动升级');locks=[]
+        self.op.take_lock('Companion driver update');locks=[]
         try:
             for path in (self.h.SERVICE_LOCK,self.legacy.MOTION_LOCK):
                 if path==self.h.SERVICE_LOCK and not self.present(path):self.directory(os.path.dirname(path))
                 else:self.base.read_lock(path)
                 descriptor=self.ctx.lock(path)
-                if descriptor is None:raise self.h.Stop(4,'busy','其他控制或升级仍在进行')
+                if descriptor is None:raise self.h.Stop(4,'busy','Another control or update operation is in progress')
                 locks.append(descriptor)
                 self.base.read_lock(path)
-            if self.present(self.legacy.SOFTWARE_MARKER):self.refuse('软件更新尚未结束')
+            if self.present(self.legacy.SOFTWARE_MARKER):self.refuse('Software update still in progress')
             self.h.imu_redo_conflict(self.op)
-            if self.present(self.h.FLAG) or self.present(self.h.MARKER):self.refuse('舵机会话尚未结束')
+            if self.present(self.h.FLAG) or self.present(self.h.MARKER):self.refuse('Servo session still active')
             m=self.load()
             if action in ('restore','recover'):
                 if not m:
-                    if self.base.has_exclusion():self.refuse('保护存在但伴随记录缺失')
-                    self.refuse('没有可以恢复的伴随升级记录')
+                    if self.base.has_exclusion():self.refuse('Guard present but companion record missing')
+                    self.refuse('No companion update record to restore')
                 if action=='recover' and not m['active'] and not m.get('restore_pending') and not m.get('cleanup_pending') and not self.base.has_exclusion() and not self.present(PREPARED):
                     return self.status()
                 unpublished=self.present(PREPARED) and not self.present(self.legacy.ACTIVE)
@@ -845,7 +845,7 @@ class BundleTransaction:
                     # No target write was authorized before ACTIVE publication.
                     # Validate all fixed preimages before creating any exclusion.
                     self.owned(m)
-                    if any(self.snapshot(row['path'])!=row for row in m['records']):self.refuse('未发布准备记录的旧组件已改变')
+                    if any(self.snapshot(row['path'])!=row for row in m['records']):self.refuse('Uncommitted previous component changed')
                     self.unpublished_readiness(m);self.gate()
                 if action=='restore':
                     self.base.readiness();self.gate();self.unchanged(m)
@@ -855,10 +855,10 @@ class BundleTransaction:
                     self.protect(m);self.save(m,'recovery_required',active=True,reason=str(error)[:300]);return self.op.finish(5,'controller_recovery_required',detail={k:m.get(k) for k in PUBLIC if k in m})
                 return self.op.finish(0,'controller_restored',detail={k:m.get(k) for k in PUBLIC if k in m})
             if m:
-                if m['active'] or m.get('restore_pending') or m.get('cleanup_pending'):self.refuse('先恢复未完成的伴随升级')
+                if m['active'] or m.get('restore_pending') or m.get('cleanup_pending'):self.refuse('Restore incomplete companion update first')
                 if m['phase']=='completed':
                     self.owned(m)
-                    if not self.vector_current(m):self.refuse('已完成的组件向量已改变，不能当作重复安装成功')
+                    if not self.vector_current(m):self.refuse('Completed component vector changed; cannot treat as idempotent')
                     self.target_health(m)
                     if m['target_robotd']!=ROBOTD_SHA256:self.refuse(PREDECESSOR_PROCEDURE,'controller_predecessor_restore_required')
                     return self.status()
@@ -870,14 +870,14 @@ class BundleTransaction:
                 original=m['original_process']
                 if (any(identity[key]!=original[key] for key in ('start_ticks','boot_id','sha256'))
                         or any(identity['unit'].get(k)!=original['unit'].get(k) for k in ('MainPID','InvocationID','ExecMainStartTimestampMonotonic'))):
-                    self.refuse('替换前主程序的实际进程代次已改变')
-                if self.profile()!=m['profile_sha256']:self.refuse('升级期间手柄配置改变，未覆盖配置')
+                    self.refuse('robotd process changed before replacement')
+                if self.profile()!=m['profile_sha256']:self.refuse('Gamepad profile changed during update; not overwriting')
                 self.owned(m);self.stop_robot();self.save(m,'replacing')
                 for path,data in payload.items():self.install_bytes(path,data,m['targets'][path]['mode'])
-                if self.ctx.run(['systemctl','daemon-reload'])[0]:self.refuse('配套服务配置未加载')
-                if not self.vector_current(m):self.refuse('组件向量回读不一致')
+                if self.ctx.run(['systemctl','daemon-reload'])[0]:self.refuse('Companion service config not reloaded')
+                if not self.vector_current(m):self.refuse('Component vector readback mismatch')
                 self.save(m,'verifying');robot=self.normal_robot(m,ROBOTD_SHA256);pad=self.start_services(m,True)
-                if self.profile()!=m['profile_sha256']:self.refuse('升级期间手柄配置改变，未覆盖配置')
+                if self.profile()!=m['profile_sha256']:self.refuse('Gamepad profile changed during update; not overwriting')
                 self.complete(m,'completed',robot,pad)
                 return self.op.finish(0,'controller_installed',detail={k:m.get(k) for k in PUBLIC if k in m})
             except Exception as error:
@@ -894,6 +894,6 @@ def handle(helper,op,args,release,legacy):
     if (set(args)-{'by','action','confirmed'} or args.get('by')!='Studio' or args.get('action') not in ('status','install','recover','restore')
             or (args['action']!='status' and args.get('confirmed') is not True)
             or ('confirmed' in args and type(args['confirmed']) is not bool)):
-        raise helper.Stop(2,'bad_args','伴随升级只接受 Studio 的固定动作及明确确认')
+        raise helper.Stop(2,'bad_args','Companion update accepts only fixed Studio actions with explicit confirmation')
     op.by='Studio'
     return BundleTransaction(helper,op,release,legacy).run(args['action'])

@@ -33,7 +33,7 @@ def status(timeout=10):
 def password(by, on, password=None, timeout=40):
     state = read()
     if state.get('fail'):
-        return False, 'reload_failed', {'msg': '模拟：SSH 服务重载失败，请重试'}
+        return False, 'reload_failed', {'msg': 'item: SSH item, item'}
     state.update(enabled=on, changes=state.get('changes', 0) + 1)
     control.write_text(json.dumps(state), encoding='utf-8')
     return True, 'ssh_password_on' if on else 'ssh_password_off', {}

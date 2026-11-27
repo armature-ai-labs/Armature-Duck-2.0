@@ -44,6 +44,40 @@ SLOT_SKILL = {"sitstand": "sit_toggle", "ground_pick": "ground_pick", "kick_left
               "roulade": "roulade"}
 BUTTON_CN = {"a": "A", "b": "B", "x": "X", "y": "Y", "lb": "LB", "rb": "RB", "dpad_down": "D-Pad Down", "dpad_up": "D-Pad Up",
              "dpad_left": "D-Pad Left", "dpad_right": "D-Pad Right", "ls": "L3", "rs": "R3"}
+FACTORY_MODEL_NAMES = {
+    "\u884c\u8d70\uff0b\u5012\u5730\u8054\u5408 9600 \u8f6e": "Walk + Stand Recovery (9600 rounds)",
+    "\u4f4e\u5934\u6361\u53d6 10000 \u8f6e \u00b7 \u65e0\u7f29\u653e\u6ee4\u6ce2": "Ground Pick (10000 rounds · Unfiltered)",
+    "\u524d\u6eda\u7ffb 10000 \u8f6e \u00b7 \u65e0\u7f29\u653e\u6ee4\u6ce2": "Forward Roll (10000 rounds · Unfiltered)",
+    "\u53f3\u811a\u8e22\u7403 10000 \u8f6e \u00b7 \u65e0\u7f29\u653e\u6ee4\u6ce2": "Right Kick (10000 rounds · Unfiltered)",
+    "\u5de6\u811a\u8e22\u7403 10000 \u8f6e \u00b7 \u65e0\u7f29\u653e\u6ee4\u6ce2": "Left Kick (10000 rounds · Unfiltered)",
+}
+CJK_CHAR_RE = re.compile(r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]")
+
+
+def sanitize_model_name(name):
+    if not isinstance(name, str):
+        return name
+    if name in FACTORY_MODEL_NAMES:
+        return FACTORY_MODEL_NAMES[name]
+    for k, v in FACTORY_MODEL_NAMES.items():
+        if k in name:
+            name = name.replace(k, v)
+    if CJK_CHAR_RE.search(name):
+        sub_map = {
+            "\u884c\u8d70": "Walk",
+            "\u5012\u5730\u8054\u5408": "Stand Recovery",
+            "\u4f4e\u5934\u6361\u53d6": "Ground Pick",
+            "\u524d\u6eda\u7ffb": "Forward Roll",
+            "\u53f3\u811a\u8e22\u7403": "Right Kick",
+            "\u5de6\u811a\u8e22\u7403": "Left Kick",
+            "\u8f6e": " rounds",
+            "\u65e0\u7f29\u653e\u6ee4\u6ce2": "Unfiltered",
+            "\uff0b": " + ",
+        }
+        for cn, en in sub_map.items():
+            name = name.replace(cn, en)
+        name = CJK_CHAR_RE.sub("", name).strip()
+    return name
 # Bundled joint walk model (only this has hardcoded defaults; others use .orig)
 BUNDLED_WALK = "1cbf8730eadd75a5704332c9f3c10f60"
 BUNDLED_WALK_DEFAULT = {"action_scale": 1.0, "head_lowpass": 0.5, "legs_lowpass": 0.7}
@@ -542,7 +576,8 @@ class Tune:
         m = models.get(path) or {}
         info = m.get("info") if isinstance(m.get("info"), dict) else {}
         names = self.disk.get("builtin_names") or {}
-        return info.get("name") or names.get(m.get("dir")) or None
+        raw = info.get("name") or names.get(m.get("dir")) or None
+        return sanitize_model_name(raw)
 
     def _models(self, bus, pol, policy_cfg, cfg, disk):
         models = disk.get("models") or {}

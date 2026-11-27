@@ -13,16 +13,16 @@ const finite = n => typeof n === 'number' && Number.isFinite(n);
 const TOF_FRESH_MS = 3000;
 
 export function tofSnapshot(data) {
-  if (!data || !['ready', 'waiting', 'unavailable', 'error'].includes(data.state)) return emptyTof('error', 'ToF 返回的数据无效。');
+  if (!data || !['ready', 'waiting', 'unavailable', 'error'].includes(data.state)) return emptyTof('error', 'Invalid ToF payload.');
   const info = { sensor: typeof data.sensor === 'string' ? data.sensor : null, simulated: data.simulated === true, connected: data.connected === true,
     hz: finite(data.hz) ? data.hz : null, seq: data.seq, age_ms: data.age_ms };
   if (data.state !== 'ready') return emptyTof(data.state, data.reason || '', info);
   if (data.rows !== 8 || data.cols !== 8 || !Array.isArray(data.distance_mm) || data.distance_mm.length !== 64 ||
     !Array.isArray(data.status) || data.status.length !== 64 || !data.distance_mm.every(finite) ||
     !data.status.every(n => Number.isInteger(n) && n >= 0 && n <= 255) || !finite(data.age_ms) || data.age_ms < 0) {
-    return emptyTof('error', 'ToF 帧格式无效，等待下一份完整的 8 × 8 读数。', info);
+    return emptyTof('error', 'Invalid ToF frame format; waiting for next 8x8 frame.', info);
   }
-  if (data.age_ms >= TOF_FRESH_MS) return emptyTof('stale', '读数已过期，等待新的 ToF 帧。', info);
+  if (data.age_ms >= TOF_FRESH_MS) return emptyTof('stale', 'Readings expired; waiting for fresh ToF frame.', info);
   const zones = data.status.map((status, i) => {
     const raw_mm = data.distance_mm[i];
     const kind = status === 255 ? 'no_target' : (status === 5 || status === 9) && raw_mm > 0 ? 'range' : 'unusable';
@@ -34,13 +34,13 @@ export function tofSnapshot(data) {
 }
 
 export function cameraSource(config, producer) {
-  const configured = config?.source === 'test' ? '配置：测试画面' : config?.source === 'camera' ? '配置：摄像头' : '配置来源未知';
+  const configured = config?.source === 'test' ? 'Config: Test Pattern' : config?.source === 'camera' ? 'Config: Camera' : 'Config: Unknown';
   const simulated = producer?.simulated === true || producer?.simulated === 'true';
-  return { label: simulated ? `${configured} · 运行端为模拟设备` : configured, verified: false,
-    note: config?.source === 'test' ? '当前配置使用测试图案；视频播放成功也不代表真实摄像头已连接。'
-      : simulated ? '运行端明确标记为模拟设备。'
-      : config?.auto?.camera_present === true ? '开机时内核已识别 IMX219，预览中可以确认实际画面。'
-        : '来源依据只读配置；真实摄像头是否正常，需要查看实际画面确认。' };
+  return { label: simulated ? `${configured} · Simulated producer` : configured, verified: false,
+    note: config?.source === 'test' ? 'Configured for test pattern; playback does not indicate a physical camera.'
+      : simulated ? 'Producer explicitly reports simulated device.'
+      : config?.auto?.camera_present === true ? 'Kernel detected IMX219 at boot; inspect live preview below.'
+        : 'Source inferred from read-only config; inspect live preview to verify hardware.' };
 }
 
 export function createTofReader({ request, onValue, intervalMs = 500, staleMs = 3000,
@@ -54,7 +54,7 @@ export function createTofReader({ request, onValue, intervalMs = 500, staleMs = 
     try {
       const result = await request(controller.signal);
       if (!active || current !== generation) return;
-      if (!result?.ok) throw Error(typeof result?.error === 'string' ? result.error : 'ToF 读取失败。');
+      if (!result?.ok) throw Error(typeof result?.error === 'string' ? result.error : 'ToF read failed.');
       const data = result.data;
       const serverAge = data?.age_ms;
       const received = finite(serverAge) && serverAge >= 0
@@ -63,18 +63,18 @@ export function createTofReader({ request, onValue, intervalMs = 500, staleMs = 
       clearTimeout(staleTimer);
       onValue({ ...value, receivedAt: now(), updatedAt: Date.now() });
       if (value.state === 'ready') staleTimer = setTimeout(() => {
-        if (active && current === generation) onValue(emptyTof('stale', '读数已过期，正在等待新的 ToF 帧。'));
+        if (active && current === generation) onValue(emptyTof('stale', 'Readings expired; waiting for fresh ToF frame.'));
       }, Math.max(0, staleMs - value.age_ms));
     } catch (error) {
       if (active && current === generation) {
         clearTimeout(staleTimer);
-        onValue(emptyTof('error', error?.name === 'AbortError' ? '读取 ToF 超时，请检查服务连接。' : error.message || 'ToF 连接断开。'));
+        onValue(emptyTof('error', error?.name === 'AbortError' ? 'ToF request timed out; check service.' : error.message || 'ToF disconnected.'));
       }
     } finally {
       if (active && current === generation) { controller = null; timer = setTimeout(() => read(current), intervalMs); }
     }
   };
-  return { start() { stop(); active = true; onValue(emptyTof('loading', '正在读取 ToF…')); read(generation); }, stop };
+  return { start() { stop(); active = true; onValue(emptyTof('loading', 'Reading ToF...')); read(generation); }, stop };
 }
 
 function useVisible() {
@@ -87,32 +87,31 @@ function useVisible() {
   return visible;
 }
 
-const uncheckedBand = (reason = '点开查看详情') => ({ state: 'unknown', word: '未检查', small: reason });
-const checkingBand = () => ({ state: 'checking', word: '检测中', small: '只读取状态' });
+const uncheckedBand = (reason = 'Click for details') => ({ state: 'unknown', word: 'Unchecked', small: reason });
+const checkingBand = () => ({ state: 'checking', word: 'Checking', small: 'Read-only check' });
 
 export function cameraBandStatus(data) {
-  if (data?.service_state === 'offline') return { state: 'offline', word: '未连接', small: '视频服务未响应' };
+  if (data?.service_state === 'offline') return { state: 'offline', word: 'Offline', small: 'mediad unreachable' };
   if (data?.service_state !== 'online') return uncheckedBand();
-  if (data.source === 'test') return { state: 'test', word: '测试画面', small: '视频服务在线' };
-  return { state: 'online', word: '服务在线', small: data.source === 'camera' ? '点开确认画面' : '画面来源待确认' };
+  if (data.source === 'test') return { state: 'test', word: 'Test Pattern', small: 'mediad online' };
+  return { state: 'online', word: 'Online', small: data.source === 'camera' ? 'Click to preview' : 'Source unconfirmed' };
 }
 
 export function tofBandStatus(data) {
   const view = tofSnapshot(data);
   if (view.state === 'ready') {
-    if (view.simulated) return { state: 'simulated', word: '模拟数据', small: '点开查看距离图' };
-    if (!view.valid_count) return { state: 'waiting', word: '无有效距离', small: '已收到帧 · 0/64 有效' };
-    return { state: 'online', word: `${view.nearest_mm} mm`, small: `最近距离 · ${view.valid_count}/64 有效` };
+    if (view.simulated) return { state: 'simulated', word: 'Simulated', small: 'Click for depth map' };
+    if (!view.valid_count) return { state: 'waiting', word: 'No Valid Zones', small: 'Frame OK · 0/64 valid' };
+    return { state: 'online', word: `${view.nearest_mm} mm`, small: `Nearest · ${view.valid_count}/64 valid` };
   }
   if (view.state === 'unavailable') return view.connected
-    ? { state: 'waiting', word: '服务在线', small: '传感器暂无读数' }
-    : { state: 'offline', word: '未连接', small: 'ToF 服务未连接' };
-  if (view.state === 'waiting') return { state: 'waiting', word: '等待数据', small: '服务已响应' };
-  if (view.state === 'stale') return uncheckedBand('上次读数已过期');
-  return { state: 'error', word: '读取失败', small: '点开查看详情' };
+    ? { state: 'waiting', word: 'Online', small: 'No sensor readings yet' }
+    : { state: 'offline', word: 'Offline', small: 'ToF service offline' };
+  if (view.state === 'waiting') return { state: 'waiting', word: 'Waiting', small: 'Service responded' };
+  if (view.state === 'stale') return uncheckedBand('Last reading stale');
+  return { state: 'error', word: 'Read Error', small: 'Click for details' };
 }
 
-/** Low-frequency presence checks only. No video pipeline or service-start requests. */
 export function createSensorBandReader({ request, onValue, intervalMs = 10000, staleMs = 20000,
   now = () => performance.now(), setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout }) {
   let generation = 0, active = false, timer = null;
@@ -130,10 +129,10 @@ export function createSensorBandReader({ request, onValue, intervalMs = 10000, s
     try {
       const result = await request(kind, controller.signal);
       if (!active || current !== generation) return;
-      if (!result?.ok) throw Error('读取失败');
+      if (!result?.ok) throw Error('Read failed');
       const elapsed = Math.max(0, now() - started), data = result.data;
       if (kind === 'camera') {
-        value = elapsed >= staleMs ? uncheckedBand('检查结果已过期') : cameraBandStatus(data);
+        value = elapsed >= staleMs ? uncheckedBand('Check expired') : cameraBandStatus(data);
       } else {
         const received = finite(data?.age_ms) && data.age_ms >= 0 ? { ...data, age_ms: data.age_ms + elapsed } : data;
         value = tofBandStatus(received);
@@ -143,12 +142,12 @@ export function createSensorBandReader({ request, onValue, intervalMs = 10000, s
       }
     } catch {
       if (!active || current !== generation) return;
-      value = { state: 'error', word: '读取失败', small: '点开查看详情' };
+      value = { state: 'error', word: 'Read Error', small: 'Click for details' };
     } finally { controllers.delete(controller); }
     if (!active || current !== generation) return;
     clearTimeout(expiry.get(kind)); emit(kind, value);
     expiry.set(kind, setTimeout(() => {
-      if (active && current === generation) emit(kind, uncheckedBand('状态已过期，等待检查'));
+      if (active && current === generation) emit(kind, uncheckedBand('Status expired; waiting'));
     }, expiresIn));
   };
   const read = async current => {
@@ -169,19 +168,19 @@ export function SensorBandCells({ api, active }) {
     reader.start(); return () => reader.stop();
   }, [api, active, visible]);
   return ['camera', 'tof'].map(kind => html`<a key=${kind} href=${`#/${kind}`} class=${`band-sensor band-${kind}`} data-state=${values[kind].state}>
-    <span class="label">${kind === 'camera' ? '摄像头' : 'ToF'}</span>
+    <span class="label">${kind === 'camera' ? 'Camera' : 'ToF'}</span>
     <span class="word">${values[kind].word}</span><span class="small">${values[kind].small}</span>
   </a>`);
 }
 
-const CAMERA_STATES = { loading: '读取连接信息…', connecting: '正在连接摄像头…', signaling: '信令已连接，等待视频来源…',
-  negotiating: '正在协商视频连接…', receiving: '视频轨道已接收，等待第一帧…', playing: '正在播放', stopped: '预览已停止', hidden: '预览已暂停', error: '预览失败',
-  test: '测试源未播放', offline: '未连接', unknown: '来源待确认' };
+const CAMERA_STATES = { loading: 'Reading config...', connecting: 'Connecting camera...', signaling: 'Signaling connected...',
+  negotiating: 'Negotiating WebRTC...', receiving: 'Video track received...', playing: 'Playing', stopped: 'Stopped', hidden: 'Paused', error: 'Preview failed',
+  test: 'Test pattern inactive', offline: 'Offline', unknown: 'Source unconfirmed' };
 
 export function inlineCameraPolicy(info) {
-  if (info?.service_state === 'offline') return { play: false, state: 'offline', message: '摄像头画面暂不可用，连接后将在这里预览。' };
-  if (info?.source === 'test') return { play: false, state: 'test', message: '当前设置为测试画面。接入真实摄像头画面后，将在这里显示。' };
-  if (info?.source !== 'camera' || info?.service_state !== 'online') return { play: false, state: 'unknown', message: '还未确认摄像头画面来源，可前往摄像头页检查。' };
+  if (info?.service_state === 'offline') return { play: false, state: 'offline', message: 'Camera stream unavailable; preview will appear when connected.' };
+  if (info?.source === 'test') return { play: false, state: 'test', message: 'Configured for test pattern; connect a physical camera to preview.' };
+  if (info?.source !== 'camera' || info?.service_state !== 'online') return { play: false, state: 'unknown', message: 'Camera source unconfirmed; open Camera page to inspect.' };
   return { play: true };
 }
 
@@ -205,8 +204,8 @@ function useCameraSession({ api, video, active = true, inline = false }) {
       let info;
       try {
         const result = await api('/api/camera', undefined, 3500, abort.signal);
-        info = result?.ok ? result.data : { source: 'unknown', error: result?.error || '连接信息读取失败' };
-      } catch (error) { info = { source: 'unknown', error: error.name === 'AbortError' ? '连接信息读取超时' : '连接信息读取失败' }; }
+        info = result?.ok ? result.data : { source: 'unknown', error: result?.error || 'Failed to read camera config' };
+      } catch (error) { info = { source: 'unknown', error: error.name === 'AbortError' ? 'Camera config timed out' : 'Failed to read camera config' }; }
       if (disposed) return;
       setConfig(info);
       if (inline) {
@@ -217,7 +216,6 @@ function useCameraSession({ api, video, active = true, inline = false }) {
           return;
         }
       }
-      // https 页面直连明文 8443 会被浏览器当混合内容挡掉，改走同域的 /media-ws（nginx 转给本机 8443）
       const proxyPath = typeof location !== 'undefined' && location.protocol === 'https:' ? '/media-ws' : null;
       transport.start(info?.signaling_port ?? 8443, proxyPath);
     };
@@ -246,9 +244,9 @@ function CameraScreen({ connection, video, compact = false }) {
   return html`<div ref=${screen} class="camera-screen" data-playing=${connection.state === 'playing'}
     style=${compact ? { '--camera-display-aspect': String(sideways ? height / width : width / height) } : { aspectRatio: sideways ? `${height} / ${width}` : `${width} / ${height}`,
       maxWidth: `min(100%, ${72 * (sideways ? height / width : width / height)}vh)` }}>
-    <video class=${compact ? 'inline-camera-video' : 'camera-video'} ref=${video} muted playsInline autoPlay aria-label="鸭子摄像头画面"
+    <video class=${compact ? 'inline-camera-video' : 'camera-video'} ref=${video} muted playsInline autoPlay aria-label="Duck camera feed"
       style=${{ width: sideways ? `${100 / ratio}%` : '100%', height: sideways ? `${100 * ratio}%` : '100%', transform: `translate(-50%, -50%) rotate(${rotate}deg)` }}></video>
-    ${connection.state !== 'playing' ? html`<div class="camera-placeholder">${connection.error || connection.message || CAMERA_STATES[connection.state] || '等待画面'}</div>` : null}
+    ${connection.state !== 'playing' ? html`<div class="camera-placeholder">${connection.error || connection.message || CAMERA_STATES[connection.state] || 'Waiting for video'}</div>` : null}
   </div>`;
 }
 
@@ -264,14 +262,14 @@ export function InlineCamera({ api, active = false }) {
   const { config, connection, reconnect } = useCameraSession({ api, video, active: active && inView, inline: true });
   const source = cameraSource(config, connection.producer);
   return html`<section ref=${card} class="board pd-card inline-camera" data-expanded=${expanded} aria-labelledby="inline-camera-title">
-    <div class="inline-camera-head"><h3 id="inline-camera-title">摄像头</h3>
-      <span class="sensor-pill inline-camera-status" role="status" data-state=${connection.state}>${CAMERA_STATES[connection.state] || '等待画面'}</span>
+    <div class="inline-camera-head"><h3 id="inline-camera-title">Camera</h3>
+      <span class="sensor-pill inline-camera-status" role="status" data-state=${connection.state}>${CAMERA_STATES[connection.state] || 'Waiting'}</span>
       <div class="inline-camera-actions"><button class="inline-camera-expand" type="button" aria-pressed=${expanded}
-        disabled=${!expanded && connection.state !== 'playing'} onClick=${() => setExpanded(value => !value)}>${expanded ? '还原' : '放大'}</button>
-        <button class="btn-light inline-camera-retry" type="button" onClick=${reconnect} disabled=${['loading', 'connecting', 'signaling', 'negotiating', 'receiving'].includes(connection.state)}>重新检测</button></div>
+        disabled=${!expanded && connection.state !== 'playing'} onClick=${() => setExpanded(value => !value)}>${expanded ? 'Restore' : 'Expand'}</button>
+        <button class="btn-light inline-camera-retry" type="button" onClick=${reconnect} disabled=${['loading', 'connecting', 'signaling', 'negotiating', 'receiving'].includes(connection.state)}>Retry</button></div>
     </div>
     <${CameraScreen} connection=${connection} video=${video} compact />
-    <div class="inline-camera-meta"><span class="inline-camera-source">${config ? source.label : '鸭子前方的画面'}</span></div>
+    <div class="inline-camera-meta"><span class="inline-camera-source">${config ? source.label : 'Front camera feed'}</span></div>
   </section>`;
 }
 
@@ -280,59 +278,82 @@ export function CameraPage({ api }) {
   const { config, connection, wanted, reconnect, stop } = useCameraSession({ api, video });
   const source = cameraSource(config, connection.producer);
   return html`<section class="sensor-page camera-page" aria-labelledby="camera-title">
-    <header class="sensor-heading"><div><h1 id="camera-title">摄像头</h1><p>查看鸭子当前的视频画面。</p></div>
+    <header class="sensor-heading"><div><h1 id="camera-title">Camera</h1><p>Live WebRTC video feed from the duck.</p></div>
       <span class="sensor-pill camera-status" role="status" data-state=${connection.state}>${CAMERA_STATES[connection.state] || connection.state}</span></header>
     <div class="board sensor-board camera-source"><strong>${source.label}</strong><p>${source.note}</p>
-      ${config?.error ? html`<p class="sensor-note">${config.error}；仍会尝试连接视频服务。</p>` : null}
+      ${config?.error ? html`<p class="sensor-note">${config.error}; still attempting connection.</p>` : null}
       ${config?.auto?.note ? html`<p class="sensor-note camera-auto">${config.auto.note}</p>` : null}</div>
     <div class="sensor-actions">
-      <button type="button" class="camera-start sensor-primary" onClick=${reconnect} disabled=${wanted && connection.state !== 'error' && connection.state !== 'stopped'}>开始预览</button>
-      <button type="button" class="camera-stop" onClick=${stop} disabled=${!wanted}>停止预览</button>
-      <button type="button" class="camera-reconnect" onClick=${reconnect}>重新连接</button>
+      <button type="button" class="camera-start sensor-primary" onClick=${reconnect} disabled=${wanted && connection.state !== 'error' && connection.state !== 'stopped'}>Start Preview</button>
+      <button type="button" class="camera-stop" onClick=${stop} disabled=${!wanted}>Stop Preview</button>
+      <button type="button" class="camera-reconnect" onClick=${reconnect}>Reconnect</button>
     </div>
     <${CameraScreen} connection=${connection} video=${video} />
-    <div class="board sensor-board sensor-metrics"><div><span>实际画面</span><b class="camera-size">${connection.state === 'playing' ? `${connection.width} × ${connection.height}` : '—'}</b></div>
-      <div><span>接收情况</span><b class="camera-received">${connection.state === 'playing' ? `画面正在更新${connection.frames != null ? ` · ${connection.frames} 帧` : ''}` : '等待有效画面'}</b></div></div>
+    <div class="board sensor-board sensor-metrics"><div><span>Resolution</span><b class="camera-size">${connection.state === 'playing' ? `${connection.width} × ${connection.height}` : '—'}</b></div>
+      <div><span>Stream</span><b class="camera-received">${connection.state === 'playing' ? `Streaming${connection.frames != null ? ` · ${connection.frames} frames` : ''}` : 'Waiting for frames'}</b></div></div>
     ${connection.error ? html`<p class="sensor-error" role="alert">${connection.error}</p>` : null}
   </section>`;
 }
 
-const TOF_STATES = { loading: '正在连接', ready: '读数已更新', waiting: '等待首帧', unavailable: '传感器不可用', error: '读取失败', stale: '读数已过期', hidden: '页面隐藏，读取已暂停' };
-const zoneLabel = (zone, index) => `第 ${Math.floor(index / 8) + 1} 行，第 ${index % 8 + 1} 列：${zone.kind === 'range' ? `${zone.mm} 毫米` : zone.kind === 'no_target' ? '无目标' : '无效'}；原始距离 ${zone.raw_mm} 毫米，状态 ${zone.status}`;
+const TOF_STATES = { loading: 'Connecting', ready: 'Live', waiting: 'Waiting for frame', unavailable: 'Unavailable', error: 'Read Error', stale: 'Stale', hidden: 'Paused' };
+const zoneLabel = (zone, index) => `Row ${Math.floor(index / 8) + 1}, Col ${index % 8 + 1}: ${zone.kind === 'range' ? `${zone.mm} mm` : zone.kind === 'no_target' ? 'No target' : 'Invalid'} (raw ${zone.raw_mm} mm, status ${zone.status})`;
+
 export function TofPage({ api }) {
-  const [value, setValue] = useState(emptyTof('loading', '正在读取 ToF…'));
+  const [value, setValue] = useState(emptyTof('loading', 'Reading ToF...'));
   const [attempt, setAttempt] = useState(0), [selected, setSelected] = useState(null);
+  const [view3d, setView3d] = useState(false);
+  const tofCanvas = useRef(null), tof3dRef = useRef(null);
   const visible = useVisible();
   useEffect(() => {
-    if (!visible) { setValue(emptyTof('hidden', '返回这一页后自动重新读取。')); return; }
+    if (!visible) { setValue(emptyTof('hidden', 'Auto-resumes when tab is visible.')); return; }
     const reader = createTofReader({ request: signal => api('/api/tof', undefined, 3500, signal), onValue: setValue });
     reader.start(); return () => reader.stop();
   }, [api, visible, attempt]);
+  useEffect(() => {
+    if (!view3d || !tofCanvas.current) return undefined;
+    let alive = true;
+    import('./tof3d.js').then(({ Tof3D }) => {
+      if (!alive || !tofCanvas.current) return;
+      const viz = new Tof3D(tofCanvas.current);
+      tof3dRef.current = viz;
+    }).catch(() => {});
+    return () => { alive = false; tof3dRef.current?.dispose(); tof3dRef.current = null; };
+  }, [view3d]);
+  useEffect(() => {
+    if (tof3dRef.current && value.state === 'ready') {
+      tof3dRef.current.setGrid(value.zones.map(z => (z.kind === 'range' ? z.mm : 0)));
+    }
+  }, [value]);
   const ready = value.state === 'ready';
   const zones = ready ? value.zones : Array(64).fill(null);
   const selection = ready && selected != null ? value.zones[selected] : null;
   const range = Math.max(1, (value.farthest_mm || 0) - (value.nearest_mm || 0));
   return html`<section class="sensor-page tof-page" aria-labelledby="tof-title">
-    <header class="sensor-heading"><div><h1 id="tof-title">ToF 距离</h1><p>8 × 8 分区距离，单位为毫米。按传感器原始行列显示，未与摄像头画面对齐。</p></div>
-      <span class="sensor-pill tof-status" role="status" data-state=${value.state}>${ready && !value.valid_count ? '已收到帧，无有效距离' : TOF_STATES[value.state]}</span></header>
-    <div class="board sensor-board tof-summary"><div><strong class="tof-sensor">${value.sensor || '传感器型号待确认'}</strong>
-      ${value.simulated ? html`<span class="sensor-pill tof-simulated">模拟数据</span>` : null}</div>
-      <p class="tof-reason" role=${value.state === 'error' ? 'alert' : 'status'}>${value.connected && !ready ? 'ToF 服务已连接。' : ''}${value.reason || (ready && !value.valid_count ? '这一帧的 64 个分区均未给出有效距离。' : ready ? '颜色按这一帧的有效距离分布显示，近处更深，远处更浅。' : '等待传感器读数。')}</p></div>
+    <header class="sensor-heading"><div><h1 id="tof-title">ToF Depth</h1><p>8 × 8 multizone range in millimeters (sensor native orientation).</p></div>
+      <span class="sensor-pill tof-status" role="status" data-state=${value.state}>${ready && !value.valid_count ? 'Frame OK, no valid target' : TOF_STATES[value.state]}</span></header>
+    <div class="board sensor-board tof-summary"><div><strong class="tof-sensor">${value.sensor || 'Sensor unconfirmed'}</strong>
+      ${value.simulated ? html`<span class="sensor-pill tof-simulated">Simulated</span>` : null}</div>
+      <p class="tof-reason" role=${value.state === 'error' ? 'alert' : 'status'}>${value.connected && !ready ? 'ToF service connected. ' : ''}${value.reason || (ready && !value.valid_count ? 'All 64 zones reported no valid target.' : ready ? 'Color-mapped by valid range (near = darker/hotter, far = lighter).' : 'Waiting for sensor readings.')}</p></div>
+    <div class="sensor-actions">
+      <button type="button" class="tof-refresh" onClick=${() => setAttempt(n => n + 1)}>Refresh</button>
+      <button type="button" onClick=${() => setView3d(v => !v)}>${view3d ? '2D Matrix' : '3D Frustum'}</button>
+    </div>
     <div class="tof-content"><div class="board sensor-board tof-visual">
-      <div class="tof-grid" aria-label="ToF 8 × 8 距离分区" aria-busy=${!ready}>${zones.map((zone, i) => html`<button type="button" key=${i}
-        class=${`tof-zone ${zone?.kind || 'empty'}`} data-zone=${i} data-kind=${zone?.kind || 'empty'} disabled=${!zone}
-        title=${zone ? zoneLabel(zone, i) : '还没有有效读数'} aria-label=${zone ? zoneLabel(zone, i) : `第 ${Math.floor(i / 8) + 1} 行，第 ${i % 8 + 1} 列：暂无读数`}
-        aria-pressed=${selected === i && !!zone} onClick=${() => setSelected(i)}
-        style=${zone?.kind === 'range' ? { backgroundColor: `hsl(205 70% ${42 + (zone.mm - value.nearest_mm) / range * 38}%)`, color: (zone.mm - value.nearest_mm) / range < .4 ? '#FFF' : '#081E31' } : null}>${zone?.kind === 'range' ? Math.round(zone.mm) : zone?.kind === 'no_target' ? '—' : zone ? '×' : '·'}</button>`)}</div>
-      <div class="tof-legend"><span><i class="range"></i>有效距离</span><span><i class="no_target"></i>无目标 —</span><span><i class="unusable"></i>无效 ×</span></div>
-      <p class="tof-zone-detail" aria-live="polite">${selection ? zoneLabel(selection, selected) : '点选任意分区，查看毫米值和原始状态。'}</p>
+      ${view3d
+        ? html`<canvas ref=${tofCanvas} style="width:100%;height:320px;display:block;background:#090d13;border-radius:var(--radius)" aria-label="3D ToF depth frustum"></canvas>`
+        : html`<div class="tof-grid" aria-label="ToF 8x8 depth zones" aria-busy=${!ready}>${zones.map((zone, i) => html`<button type="button" key=${i}
+          class=${`tof-zone ${zone?.kind || 'empty'}`} data-zone=${i} data-kind=${zone?.kind || 'empty'} disabled=${!zone}
+          title=${zone ? zoneLabel(zone, i) : 'No reading'} aria-label=${zone ? zoneLabel(zone, i) : `Row ${Math.floor(i / 8) + 1}, Col ${i % 8 + 1}: no reading`}
+          aria-pressed=${selected === i && !!zone} onClick=${() => setSelected(i)}
+          style=${zone?.kind === 'range' ? { backgroundColor: `hsl(28 72% ${32 + (zone.mm - value.nearest_mm) / range * 42}%)`, color: (zone.mm - value.nearest_mm) / range < .45 ? '#f6f6f2' : '#111110' } : null}>${zone?.kind === 'range' ? Math.round(zone.mm) : zone?.kind === 'no_target' ? '—' : zone ? '×' : '·'}</button>`)}</div>`}
+      <div class="tof-legend"><span><i class="range"></i>Valid Range</span><span><i class="no_target"></i>No Target —</span><span><i class="unusable"></i>Invalid ×</span></div>
+      <p class="tof-zone-detail" aria-live="polite">${selection ? zoneLabel(selection, selected) : 'Click any zone to inspect millimeter range and status.'}</p>
     </div><div class="board sensor-board sensor-metrics tof-metrics">
-      <div><span>有效分区</span><b class="tof-valid">${ready ? `${value.valid_count} / 64` : '—'}</b></div>
-      <div><span>最近有效距离</span><b class="tof-nearest">${ready && value.nearest_mm != null ? `${value.nearest_mm} mm` : '—'}</b></div>
-      <div><span>最远有效距离</span><b class="tof-farthest">${ready && value.farthest_mm != null ? `${value.farthest_mm} mm` : '—'}</b></div>
-      <div><span>更新时间</span><b class="tof-updated">${ready ? new Date(value.updatedAt).toLocaleTimeString() : '—'}</b></div>
-      <div><span>传感器频率</span><b>${ready && value.hz != null ? `${value.hz} Hz` : '—'}</b></div>
+      <div><span>Valid Zones</span><b class="tof-valid">${ready ? `${value.valid_count} / 64` : '—'}</b></div>
+      <div><span>Nearest</span><b class="tof-nearest">${ready && value.nearest_mm != null ? `${value.nearest_mm} mm` : '—'}</b></div>
+      <div><span>Farthest</span><b class="tof-farthest">${ready && value.farthest_mm != null ? `${value.farthest_mm} mm` : '—'}</b></div>
+      <div><span>Updated</span><b class="tof-updated">${ready ? new Date(value.updatedAt).toLocaleTimeString() : '—'}</b></div>
+      <div><span>Rate</span><b>${ready && value.hz != null ? `${value.hz} Hz` : '—'}</b></div>
     </div></div>
-    <div class="sensor-actions"><button type="button" class="tof-refresh" onClick=${() => setAttempt(n => n + 1)}>重新读取</button></div>
   </section>`;
 }

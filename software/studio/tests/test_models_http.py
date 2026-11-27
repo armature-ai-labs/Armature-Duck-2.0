@@ -55,7 +55,7 @@ class ModelsHttp(unittest.IsolatedAsyncioTestCase):
         self.models = ModelService()
         self.pad=self.make_pad()
         app = build_app(auth=self.auth, robotd=self.rd, log=self.log, web_dir=WEB,
-                        duck={'label': '测试鸭'}, state_dir=self.tmp.name, models=self.models,pad=self.pad)
+                        duck={'label': 'item'}, state_dir=self.tmp.name, models=self.models,pad=self.pad)
         config = uvicorn.Config(app, host='127.0.0.1', port=0, ws='wsproto', http='h11',
                                 lifespan='on', log_level='critical')
         self.server = uvicorn.Server(config)
@@ -106,18 +106,18 @@ class ModelsHttp(unittest.IsolatedAsyncioTestCase):
         status, _, payload = await self.call('GET', '/api/models', headers=self.headers)
         self.assertEqual(status, 200)
         self.assertTrue(payload['ok'])
-        status, _, payload = await self.call('POST', '/api/models/op', {'op': 'rename', 'id': 'x', 'name': '测试'}, self.headers)
+        status, _, payload = await self.call('POST', '/api/models/op', {'op': 'rename', 'id': 'x', 'name': 'item'}, self.headers)
         self.assertEqual(status, 200)
         self.assertTrue(payload['ok'])
-        self.assertEqual(self.models.operations[-1]['name'], '测试')
+        self.assertEqual(self.models.operations[-1]['name'], 'item')
 
     async def test_upload_is_temporary_and_name_is_not_a_path(self):
-        status, _, payload = await self.call('POST', '/api/models/import?filename=package.zip&name=%E6%85%A2%E8%B5%B0',
+        status, _, payload = await self.call('POST', '/api/models/import?filename=package.zip&name=Slow%20Walk',
                                              b'package bytes', self.headers)
         self.assertEqual(status, 200, payload)
         path, data, name = self.models.imports[-1]
         self.assertEqual(data, b'package bytes')
-        self.assertEqual(name, '慢走')
+        self.assertEqual(name, 'Slow Walk')
         self.assertFalse(path.exists())
         status, _, _ = await self.call('POST', '/api/models/import?filename=../../outside.zip', b'zip', self.headers)
         self.assertEqual(status, 400)
@@ -145,11 +145,11 @@ class ModelsHttp(unittest.IsolatedAsyncioTestCase):
     async def test_rejected_package_cleans_temporary_file_and_preserves_error(self):
         async def reject(path, name=''):
             self.assertTrue(path.is_file())
-            raise ValueError('模型合同不兼容')
+            raise ValueError('item')
         self.models.import_package = reject
         status, headers, payload = await self.call('POST', '/api/models/import?filename=a.tar.gz', b'archive', self.headers)
         self.assertEqual(status, 400)
-        self.assertEqual(payload['error'], '模型合同不兼容')
+        self.assertEqual(payload['error'], 'item')
         self.assertEqual(headers['cache-control'], 'no-store')
         self.assertFalse(list((Path(self.tmp.name) / 'model-uploads').iterdir()))
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .model_package import ACTION_NAME, PackageError, extract_action_package, extract_package, validate_policy
 from .rpc import call_once
+from .tune import sanitize_model_name
 
 SCHEMA = 'microduck-studio-model-library/v1'
 META = '.studio-model.json'
@@ -300,14 +301,14 @@ class Models:
                         raise ValueError('Invalid model identity record')
                     if entry.get('id') != child.name or not isinstance(entry.get('sha256'), str) or not re.fullmatch(r'[a-f0-9]{64}', entry['sha256']):
                         raise ValueError('Invalid model identity record')
-                    entry['name'] = self._name(entry.get('name'))
+                    entry['name'] = sanitize_model_name(self._name(entry.get('name')))
                     entry['path'] = self._remote(child / 'policy.onnx')
                     entry['source'] = 'imported'
                     entry['installed'] = self._local(entry['path']).is_file() and not self._local(entry['path']).is_symlink()
                     entries.append(entry)
                 except (ValueError, OSError, RecursionError) as exc:
                     error = error or f'Cannot read metadata for model {child.name[:8]}: {exc}'
-            builtins = [dict(d, source='builtin', slot=s,
+            builtins = [dict(d, name=sanitize_model_name(d.get('name')), source='builtin', slot=s,
                              installed=self._local(d['path']).is_file() and not self._local(d['path']).is_symlink())
                         for s, d in catalog['defaults'].items() if not d.get('disabled')]
             return catalog, builtins + entries, error
@@ -348,7 +349,7 @@ class Models:
             except OSError:
                 pass
             defaults[slot] = {'id': 'builtin-' + slot, 'path': path,
-                              'name': names.get(slot) or tune_names.get(local.parent.name) or LABELS[slot],
+                              'name': sanitize_model_name(names.get(slot) or tune_names.get(local.parent.name) or LABELS[slot]),
                               'task': task, 'sha256': sha, 'signature': sig}
         for row in self._rows(snap.get('policies'), 'slots'):
             slot = row.get('slot')
@@ -567,7 +568,7 @@ class Models:
             chosen = [s['slot'] for s in slots if s.get('path') == path]
             delete_reason = self._delete_reason(entry, snap, refs, config_error)
             file_reason = None if entry['installed'] else 'Model policy.onnx file is missing or unsafe; please re-import'
-            items.append({'id': entry['id'], 'name': entry['name'], 'source': entry['source'], 'task': entry.get('task'),
+            items.append({'id': entry['id'], 'name': sanitize_model_name(entry['name']), 'source': entry['source'], 'task': entry.get('task'),
                           'suggested_slot': slot, 'allowed_slots': [slot], 'slots': chosen,
                           'running': bool(isinstance(active, dict) and active.get('path') == path),
                           'buttons': [b['button'] for b in bindings if b.get('model_id') == entry['id']],

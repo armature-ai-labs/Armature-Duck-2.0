@@ -50,7 +50,7 @@ try{
  await wait(`!!document.querySelector('.pad-mapping')`,'mapping panel');
  await click('[data-map-begin]');await wait(`document.querySelector('.pad-mapping')?.dataset.mine==='true'`,'native pause acknowledged');
  assert(await js(`document.querySelectorAll('.pad-mapping .pd-key-note').length===0`),'mapping diagram contains only input names');
- report.guarded=await js(`document.querySelector('[data-map-blocked]')?.innerText.includes('暂停')`);assert(report.guarded,'pause status');
+ report.guarded=await js(`document.querySelector('[data-map-blocked]')?.innerText.includes('item')`);assert(report.guarded,'pause status');
  await js(`window.mappingObserver=new WebSocket(location.origin.replace('http','ws')+'/ws');window.mappingObserverResults={};
    mappingObserver.onmessage=e=>{let r=JSON.parse(e.data);if(r.t==='result')mappingObserverResults[r.id]=r};
    new Promise(resolve=>mappingObserver.onopen=resolve)`);
@@ -62,7 +62,7 @@ try{
  report.ownership=true;
  await key('south',305);await key('east',304);report.button_swap=true;
  await click('[data-map-role="west"]');await wait(`document.querySelector('[data-map-capture]')?.dataset.role==='west'`,'duplicate capture');
- event(1,305,1);await wait(`document.querySelector('.map-error')?.innerText.includes('已用于')`,'duplicate rejected');event(1,305,0);await sleep(250);
+ event(1,305,1);await wait(`document.querySelector('.map-error')?.innerText.includes('item')`,'duplicate rejected');event(1,305,0);await sleep(250);
  assert(await js(`document.querySelector('[data-map-role="west"]').dataset.bound!=='true'`),'duplicate never overwrites');report.duplicate=true;
  await key('select',314);await key('start',315);
  for(const [role,code,value] of [['du',17,-1],['dd',17,1],['dl',16,-1],['dr',16,1]]){
@@ -93,9 +93,9 @@ try{
   const footer=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
   writeFileSync(`${arg('shots')}/mapping-footer-${width}.png`,Buffer.from(footer.data,'base64'));
  }
- await click('[data-map-save]');await wait(`document.querySelector('[data-map-message]')?.innerText.includes('已保存')`,'saved readback');
+ await click('[data-map-save]');await wait(`document.querySelector('[data-map-message]')?.innerText.includes('item')`,'saved readback');
  await send('Page.reload');await wait(`!!document.querySelector('[data-map-open]')`,'reload');await click('[data-map-open]');
- await wait(`document.querySelector('[data-map-profile]')?.innerText.includes('测试手柄')`,'saved profile reload');report.save_reload=true;
+ await wait(`document.querySelector('[data-map-profile]')?.innerText.includes('item')`,'saved profile reload');report.save_reload=true;
  assert(await js(`!document.querySelector('.pad-mapping').dataset.mine || document.querySelector('.pad-mapping').dataset.mine==='false'`),'reload cannot resume learning');report.no_auto_resume=true;
  await click('[data-map-begin]');await wait(`document.querySelector('.pad-mapping').dataset.mine==='true'`,'reenter');
  await click('[data-map-clear="lx"]');await click('[data-map-clear="ly"]');
@@ -105,7 +105,7 @@ try{
    for(const value of [100,-100,0]){event(3,code,value);await sleep(250)}
    await click('[data-map-confirm-axis]');await wait(`!document.querySelector('[data-map-capture]')`,'saved axis swap confirmed');
  }
- await click('[data-map-save]');await wait(`document.querySelector('[data-map-message]')?.innerText.includes('已保存')`,'edited axis swap saved');
+ await click('[data-map-save]');await wait(`document.querySelector('[data-map-message]')?.innerText.includes('item')`,'edited axis swap saved');
  await click('[data-map-begin]');await wait(`document.querySelector('.pad-mapping').dataset.mine==='true'`,'edited swap reenter');
  await click('[data-map-role="rx"]');event(3,0,100);
  await wait(`Number(document.querySelector('.pad-mapping [data-role="ls"] .pd-stick-cap')?.getAttribute('cx'))===132`,'edited swap native preview');
@@ -115,8 +115,8 @@ try{
  await click('[data-map-role="lx"]');event(1,305,1);await wait(`!!document.querySelector('.pad-mapping [data-role="south"].pd-on')`,'cancel keeps original binding');event(1,305,0);report.cancel_preserves=true;
  await js(`location.hash='#/logs'`);await sleep(600);await js(`location.hash='#/pad'`);
  await wait(`!!document.querySelector('.pad-mapping')&&!document.querySelector('.pad-mapping').dataset.mine`,'leaving cancels lease');report.navigation_cancel=true;
- inputFlag('disconnect',true);await wait(`document.querySelector('[data-map-profile]')?.innerText.includes('等待读到')`,'device disconnected');
- inputFlag('disconnect',false);await wait(`document.querySelector('[data-map-profile]')?.innerText.includes('已保存')`,'device reconnect profile');report.reconnect=true;
+ inputFlag('disconnect',true);await wait(`document.querySelector('[data-map-profile]')?.innerText.includes('item')`,'device disconnected');
+ inputFlag('disconnect',false);await wait(`document.querySelector('[data-map-profile]')?.innerText.includes('item')`,'device reconnect profile');report.reconnect=true;
  await click('[data-map-begin]');await wait(`document.querySelector('.pad-mapping').dataset.mine==='true'`,'background reenter');
  const backgroundStart=wire.length;
  await js(`Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});document.dispatchEvent(new Event('visibilitychange'))`);
@@ -129,6 +129,6 @@ try{
  await wait(`!document.querySelector('.pad-mapping').dataset.mine`,'background cancels native lease');report.background_cancel=true;
  await click('[data-map-begin]');await wait(`document.querySelector('.pad-mapping').dataset.mine==='true'`,'reset reenter');
  await click('[data-map-reset]');await wait(`!!document.querySelector('[data-map-reset-confirm]')`,'reset confirmation');await click('[data-map-reset-confirm]');
- await wait(`document.querySelector('[data-map-message]')?.innerText.includes('默认')`,'reset native ack');report.reset=true;
+ await wait(`document.querySelector('[data-map-message]')?.innerText.includes('item')`,'reset native ack');report.reset=true;
  assert(errors.length===0,errors.join('\n'));console.log(JSON.stringify(report,null,2));
 }finally{writeFileSync(`${arg('shots')}/mapping-wire.json`,JSON.stringify(wire,null,2));ws.close()}

@@ -1,24 +1,20 @@
-"""舵机页的总线会话：Studio 自己打开舵机总线（跟 servo-web 一样），读 15 颗、在总线上卸力。
+"""Servo page bus session: Studio opens the servo bus directly (like servo-web), reads 15 servos, and releases torque on the bus.
 
-这一步（舵机页 4a）**只读**：除了卸力，不往舵机写任何东西。保持、设中位在后面几步加。
+This step is read/release-safe; holding and zeroing are handled in servo_ops.
+Why open the bus directly: neither robotd version supports holding a single servo indefinitely.
+When robotd is stopped, Studio talks directly to the servos. **Single bus entry point: ServoSession.open().**
 
-为什么要自己开总线：robotd 两个版本都做不到「单颗上力并一直保持」（官方一次写 15 颗；
-原版板端固件的 move 走到位就卸力），见 scratchpad console/servo-page-plan.md。所以舵机页跟 servo-web
-一样，robotd 停着的时候由 Studio 直接跟舵机说话。**总线只有这一个入口：ServoSession.open()。**
+Threading: Feetech bus I/O is blocking (pyserial); polling runs at 50 Hz in a background thread and updates snapshots,
+while the web UI reads the latest at 10 Hz. Torque-off does not queue; it writes directly on the calling thread (per-packet lock).
 
-线程：飞特总线是阻塞读写（pyserial），轮询放在一个线程里跑（50 Hz），结果放在 snapshot 里，
-网页那边 10 Hz 取最新的。卸力不排队：直接在调用它的线程里发（总线每一包有锁，跟轮询穿插），
-最多等轮询正在收的那一包（几毫秒）。
+Torque-off = latched E-Stop: sync_write 40=0 -> sync_read 40 verify -> retry any unconfirmed individually up to 3 rounds.
+Once latched, any torque-on / target / zero write checks `latched` first and requires explicit unlatch.
 
-卸力 = 锁存的急停（方案 1.3、审查 S4）：发 sync_write 40=0 → sync_read 40 回读 → 没变 0 的逐颗重写，
-最多三轮。锁存以后，以后加的「上力、写目标、写零位」一律先查 latched，要人点「解除」才行。
-
-交还 / 离开（第三批代码审查 D2、D3）：舵机操作（servo_ops.handle）在线程里跑，交还跟「刚点的保持」会并发——
-同一个包里先到「保持」后到「离开」，40 次里 35 次交还以后舵机还上着力。所以：
-- 每个舵机操作进出都记账（op_begin / op_end，app 在事件循环里就先记上，线程还没起来也算在路上）；
-- 交还 / 离开先置 closing（之后来的舵机操作一律拒，手动上力也不许清卸力锁存），等在路上的做完（带超时，超时不交还），
-  再当场读一次扭矩（不用 1 秒一次的缓存），再卸力、关总线；
-- 离开（leave）：校准 / 运动 / 灵动在跑不交还；15 颗扭矩都当场读到、都是 0 才交还，读不到的当它可能还在保持。
+Handback / leave: servo ops run on worker threads and can race with handback/leave.
+- Every op is tracked via op_begin / op_end.
+- Handback / leave sets `closing`, rejects new ops, waits for in-flight ops (with timeout),
+  reads live torque (not 1s cache), releases torque, and closes the bus.
+- Leave refuses to hand back if calibration / motion / lively is running, or if any servo torque is non-zero or unreadable.
 """
 import contextlib
 import json
@@ -32,34 +28,34 @@ from .bus import feetech
 from .communication import ServoHealth, accepted_snapshot_age_ms, counter, number
 from .startup_status import servo_observations
 
-IDS = [20, 21, 22, 23, 24, 30, 31, 32, 33, 34, 10, 11, 12, 13, 14]     # 跟 robotd 的 JOINT_NAMES 同一个顺序
+IDS = [20, 21, 22, 23, 24, 30, 31, 32, 33, 34, 10, 11, 12, 13, 14]     # Same order as robotd JOINT_NAMES
 NAMES = {
-    20: ("左髋偏航", "Left Hip Yaw"), 21: ("左髋横滚", "Left Hip Roll"), 22: ("左髋俯仰", "Left Hip Pitch"),
-    23: ("左膝", "Left Knee"), 24: ("左踝", "Left Ankle"),
-    30: ("颈部俯仰", "Neck Pitch"), 31: ("头部俯仰", "Head Pitch"), 32: ("头部偏航", "Head Yaw"),
-    33: ("头部横滚", "Head Roll"), 34: ("嘴巴", "Mouth"),
-    10: ("右髋偏航", "Right Hip Yaw"), 11: ("右髋横滚", "Right Hip Roll"), 12: ("右髋俯仰", "Right Hip Pitch"),
-    13: ("右膝", "Right Knee"), 14: ("右踝", "Right Ankle"),
+    20: ("Left Hip Yaw", "Left Hip Yaw"), 21: ("Left Hip Roll", "Left Hip Roll"), 22: ("Left Hip Pitch", "Left Hip Pitch"),
+    23: ("Left Knee", "Left Knee"), 24: ("Left Ankle", "Left Ankle"),
+    30: ("Neck Pitch", "Neck Pitch"), 31: ("Head Pitch", "Head Pitch"), 32: ("Head Yaw", "Head Yaw"),
+    33: ("Head Roll", "Head Roll"), 34: ("Mouth", "Mouth"),
+    10: ("Right Hip Yaw", "Right Hip Yaw"), 11: ("Right Hip Roll", "Right Hip Roll"), 12: ("Right Hip Pitch", "Right Hip Pitch"),
+    13: ("Right Knee", "Right Knee"), 14: ("Right Ankle", "Right Ankle"),
 }
 GROUP = {**{i: "R" for i in (10, 11, 12, 13, 14)}, **{i: "L" for i in (20, 21, 22, 23, 24)},
          **{i: "H" for i in (30, 31, 32, 33, 34)}}
-# HD-1910 读数变大的方向跟模型（XL330）相反，servo-web 2026-09-20 实机逐颗核对过：15 颗全是 −1
+# HD-1910 positive count direction is opposite to the XL330 model; verified on hardware for all 15 servos: -1
 DEFAULT_DIRECTIONS = {i: -1 for i in IDS}
 POLL_HZ = 50
-TORQUE_EVERY_S = 1.0          # 扭矩开关单独读，一秒一次
+TORQUE_EVERY_S = 1.0          # Torque switch polled separately once per second
 STATIC_REGS = {13: "temp_limit", 21: "p", 22: "d", 33: "mode", 8: "resp_level", 19: "unload",
-               50: "p_run", 51: "d_run"}    # 21/22 是 EEPROM 里存的；HD-1910 运行中的 P/D 在 RAM 50/51（servo_ops 上力前写这里）
-BATTERY_FULL_V, BATTERY_EMPTY_V = 8.2, 6.6      # 官方 duck-control/src/model.rs，同一个算法
-LEAVE_WAIT_S = 3.0            # 离开舵机页：等在路上的舵机操作做完最多这么久（等不到就不交还）
-HANDBACK_WAIT_S = 10.0        # 点「交还主程序」：同上（校准看到 closing 会在下一颗前停）
-# 这几样在跑 = 「活还没干完」：离开舵机页不交还（第三批代码审查 D3a：一键校准跑着时离开，后面几颗被卸力锁打断）
-BUSY_OPS = {"calibrate": "正在校准", "undo": "正在撤销校准", "timing": "正在测总线时序", "scan_all": "正在扫全网",
-            "find": "正在找舵机",
-            "scan": "正在扫描", "set_id": "正在改 ID", "reboot": "正在重启舵机", "write_reg": "正在写寄存器"}
+               50: "p_run", 51: "d_run"}    # 21/22 are EEPROM; HD-1910 active P/D are in RAM 50/51 (written by servo_ops before torque-on)
+BATTERY_FULL_V, BATTERY_EMPTY_V = 8.2, 6.6      # Same formula as duck-control/src/model.rs
+LEAVE_WAIT_S = 3.0            # Max wait for in-flight ops when leaving Servo page (do not hand back on timeout)
+HANDBACK_WAIT_S = 10.0        # Max wait for in-flight ops on manual Hand Back (calibration stops before next servo)
+# Ops considered active work: leaving the Servo page will not auto-handback while these are running
+BUSY_OPS = {"calibrate": "Calibrating", "undo": "Undoing calibration", "timing": "Measuring bus timing", "scan_all": "Scanning all IDs",
+            "find": "Finding servo",
+            "scan": "Scanning", "set_id": "Changing ID", "reboot": "Rebooting servo", "write_reg": "Writing register"}
 
 
 class Refused(Exception):
-    """这个操作现在不能做（卸力锁着、总线没开、正在交还、参数不对）。原因直接给页面看。servo_ops 也用这一个。"""
+    """Raised when an operation cannot run right now (latched, bus closed, closing, invalid args). Message is user-facing."""
 
 
 def angle_deg(raw, direction):
@@ -73,7 +69,7 @@ def battery_percent(volts):
 
 
 def robotd_active():
-    """robotd 在跑吗？在电脑上（没有 systemctl）当成没在跑；Linux 上 systemctl 出错 / 超时回 None（查不了）。"""
+    """Is robotd running? Returns False on non-systemd hosts, None if systemctl errors/times out."""
     if not sys.platform.startswith("linux"):
         return False
     try:
@@ -84,7 +80,7 @@ def robotd_active():
 
 
 def boot_id():
-    """这次开机的编号：读 /proc/sys/kernel/random/boot_id；读不到（Windows、没这个文件）回 None。"""
+    """Boot ID from /proc/sys/kernel/random/boot_id, or None if unavailable."""
     try:
         with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as f:
             return f.read().strip() or None
@@ -93,22 +89,22 @@ def boot_id():
 
 
 BASELINE_PREFIX = "servo-baseline-"
-_baseline_mem = {}       # boot_id 读不到时（电脑上、演示）基线只记在这个进程里：(state_dir, 是否演示) -> {id: {"41","46"}}
+_baseline_mem = {}       # In-memory baseline when boot_id is unavailable or in sim: (state_dir, is_sim) -> {id: {"41","46"}}
 
 
 class ServoSession:
     def __init__(self, log, port=None, sim=False, directions=None, baud=1_000_000, state_dir="."):
         self.log, self.port, self.sim, self.baud, self.state_dir = log, port, sim, baud, state_dir
-        self.ops = None                  # servo_ops.ServoOps：总线开着时才有
-        self.directions = {**DEFAULT_DIRECTIONS, **(directions or {})}    # 键是 int：dict(..., **d) 会因为键不是字符串而崩（10-19 二号鸭存过方向后 Studio 起不来）
+        self.ops = None                  # servo_ops.ServoOps when bus is open
+        self.directions = {**DEFAULT_DIRECTIONS, **(directions or {})}    # Keys are ints; dict(..., **d) fails on non-str keys
         self.bus = None
         self.state = "closed"            # closed / opening / open / error
         self.error = None
-        self.latched = False             # 卸力锁存
+        self.latched = False             # Torque-off latch
         self.relaxing = False
         self.last_relax = None           # {"ok", "ms", "bad", "at"}
         self.static = {}                 # id -> {temp_limit, p, d, mode, ...}
-        self.rows = {}                   # id -> 最新一次读到的状态
+        self.rows = {}                   # id -> latest servo row
         self.torque = {}                 # id -> 0/1/None
         self.torque_at = None
         self.hz = 0.0
@@ -119,38 +115,37 @@ class ServoSession:
         self._health = ServoHealth()
         self._sample_sequence = 0
         self._last_poll_at = None
-        self._window = []                # 最近几秒的 (时间, asked, missed) 用来算丢帧率
+        self._window = []                # Recent (t, asked, missed) tuples for drop-rate calc
         self.sim_serial = None
-        self.handed_back_at = None       # 上一次交还主程序的时间（monotonic）：主程序连上以前页面上一直提示「要手动起来」
-        self.closing = False             # 正在交还 / 离开：新的舵机操作一律拒，手动上力也不许清卸力锁存（审查 D2）
+        self.handed_back_at = None       # Last handback monotonic timestamp
+        self.closing = False             # Handing back / leaving: reject new ops and disallow unlatch
         self._cv = threading.Condition()
-        self._inflight = {}              # 在路上的舵机操作：token -> 操作名
+        self._inflight = {}              # In-flight servo ops: token -> op name
         self._tok = 0
-        self.restored = False            # 这次会话是 Studio 重启后接着管的（审查 D1）
-        self.orphan = None               # 上次退出时会话开着、这次没接管成：{"why", "at"}（卸力按钮引导去舵机页接管）
-        self.helper_available = None     # 起 / 停 robotd 的 root 小助手可用吗：交还提示「正在把主程序起回来…」（审查 D12）
-        self.conflict_at = None          # 会话期间发现 robotd 被手动起来了（monotonic，审查 D9）
-        self.probe_robotd = None         # 会话期间查不查 robotd 起没起来：None = 真串口才查（演示舵机配的是假 robotd，一直在）
-        self.boot_id = None              # 这次开机第一次接管时记 41/46 基线用的（boot_id() 的结果）
-        self.baseline = {}               # id -> {"41": 原始整数, "46": 原始整数}：交还前写回去
-        self.handback_note = None        # 交还成功但没确认卸力的颗（页面提示条用；下次接管清掉）
-        self.giveback_error = None       # 交还后主程序没起来的原因（提示条变红）
-        self.giveback_hint = None        # 主程序没起来时怎么恢复（旗在 / 不在两种）
-        self.marker_error = None         # 会话标记没写进去：Studio 重启后会不知道这里还开着
+        self.restored = False            # Whether this session was resumed after Studio restart
+        self.orphan = None               # Unrecovered prior session info: {"why", "at"}
+        self.helper_available = None     # Whether root helper for starting/stopping robotd is available
+        self.conflict_at = None          # Monotonic timestamp when robotd was detected running mid-session
+        self.probe_robotd = None         # Whether to poll robotd status mid-session (None = only on real serial)
+        self.boot_id = None              # Current boot_id for 41/46 baseline persistence
+        self.baseline = {}               # id -> {"41": raw_int, "46": raw_int} restored before handback
+        self.handback_note = None        # Warning note if handback succeeded with unconfirmed torque-off servos
+        self.giveback_error = None       # Error message if robotd failed to restart after handback
+        self.giveback_hint = None        # Recovery hint if robotd failed to restart
+        self.marker_error = None         # Error writing session marker
 
-    # ---- 打开 / 关闭 ----
+    # ---- Open / Close ----
 
     def open(self, by=None, port=None, restored=False):
-        """打开总线（阻塞，调用方放到线程里）。返回 (ok, 原因)。
-        port：页面上选的串口（电脑上插 USB 转 TTL 是 COM5 之类，跟 servo-web 一样）；"sim" = 模拟舵机。
-        已经打开时不能换串口（换口会先关真总线，舵机保持着急停却卸不到）：必须交还以后再换。
-        restored：Studio 重启后接着上次的会话（审查 D1）——跟 state="open" 一起定，
-        别人看到「开了」的那一刻就看得到它是接着管的（以前在线程外面后设，中间有个窗口）。"""
+        """Open the servo bus (blocking; run in worker thread). Returns (ok, reason).
+        port: selected serial port or "sim" for simulated servos.
+        Cannot switch ports while already open; must hand back first.
+        restored: whether resuming a previous session after Studio restart."""
         if port:
             want_sim = port == "sim"
             if self.state == "open" and (want_sim != self.sim or (not want_sim and port != self.port)):
-                # 调舵机中换口会先把真总线关掉，15 颗还在保持、急停却卸不到：一律不换
-                return False, "调舵机中不能换串口：先点「交还主程序」，再换"
+                # Switching ports while open would close the live bus while servos may hold torque
+                return False, "Cannot switch serial port while active: click Hand Back to Main first"
             self.sim = want_sim
             if not want_sim:
                 self.port = port
@@ -158,7 +153,7 @@ class ServoSession:
             return True, None
         if not self.sim and not self.port:
             self.state, self.error = "closed", None
-            return False, "先选一个串口（电脑上插 USB 转 TTL）或者「演示（没接舵机）」"
+            return False, "Select a serial port or Sim (No Hardware) first"
         self.state, self.error, self.by = "opening", None, by
         self._health = ServoHealth()
         self._sample_sequence, self._last_poll_at = 0, None
@@ -167,16 +162,16 @@ class ServoSession:
                 from .bus.sim_bus import SimSerial
                 self.sim_serial = SimSerial(IDS, phys=_sim_home())
                 self.bus = feetech.FeetechBus(None, ser=self.sim_serial)
-                where = "演示（没接舵机，软件里假装有 15 颗）"
+                where = "Sim (15 virtual servos)"
             else:
                 active = robotd_active()
                 if active is None:
-                    raise RuntimeError("查不了主程序在不在（systemctl 出错）：为了不跟它抢串口，先不开")
+                    raise RuntimeError("Cannot check robotd status (systemctl failed); refusing to open bus to avoid conflict")
                 if active:
-                    raise RuntimeError("主程序 robotd 还在用舵机总线。先停主程序（下一步做成网页上一键接管）")
+                    raise RuntimeError("Main firmware robotd is still using the servo bus; stop it first")
                 self.bus = feetech.FeetechBus(self.port, self.baud)
                 where = f"{self.port} @ {self.baud}"
-            self.log.info(f"打开舵机总线：{where}", cat="总线", raw=f"by={by}")
+            self.log.info(f"Opened servo bus: {where}", cat="Bus", raw=f"by={by}")
             found = [i for i in IDS if self.bus.ping(i) is not None]
             missing = [i for i in IDS if i not in found]
             self._read_static(found)
@@ -190,52 +185,52 @@ class ServoSession:
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, name="servo-poll", daemon=True)
             self._thread.start()
-            msg = f"舵机总线打开了：{len(found)}/15 颗有应答"
+            msg = f"Servo bus opened: {len(found)}/15 responded"
             if missing:
-                self.log.warn(msg, cat="总线", raw=f"没应答：{missing}", hint="看那颗的线有没有插好、有没有电")
+                self.log.warn(msg, cat="Bus", raw=f"no reply: {missing}", hint="Check wiring and power for missing servos")
             else:
-                self.log.info(msg, cat="总线")
+                self.log.info(msg, cat="Bus")
             return True, None
         except Exception as e:  # noqa: BLE001
             self.state, self.error = "error", f"{type(e).__name__}: {e}"
-            self.log.error("打不开舵机总线", cat="总线", raw=self.error,
-                           hint="鸭子上要先停主程序；电脑上要接好 USB 转 TTL；端口写对了吗")
+            self.log.error("Failed to open servo bus", cat="Bus", raw=self.error,
+                           hint="Stop robotd on the duck, or check USB-TTL adapter and port name")
             self._close_bus()
             return False, self.error
 
     def holding(self):
-        """现在有几颗上着力（扭矩回读是 1，1 秒一读的缓存：只给页面显示用；交还 / 离开的判断用 read_torque_now）。总线没开是 0。"""
+        """Count of servos currently holding torque (1s cached readback for UI display). Returns 0 if bus closed."""
         if self.state != "open":
             return 0
         return sum(1 for i in IDS if self.torque.get(i) == 1)
 
     def unknown(self):
-        """扭矩读不到的有几颗（没应答）：它们可能也在保持。总线没开是 0。"""
+        """Count of servos whose torque could not be read (no reply). Returns 0 if bus closed."""
         if self.state != "open":
             return 0
         return sum(1 for i in IDS if self.torque.get(i) not in (0, 1))
 
     @property
     def halted(self):
-        """卸力锁着、或者正在交还：后台的过渡、灵动、校准收尾都不许再上力 / 再动。"""
+        """True if torque-off is latched or session is closing; background motion/calibration must stop."""
         return self.latched or self.closing
 
-    # ---- 在路上的舵机操作（审查 D2） ----
+    # ---- In-flight servo ops tracking ----
 
     def op_begin(self, name):
-        """记上一个舵机操作（app 在事件循环里、线程起来之前就调）。正在交还 / 总线没开：抛 Refused。回 token 给 op_end。"""
+        """Register an in-flight servo op. Raises Refused if closing or bus not open. Returns token for op_end."""
         with self._cv:
             if self.closing:
-                raise Refused("正在交还主程序：舵机操作不收了")
+                raise Refused("Handing back to main: rejecting new servo ops")
             if self.state != "open":
-                raise Refused("舵机总线没打开：先点「开始调舵机」")
+                raise Refused("Servo bus is not open: click Take Over Bus first")
             self._tok += 1
             tok = self._tok
             self._inflight[tok] = str(name or "?")
             return tok
 
     def op_end(self, tok):
-        """做完了（重复调没事）。"""
+        """Mark an in-flight op as finished (idempotent)."""
         with self._cv:
             if self._inflight.pop(tok, None) is not None:
                 self._cv.notify_all()
@@ -249,7 +244,7 @@ class ServoSession:
             self.op_end(tok)
 
     def wait_ops(self, timeout):
-        """等在路上的舵机操作都做完；超时回 False。"""
+        """Wait for all in-flight servo ops to finish; returns False on timeout."""
         with self._cv:
             return self._cv.wait_for(lambda: not self._inflight, timeout)
 
@@ -258,34 +253,32 @@ class ServoSession:
             return sorted(set(self._inflight.values()))
 
     def _busy_locked(self):
-        """校准 / 运动 / 灵动在跑：回一句原因；没在跑回 None（拿着 _cv 调）。"""
+        """Return reason string if calibration / motion / lively is running, else None (call under _cv)."""
         for name in self._inflight.values():
             if name in BUSY_OPS:
                 return BUSY_OPS[name]
         ops = self.ops
         if ops is not None:
             if ops.calib_lock.locked():
-                return "正在校准"
+                return "Calibrating"
             if ops._motion is not None and ops._motion.is_alive() and not ops._motion_stop.is_set():
-                return "动作在跑"
+                return "Motion running"
             if ops.idle_running:
-                return "灵动在跑"
+                return "Lively running"
         return None
 
     def read_torque_now(self):
-        """当场读一次 15 颗的扭矩开关（不用缓存）：{id: 0 / 1 / None（没应答）}。总线出错全是 None。"""
+        """Live read of torque enable for all 15 servos (bypasses cache): {id: 0 / 1 / None}."""
         try:
             got = self._read_torque()
         except Exception as e:  # noqa: BLE001
-            self.log.warn("当场读扭矩没读到", cat="总线", raw=f"{type(e).__name__}: {e}")
+            self.log.warn("Live torque read failed", cat="Bus", raw=f"{type(e).__name__}: {e}")
             return {i: None for i in IDS}
         return {i: (v[1][0] if v else None) for i, v in ((i, got.get(i)) for i in IDS)}
 
     def leave(self, why, wait_s=LEAVE_WAIT_S, before_close=None):
-        """离开舵机页 / 没人在看（阻塞，放线程里）：能交还就卸力、关总线。回 (结果, 详情)：
-            ("closed", None)       本来就没开
-            ("kept", {"why", "holding", "unknown"})   没交还（活没干完、还有在保持的、读不到的、等不到在路上的操作）
-            ("handed_back", None)  卸了力、关了总线（主程序那边的事 app 做）"""
+        """Auto-handback when leaving the Servo page (blocking; run in worker thread).
+        Returns ("closed", None), ("kept", {...}), or ("handed_back", None)."""
         with self._cv:
             if self.state != "open":
                 return "closed", None
@@ -295,25 +288,25 @@ class ServoSession:
             self.closing = True
         try:
             if not self.wait_ops(wait_s):
-                return "kept", {"why": f"还有舵机操作没做完（{'、'.join(self.inflight_names())}）", "holding": self.holding(),
+                return "kept", {"why": f"Servo ops still running ({', '.join(self.inflight_names())})", "holding": self.holding(),
                                 "unknown": self.unknown()}
             tq = self.read_torque_now()
             on = [i for i in IDS if tq.get(i) == 1]
             unk = [i for i in IDS if tq.get(i) not in (0, 1)]
             if on or unk:
-                parts = ([f"{len(on)} 颗保持着"] if on else []) + ([f"{len(unk)} 颗读不到扭矩（可能也在保持）"] if unk else [])
-                return "kept", {"why": "、".join(parts), "holding": len(on), "unknown": len(unk)}
+                parts = ([f"{len(on)} holding torque"] if on else []) + ([f"{len(unk)} torque unreadable"] if unk else [])
+                return "kept", {"why": ", ".join(parts), "holding": len(on), "unknown": len(unk)}
             ok, reason = self.relax_all(why)
             if not ok:
-                self.log.warn("交还前卸力没全部确认", cat="安全", raw=reason, hint="主程序启动时还会再卸一次；不放心就关电源")
+                self.log.warn("Pre-handback torque-off not fully confirmed", cat="Safety", raw=reason, hint="robotd will also release torque on startup; power off if unsure")
             bad, _unknown = self._restore_baseline()
             if bad:
-                ids = "、".join(f"#{i}" for i in bad)
-                msg = f"{len(bad)} 颗加速度/速度没写回（{ids}）：没交还。舵机已经松了；再点一次「交还主程序」重试"
-                self.log.error("41/46 基线没写回：没交还", cat="安全", raw=ids, dedup=False, hint=msg)
+                ids = ", ".join(f"#{i}" for i in bad)
+                msg = f"{len(bad)} servos failed 41/46 baseline restore ({ids}): not handed back. Servos are relaxed; retry Hand Back"
+                self.log.error("41/46 baseline restore failed: not handed back", cat="Safety", raw=ids, dedup=False, hint=msg)
                 return "kept", {"why": msg, "holding": self.holding(), "unknown": self.unknown()}
             if before_close is not None:
-                before_close()          # 关总线前把「调舵机」的暂停一起清掉：外面看到 closed 时状态已经完整（审查 D1/D2 同一个时序要求）
+                before_close()          # Clear pause state before closing bus so external state is consistent
             self.close()
             return "handed_back", None
         finally:
@@ -321,8 +314,7 @@ class ServoSession:
                 self.closing = False
 
     def hand_back_bus(self, why, wait_s=HANDBACK_WAIT_S, before_close=None):
-        """点「交还主程序」（阻塞，放线程里）：置 closing → 停运动 / 灵动 → 等在路上的操作做完 → 卸力回读 → 关总线。
-        等不到就不交还，回 (False, 原因)。"""
+        """Manual Hand Back to Main (blocking; run in worker thread): set closing -> stop motion/lively -> wait in-flight -> torque off -> close bus."""
         with self._cv:
             if self.state != "open":
                 return True, None
@@ -332,23 +324,23 @@ class ServoSession:
                 self.ops.idle_running = False
                 self.ops._motion_stop.set()
             if not self.wait_ops(wait_s):
-                names = "、".join(self.inflight_names()) or "?"
-                return False, f"还有舵机操作没做完（{names}），等了 {wait_s:.0f} 秒：没交还。等它做完再点「交还主程序」"
+                names = ", ".join(self.inflight_names()) or "?"
+                return False, f"Servo ops still running ({names}) after {wait_s:.0f}s: not handed back. Wait and retry Hand Back"
             ok, reason = self.relax_all(why)
             if not ok:
-                self.log.warn("交还前卸力没全部确认", cat="安全", raw=reason, hint="主程序启动时还会再卸一次；不放心就关电源")
+                self.log.warn("Pre-handback torque-off not fully confirmed", cat="Safety", raw=reason, hint="robotd will also release torque on startup; power off if unsure")
             bad, unknown = self._restore_baseline()
             if bad:
-                ids = "、".join(f"#{i}" for i in bad)
-                msg = f"{len(bad)} 颗加速度/速度没写回（{ids}）：没交还。舵机已经松了；再点一次「交还主程序」重试"
-                self.log.error("41/46 基线没写回：没交还", cat="安全", raw=ids, dedup=False, hint=msg)
+                ids = ", ".join(f"#{i}" for i in bad)
+                msg = f"{len(bad)} servos failed 41/46 baseline restore ({ids}): not handed back. Servos are relaxed; retry Hand Back"
+                self.log.error("41/46 baseline restore failed: not handed back", cat="Safety", raw=ids, dedup=False, hint=msg)
                 return False, msg
             relax_bad = list((self.last_relax or {}).get("bad") or [])
             note_ids = sorted(set(relax_bad) | set(unknown), key=IDS.index)
-            note = (f"{'、'.join(f'#{i}' for i in note_ids)} 没确认卸力：主程序起来时会再卸一次；不放心就关电源"
+            note = (f"{', '.join(f'#{i}' for i in note_ids)} torque-off unconfirmed: robotd will release on startup; power off if unsure"
                     if note_ids else None)
             if before_close is not None:
-                before_close()          # 关总线前把「调舵机」的暂停一起清掉：外面看到 closed 时状态已经完整
+                before_close()          # Clear pause state before closing bus
             self.close()
             return True, note
         finally:
@@ -356,8 +348,7 @@ class ServoSession:
                 self.closing = False
 
     def close(self):
-        """关总线（阻塞）。只关串口，不改舵机状态（Studio 退出、发现 robotd 被手动起来时也走这里：不卸力、不写）。
-        交还主程序（先卸力回读再关）走 hand_back_bus / leave。"""
+        """Close serial port without altering servo state (used on exit or external robotd conflict)."""
         if self.ops is not None:
             self.ops.idle_running = False
             self.ops._motion_stop.set()
@@ -367,7 +358,7 @@ class ServoSession:
         self._close_bus()
         self.ops = None
         if self.state != "closed":
-            self.log.info("关掉舵机总线", cat="总线", dedup=False)
+            self.log.info("Closed servo bus", cat="Bus", dedup=False)
         self.state = "closed"
         self.rows, self.torque = {}, {}
         self.restored = False
@@ -380,7 +371,7 @@ class ServoSession:
                 pass
         self.bus = None
 
-    # ---- 读 ----
+    # ---- Polling ----
 
     def _read_static(self, ids):
         for sid in ids:
@@ -402,7 +393,7 @@ class ServoSession:
         return os.path.join(self.state_dir, f"{BASELINE_PREFIX}{bid}.json")
 
     def _baseline_load(self, bid):
-        """读这次开机的基线。boot_id 读不到、或者演示会话，就用进程内存（按 state 目录 + 是否演示分开）。"""
+        """Read 41/46 baseline for this boot_id (or process memory for sim / missing boot_id)."""
         if bid is None:
             return _baseline_mem.setdefault((os.path.abspath(self.state_dir), bool(self.sim)), {})
         try:
@@ -423,7 +414,7 @@ class ServoSession:
         return out
 
     def _baseline_save(self, bid, regs):
-        """原子写 servo-baseline-<boot_id>.json（先写临时文件再 os.replace）。"""
+        """Atomically write servo-baseline-<boot_id>.json via temp file + os.replace."""
         path = self._baseline_path(bid)
         data = {"v": 1, "boot_id": bid, "at": time.time(),
                 "regs": {str(i): dict(regs[i]) for i in IDS if i in regs}}
@@ -434,17 +425,15 @@ class ServoSession:
                 json.dump(data, f, ensure_ascii=False)
             os.replace(tmp, path)
         except OSError as e:
-            self.log.warn("41/46 基线没写进文件（这次进程里还记着）", cat="总线", step=path,
-                          raw=f"{type(e).__name__}: {e}", hint="看看 state 目录满没满、有没有权限")
+            self.log.warn("Failed to save 41/46 baseline file (kept in memory)", cat="Bus", step=path,
+                          raw=f"{type(e).__name__}: {e}", hint="Check state directory disk space and permissions")
 
     def _record_baseline(self, found):
-        """这次开机第一次接管时记下 41（1 字节）/ 46（2 字节）原始值。
-        同一个 boot_id 的文件已经在就不覆盖，只补这次有应答、文件里还没有的舵机；
-        boot_id 读不到就只记在进程内存里。演示会话只记进程内存，不碰 state 目录里的基线文件。"""
+        """Capture raw register 41/46 baseline on first takeover of this boot."""
         bid = boot_id()
         self.boot_id = bid
         if self.sim:
-            # 演示舵机的 41/46 是假的：不读、不写、不删 state 里的基线，只记进程内存
+            # Sim servos use in-memory baseline only
             regs = self._baseline_load(None)
         else:
             if bid is not None:
@@ -453,7 +442,7 @@ class ServoSession:
                     names = os.listdir(self.state_dir)
                 except OSError:
                     names = []
-                for name in names:                  # 别的开机的基线已经没用了
+                for name in names:                  # Stale baseline from previous boots
                     if name.startswith(BASELINE_PREFIX) and name.endswith(".json") and name != current:
                         try:
                             os.remove(os.path.join(self.state_dir, name))
@@ -467,8 +456,8 @@ class ServoSession:
             try:
                 regs[sid] = {"41": self.bus.read_u8(sid, 41), "46": self.bus.read_u16(sid, 46)}
             except feetech.BusError as e:
-                self.log.warn(f"41/46 基线：#{sid} 读不到，跳过", cat="总线", step="读 41/46 基线",
-                              raw=f"{type(e).__name__}: {e}", hint="这颗这次可能不在总线上")
+                self.log.warn(f"41/46 baseline: #{sid} unreadable, skipped", cat="Bus", step="Read 41/46 baseline",
+                              raw=f"{type(e).__name__}: {e}", hint="Servo may be offline on the bus")
                 continue
             added = True
         self.baseline = regs
@@ -476,22 +465,22 @@ class ServoSession:
             self._baseline_save(bid, regs)
 
     def _restore_baseline(self):
-        """交还前把 41/46 写回基线并回读，最多重试 2 次。
-        回 (回读不对的颗, 没应答的颗)：前者不交还；后者主程序起来时也管不了，只记警告。"""
+        """Restore 41/46 baseline before handback and verify readback (up to 2 retries).
+        Returns (mismatch_ids, no_reply_ids)."""
         if self.state != "open" or self.bus is None:
             return [], []
         base = getattr(self, "baseline", None) or {}
         missing = [i for i in IDS if i not in base]
         if missing:
-            self.log.info(f"交接：{len(missing)} 颗没有 41/46 基线（这次开机接管时没应答），跳过", cat="总线",
-                          raw=f"没有基线：{missing}", dedup=False)
+            self.log.info(f"Handback: {len(missing)} servos have no 41/46 baseline, skipped", cat="Bus",
+                          raw=f"missing baseline: {missing}", dedup=False)
         bad, unknown = [], []
         for sid in IDS:
             want = base.get(sid)
             if not want:
                 continue
             outcome, last = "unknown", None
-            for _ in range(3):                      # 第一次 + 重试 2 次
+            for _ in range(3):                      # Initial + 2 retries
                 try:
                     self.bus.write_u8(sid, 41, int(want["41"]) & 0xFF)
                     self.bus.write_u16(sid, 46, int(want["46"]) & 0xFFFF)
@@ -503,21 +492,21 @@ class ServoSession:
                 if got41 == (int(want["41"]) & 0xFF) and got46 == (int(want["46"]) & 0xFFFF):
                     outcome = "ok"
                     break
-                outcome, last = "bad", f"回读 41={got41}、46={got46}，要的是 {want['41']}、{want['46']}"
+                outcome, last = "bad", f"readback 41={got41}, 46={got46}; expected {want['41']}, {want['46']}"
             if outcome == "ok":
                 continue
             if outcome == "bad":
                 bad.append(sid)
-                self.log.error(f"41/46 基线写回没对上：#{sid}", cat="安全", step="回读 41/46",
-                               raw=str(last), hint="回读不对就不交还，再点一次「交还主程序」")
+                self.log.error(f"41/46 baseline readback mismatch: #{sid}", cat="Safety", step="Verify 41/46",
+                               raw=str(last), hint="Not handing back on mismatch; click Hand Back again")
             else:
                 unknown.append(sid)
-                self.log.warn(f"41/46 基线写回：#{sid} 没应答，没确认", cat="安全", step="写/回读 41/46",
-                              raw=f"{type(last).__name__}: {last}", hint="主程序起来时也管不了它")
+                self.log.warn(f"41/46 baseline restore: #{sid} no reply", cat="Safety", step="Write/Verify 41/46",
+                              raw=f"{type(last).__name__}: {last}", hint="Servo did not respond")
         return bad, unknown
 
     def refresh_static(self, ids):
-        """校准、写寄存器以后重读这几颗的偏移、P/D 这些（表里展开行要显示新值）。"""
+        """Refresh static/EEPROM registers (offset, P/D) for given servos after calibration or register write."""
         if self.bus is not None:
             self._read_static([i for i in ids if i in IDS])
 
@@ -534,7 +523,7 @@ class ServoSession:
         while not self._stop.is_set():
             t0 = time.monotonic()
             if self.ops is not None and self.ops.calib_lock.locked():
-                # 校准、时序测试时不抢总线：一次 sync_read 卡住能占几百毫秒，正好落在关扭矩的窗口里
+                # Avoid bus contention during calibration or timing tests
                 self._stop.wait(0.02)
                 continue
             try:
@@ -550,8 +539,8 @@ class ServoSession:
                 if now >= next_torque:
                     self._read_torque()
                     next_torque = now + TORQUE_EVERY_S
-            except Exception as e:  # noqa: BLE001 —— 串口拔了之类：记一次、等一会儿再试
-                self.log.error("读舵机出错", cat="总线", raw=f"{type(e).__name__}: {e}", dedup=True)
+            except Exception as e:  # noqa: BLE001  # Serial error: log once and retry
+                self.log.error("Servo read error", cat="Bus", raw=f"{type(e).__name__}: {e}", dedup=True)
                 time.sleep(0.5)
             n += 1
             if time.monotonic() - t_rate >= 1.0:
@@ -565,7 +554,7 @@ class ServoSession:
     def _note_window(self):
         tot = self._totals()
         self._window.append((time.monotonic(), tot[0], tot[1]))
-        self._window = self._window[-6:]        # 最近 5 秒
+        self._window = self._window[-6:]        # Last ~5 seconds
 
     def _totals(self):
         per = self.bus.per_id if self.bus else {}
@@ -577,14 +566,14 @@ class ServoSession:
         (_, a0, m0), (_, a1, m1) = self._window[0], self._window[-1]
         return None if a1 == a0 else (m1 - m0) / (a1 - a0)
 
-    # ---- 卸力 ----
+    # ---- Torque Off ----
 
     def relax_all(self, by=None):
-        """总线上 15 颗全部卸力并回读确认（阻塞，几到十几毫秒）。返回 (全部确认, 原因)。"""
+        """Release torque on all 15 servos and verify via readback (blocking). Returns (all_confirmed, reason)."""
         if self.state != "open" or self.bus is None:
-            return False, "舵机总线没打开"
+            return False, "Servo bus is not open"
         self.latched, self.relaxing = True, True
-        if self.ops is not None:                 # 正在走的过渡、灵动先停（锁住以后它们也写不进去）
+        if self.ops is not None:                 # Stop active motion/lively transitions first
             self.ops.idle_running = False
             self.ops._motion_stop.set()
         t0 = time.monotonic()
@@ -596,27 +585,27 @@ class ServoSession:
                 bad = [sid for sid, v in got.items() if v is None or v[1][0] != 0]
                 if not bad:
                     break
-                for sid in bad:                      # 没确认的逐颗再写一次
+                for sid in bad:                      # Retry unconfirmed servos individually
                     try:
                         self.bus.write_u8(sid, 40, 0)
                     except feetech.BusError:
                         pass
         except Exception as e:  # noqa: BLE001
-            self.log.error("总线卸力出错", cat="安全", raw=f"{type(e).__name__}: {e}", exc=True,
-                           hint="用手捏住鸭子，关电源")
+            self.log.error("Bus torque-off error", cat="Safety", raw=f"{type(e).__name__}: {e}", exc=True,
+                           hint="Support the duck by hand and power off")
         finally:
             self.relaxing = False
         ms = round((time.monotonic() - t0) * 1000)
         self.last_relax = {"ok": not bad, "ms": ms, "bad": bad, "at": time.monotonic()}
         if bad:
-            self.log.error(f"总线卸力：{len(bad)} 颗没确认", cat="安全", step="sync_read 40 回读",
-                           raw=f"没确认：{bad}", ctx={"by": by, "ms": ms}, hint="可能是线松了没应答；关电源最保险", dedup=False)
-            return False, f"{len(bad)} 颗没确认：{bad}"
-        # 状态变化的日志每次都记（审查 D13：1 分钟去重会把第二次交还、第二次卸力吞掉，事后对不上）
-        self.log.info(f"总线卸力：15 颗全部确认（{ms} ms）", cat="安全", step="sync_read 40 回读", raw=f"by={by}", dedup=False)
+            self.log.error(f"Bus torque-off: {len(bad)} unconfirmed", cat="Safety", step="sync_read 40 verify",
+                           raw=f"unconfirmed: {bad}", ctx={"by": by, "ms": ms}, hint="Possible loose wire; power off to be safe", dedup=False)
+            return False, f"{len(bad)} unconfirmed: {bad}"
+        # Always log state-change torque-off events without dedup
+        self.log.info(f"Bus torque-off: all 15 confirmed ({ms} ms)", cat="Safety", step="sync_read 40 verify", raw=f"by={by}", dedup=False)
         return True, None
 
-    # ---- 给网页的 ----
+    # ---- Web Snapshot ----
 
     def snapshot(self, *, diagnostics=False):
         now = time.monotonic()
@@ -649,7 +638,7 @@ class ServoSession:
         dr = self.drop_rate()
         result = {
             "t": "servo", "state": self.state, "error": self.error, "sim": self.sim, "source": "bus",
-            "port": "演示（没接舵机）" if self.sim else self.port,
+            "port": "Sim (No Hardware)" if self.sim else self.port,
             "marker_error": self.marker_error,
             "online": sum(1 for r in rows if r["fresh"]), "total": len(IDS),
             "hz": round(self.hz, 1), "avg_volts": avg_v, "battery_pct": battery_percent(avg_v),
@@ -659,7 +648,7 @@ class ServoSession:
             "all_off": all_off, "latched": self.latched, "relaxing": self.relaxing, "closing": self.closing,
             "last_relax": None if not self.last_relax else {k: v for k, v in self.last_relax.items() if k != "at"},
             "rows": rows,
-            # 页头「软硬：P5 · D0 · 限力 1000（跟主程序一样）」；顺手给每行补运行中的 P/D/限力（servo_ops.gains_view）
+            # Header gains summary & per-row running P/D/torque_limit
             "gains": ops.gains_view(rows) if (ops := self.ops) is not None else None,
         }
 
@@ -680,21 +669,19 @@ class ServoSession:
             available=self.state == "open", sequence=self._sample_sequence, now=now)
 
     def estop_status(self):
-        """给顶栏卸力按钮：舵机会话期间以总线回读为准。"""
+        """Status for topbar E-Stop button during active servo session."""
         if self.state != "open":
-            return {"state": "unavailable", "why": "舵机总线没打开，只能关电源"}
+            return {"state": "unavailable", "why": "Servo bus not open; power off if needed"}
         if self.relaxing:
-            return {"state": "pending", "why": "卸力中…"}
+            return {"state": "pending", "why": "Releasing torque..."}
         s = self.snapshot()
         if s["all_off"]:
-            return {"state": "confirmed", "why": "15 颗都已卸力（总线回读）"}
-        return {"state": "ready", "why": "调舵机中：卸力直接走总线"}
+            return {"state": "confirmed", "why": "All 15 servos relaxed (bus verified)"}
+        return {"state": "ready", "why": "Servo tuning active: E-Stop writes directly to bus"}
 
 
 def view_from_robotd(bus, directions, state="closed", error=None, sim=False):
-    """没接管总线时，舵机页照样有表：数据来自主程序的 busStatus（它本来就在读舵机），只能看。
-    角度跟接管以后同一个算法（方向 ×（读数 − 2048）），接管前后数字对得上。
-    主程序的 position_rad 是按它自己的零位（zero_raw）算的，这里不用它。"""
+    """Read-only servo table snapshot from robotd busStatus when bus is not taken over."""
     # Robotd carries IPC receipt/error evidence. The legacy dict form stays valid
     # for ordinary feedback, but cannot establish fresh startup observations.
     rd = bus if hasattr(bus, "bus") else None
@@ -762,7 +749,7 @@ def view_from_robotd(bus, directions, state="closed", error=None, sim=False):
     avg_v = round(sum(volts) / len(volts), 2) if volts else None
     return _robotd_health({
         "t": "servo", "state": state, "error": error, "sim": sim, "source": "robotd",
-        "port": "主程序", "online": sum(1 for r in rows if r["fresh"]), "total": len(IDS),
+        "port": "Main Firmware", "online": sum(1 for r in rows if r["fresh"]), "total": len(IDS),
         "hz": None, "avg_volts": avg_v, "battery_pct": battery_percent(avg_v), "drop_rate": None, "bus": None,
         "holding": sum(1 for r in rows if r["torque"] == 1), "all_off": False, "latched": False,
         "relaxing": False, "last_relax": None, "rows": rows,
@@ -843,20 +830,20 @@ def _view_startup_observations(observations, directions, state, error, sim):
         })
     avg_v = round(sum(volts) / len(volts), 2) if volts else None
     return {"t": "servo", "state": state, "error": error, "sim": sim, "source": "robotd", "diagnostic": True,
-            "port": "主程序", "online": observations["online"], "total": len(IDS),
+            "port": "Main Firmware", "online": observations["online"], "total": len(IDS),
             "hz": None, "avg_volts": avg_v, "battery_pct": battery_percent(avg_v), "drop_rate": None, "bus": None,
             "holding": None, "all_off": False, "latched": False, "relaxing": False, "last_relax": None, "rows": rows}
 
 
 def _sim_home():
-    """模拟舵机摆在官方站姿（读数 = 2048 + 方向 × 角度），3D 上看得出是站着的。"""
+    """Initialize sim servos to stand pose (raw = 2048 + dir * angle)."""
     home = {20: 0.0, 21: -0.0873, 22: -0.4579, 23: -0.0049, 24: 0.4530, 30: 0.3491, 31: 0.3491,
             32: 0.0, 33: 0.0, 34: 0.0, 10: 0.0, 11: 0.0873, 12: 0.4579, 13: 0.0049, 14: -0.4530}
     return {sid: round(2048 + DEFAULT_DIRECTIONS[sid] * rad * 4096 / (2 * 3.141592653589793)) for sid, rad in home.items()}
 
 
 def list_ports():
-    """系统里现在能看到的串口。拔插 USB 后口号会变，页面上直接选（跟 servo-web 一样）。"""
+    """List currently visible serial ports."""
     try:
         from serial.tools import list_ports as lp
         return [{"device": p.device, "desc": (p.description or "").strip()} for p in lp.comports()]
@@ -865,7 +852,7 @@ def list_ports():
 
 
 def load_directions(state_dir):
-    """方向表：state 目录里有 servo-directions.json 就用它，没有就全 −1。"""
+    """Load servo direction table from servo-directions.json, defaulting to -1."""
     p = os.path.join(state_dir, "servo-directions.json")
     try:
         with open(p, encoding="utf-8") as f:

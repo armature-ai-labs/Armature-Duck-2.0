@@ -1,60 +1,16 @@
 #!/usr/bin/python3 -IS
-"""microduck-helper：Microduck Studio 的 root 小助手。舵机总线交接三个动词，手柄配对 / 忘掉两个，鸭子热点开关两个，
-写进主程序 / 读标定两个，SSH 密码登录开关两个。
+"""microduck-helper: root helper for Armature x Microduck Studio.
 
-为什么要它：Studio 的舵机页要自己打开舵机总线 /dev/ttyS2，主程序 robotd 就得先停下，用完再交还。
-停、起 robotd 要 root，Studio 不是 root。所以 sudoers 只放行这一个文件，它只认白名单里的动词，
-参数逐个校验，状态自己去读，不信网页传来的。
-
-方案：scratchpad console/handover-plan.md（v2 定稿）§2.2、§4.2；规矩照 studio-ops-plan.md §7。
-
-动词（参数是 stdin 里的一个 JSON 对象，先一次读完）：
-  bus-take       {"by": str, "allow_seated": bool}   Studio 接管总线（不卸力）
-  bus-give-back  {"by": str, "soft": true}            软交还：Studio 已经在总线上全卸了，起 robotd（起来了 = 运动模式 control，
-                                                      或者标定模式的实时快照 ready / moving / read_error / stop_unconfirmed / power_pending）
-                 {"by": str, "marker": {...}}         不卸力交还：写交接标记，robotd 接手保持
-  bus-abort      {"by": str}                          中止交接：立旗、KILL robotd，总线还给 Studio
-  pad-pair       {"by": str, "mac": 可选, "timeout": 10–120（默认 60）}
-                                                       跑官方 /usr/local/bin/robotctl pad pair --json
-                                                       （/var/lib/robot/weird-ble 板上会先停 btd、重开蓝牙）
-  pad-forget     {"by": str, "mac": str}             跑官方 /usr/local/bin/robotctl pad forget MAC
-  wifi-hotspot-down {"by": str, "ssid": 可选}        先写 Studio 连接窗口（90 秒，netcheck 不插手），
-                                                      再 nmcli connection down Microduck-Hotspot，最多等 10 秒
-  wifi-hotspot-up   {"by": str}                       nmcli connection up Microduck-Hotspot，最多等 30 秒
-  calib-read     {"by": 可选}                       只读当前标定文件，回解析后的内容和现在的模式；
-                                                      不拿 helper.lock、不写任何东西
+Validates whitelisted verbs and stdin JSON payloads for servo bus handover, gamepad pairing,
+Wi-Fi hotspot control, calibration read/commit, IMU recalibration, SSH password toggle, and updates.
   calib-commit   {"by": str, "joints": [{"id", "direction"}, ... 15],
                  "imu": {"source": "bus"|"bno08x"|"lsm6dsv16x", "quat": [w,x,y,z]},
-                 "dry_run": bool}                    把零位 / 方向 / IMU 方向写进 robotd 的
-                                                      /etc/robot/feetech-ft5/hd1910-calibration.toml，重启主程序；
-                                                      出厂镜像跑标定模式时，写完删掉 zzzz-zz-microduck-commissioning.conf
-                                                      切回运动模式；等 mode=motion、phase=control 且读回逐项一致；
-                                                      任何异常都先换回备份。dry_run 只回要写的 TOML
-  ssh-status     {"by": 可选}                       只读：SSH 密码登录开没开、ssh 服务在不在跑、radxa 登记了几把钥匙；不写任何东西
+                 "dry_run": bool}                    Commit calibration to robotd and verify readback.
+  ssh-status     {"by": optional}                   Read SSH password auth status, ssh service, and key count.
   ssh-password   {"by": str, "on": true, "password": str}
-                                                       用户自己定的密码设给 radxa（chpasswd，走 stdin），写
-                                                      /etc/ssh/sshd_config.d/05-microduck-ssh-password.conf 打开密码登录，
-                                                      sshd -t、sshd -T 读回确认真打开了，再 reload ssh；哪一步不对就删掉这个文件退回去。
-                                                      密码 8–64 个可见字符，不能是 microduck；**密码不进日志、不进结果**
-                 {"by": str, "on": false}             删掉那个文件、reload ssh：回到只认钥匙（radxa 的密码不动，sudo 还用它）
 
-输出：一行一个 JSON {"step","level","ms","msg","detail"}，最后一行 step="done"。
-同一份结果写进 /run/microduck-helper/last-result.json（Studio 重启以后读它）。
+  ssh-password   {"by": str, "on": bool, "password"?: str}  Toggle SSH password auth via 05-microduck-ssh-password.conf.
 
-退出码：0 成功；2 参数错；3 状态不允许；4 忙 / 中止；5 执行失败；6 交接没成、总线已拿回（Studio 接着保持）。
-
-几个路径（都在内存盘 /run 里，断电就没了，这是故意的）：
-  /run/microduck-helper/bus-held          旗。robotd 的 drop-in 写着 ConditionPathExists=! 它，旗在 robotd 就起不来
-  /run/microduck-helper/abort             中止请求（bus-abort 写，正在跑的 bus-give-back 看到就停）
-  /run/microduck-helper/last-result.json  最后一次的结果
-  /run/microduck-helper/helper.lock       bus-take / bus-give-back / calib-commit 一次只跑一个（bus-abort 不拿，不能被挡住）
-  /run/microduck-helper/wifi.lock         两个热点动词一次只跑一个（跟舵机总线的 helper.lock 分开）
-  /run/microduck-handover/handover.json   交接标记（目录 0700，只有 root 读写；robotd 读完就删）
-  管理锁 /run/microduck-service-management.lock 由临时单元 microduck-bus-hold 一直拿着，板上的 service.sh 拿不到就不动
-
-环境变量 MICRODUCK_HELPER_DETACHED / _REQUEST / _REQUESTED_MS：只给 bus-give-back / calib-commit 自己用。第一次被调用时，
-用 systemd-run 把自己放进一个独立的临时单元再跑一遍，这样 Studio 死了也不会把它砍在半路。这几个变量只决定
-「不要再转一次」，以及中止请求和结果怎么对号，**不给任何权限**。sudo 默认 env_reset，调用方也传不进来。
 """
 import json
 import math
@@ -89,8 +45,8 @@ LAST = HELPER_DIR + "/last-result.json"
 LOCK = HELPER_DIR + "/helper.lock"
 WIFI_LOCK = HELPER_DIR + "/wifi.lock"
 SSH_LOCK = HELPER_DIR + "/ssh.lock"
-# 镜像里 10-microduck.conf 写的是 PasswordAuthentication no。sshd 每项取第一次读到的值、sshd_config.d 按文件名排序，
-# 所以开关文件叫 05-…，排在它前面。打开以后照样用 sshd -T 读回确认，不靠这个假设。
+# 05-* sorts before 10-microduck.conf (PasswordAuthentication no); verified via sshd -T.
+# First-seen wins in sshd_config.d.
 SSH_PASSWORD_CONF = "/etc/ssh/sshd_config.d/05-microduck-ssh-password.conf"
 SSH_USER = "radxa"
 SSH_KEYS = "/home/radxa/.ssh/authorized_keys"
@@ -127,13 +83,13 @@ GAMESIR = "gamesir-xboxd"
 ROBOTCTL = "/usr/local/bin/robotctl"
 HOTSPOT = "Microduck-Hotspot"
 PAD_TIMEOUT_DEFAULT, PAD_TIMEOUT_MIN, PAD_TIMEOUT_MAX = 60, 10, 120
-PAD_EXTRA_S = 30          # 子进程总超时 = robotctl 自己的 timeout + 这 30 秒
+PAD_EXTRA_S = 30          # Subprocess timeout = robotctl timeout + 30s
 FORGET_TIMEOUT_S = 60
 MEDIA_CONFIG = "/etc/robot/robotd.toml"
 SENSORS_LOCK = HELPER_DIR + "/sensors.lock"
 SOFTWARE_MARKER = "/run/microduck-updater/installing"
-MEDIA_SETTLE_S = 3.0      # 重启视频服务以后先等这么久
-MEDIA_STABLE_S = 6.0      # 再看这么久：一直在跑、主进程没换才算起来了（起不来的话它每 5 秒重启一次）
+MEDIA_SETTLE_S = 3.0      # Settle wait after restarting media service
+MEDIA_STABLE_S = 6.0      # Stability window after media service restart
 WIFI_DOWN_WAIT = 10.0
 WIFI_UP_WAIT = 30.0
 WIFI_POLL = 0.2
@@ -151,26 +107,26 @@ SCHEMA = "microduck-handover/1"
 JOINT_IDS = frozenset([10, 11, 12, 13, 14, 20, 21, 22, 23, 24, 30, 31, 32, 33, 34])
 TTL_DEFAULT_MS, TTL_MAX_MS, TTL_MIN_MS = 20000, 30000, 1000
 STARTING_PHASES = ("configuring_bus", "waiting_for_bus", "configuration_error", "handover_declined")
-# 标定模式起来了：busStatus 回的是实时快照（fork feetech_commissioning.rs 的 Status），phase 是这几个。启动时那份报告
-# （mode=commissioning、phase=configuring_bus）旧 fork 从来不清，新 fork 第一次读成功以后清掉（10-20 真机验收：
-# 以前每次从舵机页交还都等满 30 秒判「起不来」）
+# Commissioning live snapshot phases
+# Legacy firmware never clears configuring_bus boot report
+#
 COMMISSIONING_UP = ("ready", "moving", "read_error", "stop_unconfirmed", "power_pending")
-STILL_STARTING = "可能其实起来了、只是状态没更新（旧版主程序的毛病），也可能卡在启动：去日志页看主程序最后说了什么"
+STILL_STARTING = "robotd may be running with stale startup status, or stuck booting; check robotd logs"
 
-# 时间（秒）
-GATE_GAP = 0.2            # gate 两次读 busStatus 的间隔
-HOMING_WAIT = 3.0         # 正在回站姿时最多等多久
-STOP_WAIT = 10.0          # systemctl stop --no-block 以后最多等多久才 KILL
-KILL_WAIT = 3.0           # KILL 以后最多等多久
+# Timeouts (seconds)
+GATE_GAP = 0.2            # Interval between two gate busStatus reads
+HOMING_WAIT = 3.0         # Max wait while returning to stand
+STOP_WAIT = 10.0          # Max wait after systemctl stop before SIGKILL
+KILL_WAIT = 3.0           # Max wait after SIGKILL
 POLL = 0.1
 GIVE_POLL = 0.2
-MARKER_READ_TIMEOUT = 15.0  # robotd 这么久还没读走标记 → 拿回总线
-ADOPT_TIMEOUT = 20.0        # 接手了，但这么久还没走完启动第 4 步 → 拿回总线
+MARKER_READ_TIMEOUT = 15.0  # Reclaim bus if robotd has not read handover marker
+ADOPT_TIMEOUT = 20.0        # Reclaim bus if step 4 not finished
 SOFT_TIMEOUT = 30.0
 ABORT_KILL_WAIT = 0.5
 ABORT_POLL = 0.05
-HOLD_CONFIRM_GAP = 0.3    # bus-hold 起来以后隔这么久查两次 active
-STILL_RAD = 0.01745       # 坐姿接管：两次读之间每颗都 < 1°
+HOLD_CONFIRM_GAP = 0.3    # Delay between bus-hold active checks
+STILL_RAD = 0.01745       # Seated takeover stillness threshold (< 1 deg)
 STDIN_LIMIT = 256 * 1024
 
 BIN = {"systemctl": "/usr/bin/systemctl", "systemd-run": "/usr/bin/systemd-run", "fuser": "/usr/bin/fuser",
@@ -185,7 +141,7 @@ class RpcError(Exception):
 
 
 class Stop(Exception):
-    """动词提前结束：带上退出码、结果、原因。"""
+    """Early exit for a helper verb with exit code, result key, and message."""
 
     def __init__(self, code, result, reason, detail=None):
         super().__init__(reason)
@@ -193,8 +149,8 @@ class Stop(Exception):
 
 
 # ---------------------------------------------------------------------------
-# 对外的东西都走 Ctx：命令、文件系统根、时钟、robotd 的 IPC、stdout。测试换一个假的进来。
-# 没有任何环境变量能改 root（sudo 下那是漏洞）。
+# Dependency-injected system context (overridden in tests).
+# No env var may override root path.
 
 class Ctx:
     def __init__(self, root="/", stdin=None, stdout=None, env=None, self_path=SELF_PATH):
@@ -204,13 +160,13 @@ class Ctx:
         self.env = dict(os.environ) if env is None else env
         self.self_path = self_path
         self.check_owner = root == "/"
-        self.fs_log = []          # (路径, 权限)：测试拿它核对「打算用什么权限」（Windows 上 chmod 不全）
+        self.fs_log = []          # (path, mode) log for tests
 
-    # 路径
+    # Paths
     def p(self, path):
         return path if self.root == "/" else os.path.join(self.root, path.lstrip("/"))
 
-    # 时钟
+    # Clock
     def now(self):
         return time.monotonic()
 
@@ -220,7 +176,7 @@ class Ctx:
     def pid(self):
         return os.getpid()
 
-    # 命令：名字换成绝对路径，环境变量只给最小的一份
+    # Subprocess commands with minimal env
     def run(self, argv, input=None, timeout=15.0):
         exe = BIN.get(argv[0], argv[0])
         try:
@@ -231,8 +187,7 @@ class Ctx:
         return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
 
     def run_robotctl(self, argv, timeout):
-        """跑官方 robotctl，并把「超时被杀」单独报出来（run 会把 TimeoutExpired 折成 127）。
-        返回 (rc, stdout, stderr, timed_out)；超时时 rc=None。"""
+        """Run /usr/local/bin/robotctl; returns (rc, stdout, stderr, timed_out)."""
         try:
             r = subprocess.run(list(argv), input=None, capture_output=True, timeout=timeout, env=CHILD_ENV)
         except subprocess.TimeoutExpired as e:
@@ -243,13 +198,13 @@ class Ctx:
                 r.stderr.decode("utf-8", "replace"), False)
 
     def relay(self, argv, data, on_line):
-        """跑 argv，把 data 喂进 stdin，子进程的每一行交给 on_line。返回退出码。"""
+        """Run argv with stdin data, streaming stdout lines to on_line. Returns exit code."""
         exe = BIN.get(argv[0], argv[0])
         try:
             proc = subprocess.Popen([exe] + list(argv[1:]), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, env=CHILD_ENV)
         except OSError as e:
-            on_line(json.dumps({"step": "detach", "level": "error", "msg": f"systemd-run 起不来：{e}"}).encode() + b"\n")
+            on_line(json.dumps({"step": "detach", "level": "error", "msg": f"systemd-run failed: {e}"}).encode() + b"\n")
             return 127
         try:
             proc.stdin.write(data)
@@ -260,7 +215,7 @@ class Ctx:
             on_line(line)
         return proc.wait()
 
-    # robotd 的 IPC：一行一个 JSON-RPC 2.0（格式照 studio/rpc.py）
+    # robotd JSON-RPC 2.0 over Unix socket
     def rpc(self, method, params=None, timeout=1.0):
         import socket
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -273,26 +228,26 @@ class Ctx:
             while b"\n" not in buf:
                 chunk = s.recv(65536)
                 if not chunk:
-                    raise RpcError(f"{method}：主程序关了连接")
+                    raise RpcError(f"{method}: robotd closed connection")
                 buf += chunk
                 if len(buf) > 4 * 1024 * 1024:
-                    raise RpcError(f"{method}：回包太长")
+                    raise RpcError(f"{method}: reply too large")
         except OSError as e:
-            raise RpcError(f"{method}：{type(e).__name__}: {e}") from e
+            raise RpcError(f"{method}: {type(e).__name__}: {e}") from e
         finally:
             s.close()
         try:
             msg = json.loads(buf.split(b"\n", 1)[0])
         except ValueError as e:
-            raise RpcError(f"{method}：回的不是 JSON") from e
+            raise RpcError(f"{method}: invalid JSON reply") from e
         if not isinstance(msg, dict):
-            raise RpcError(f"{method}：回的不是对象")
+            raise RpcError(f"{method}: expected JSON object")
         if "error" in msg:
-            raise RpcError(f"{method}：{msg.get('error')}")
+            raise RpcError(f"{method}: {msg.get('error')}")
         return msg.get("result")
 
     def startup_report(self, timeout=1.0):
-        """robot.startupSubscribe 的第一行就是完整的启动报告；读完就断开。"""
+        """Read first line from robot.startupSubscribe and close."""
         return self.rpc("robot.startupSubscribe", {}, timeout)
 
     def boot_id(self):
@@ -302,7 +257,7 @@ class Ctx:
         except OSError:
             return ""
 
-    # 锁
+    # Locks
     def lock(self, path):
         import fcntl
         fd = os.open(self.p(path), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
@@ -337,7 +292,7 @@ class Ctx:
 
 
 # ---------------------------------------------------------------------------
-# 文件：目录要是真目录（不是软链接），写入一律「同目录临时文件 + fsync + rename」
+# Atomic file writes (no symlinks)
 
 def ensure_dir(ctx, path, mode):
     full = ctx.p(path)
@@ -351,9 +306,9 @@ def ensure_dir(ctx, path, mode):
             pass
     st = os.lstat(full)
     if not stat.S_ISDIR(st.st_mode):
-        raise Stop(EXIT_FAIL, "error", f"{path} 不是目录（可能是软链接），不敢往里写")
+        raise Stop(EXIT_FAIL, "error", f"{path} is not a real directory (possible symlink)")
     if ctx.check_owner and st.st_uid != 0:
-        raise Stop(EXIT_FAIL, "error", f"{path} 的属主不是 root，不敢往里写")
+        raise Stop(EXIT_FAIL, "error", f"{path} is not owned by root")
     try:
         os.chmod(full, mode)
     except OSError:
@@ -369,7 +324,7 @@ def write_atomic(ctx, path, data, mode, uid=None, gid=None):
     _tmp_seq[0] += 1
     tmp = f"{d}/.{os.path.basename(path)}.{ctx.pid()}.{_tmp_seq[0]}.tmp"
     flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-             | getattr(os, "O_BINARY", 0))          # Windows 上 os.open 默认文本模式，会把 TOML 的换行写成 CRLF
+             | getattr(os, "O_BINARY", 0))          # Preserve LF on Windows
     fd = os.open(ctx.p(tmp), flags, mode)
     try:
         view = memoryview(data)
@@ -438,7 +393,7 @@ def append_oplog(ctx, row):
 
 
 # ---------------------------------------------------------------------------
-# 一次动词：进度、日志、结果
+# Verb operation progress, logging, and result
 
 class Op:
     def __init__(self, ctx, verb):
@@ -460,7 +415,7 @@ class Op:
         try:
             self.ctx.stdout.write(raw)
             self.ctx.stdout.flush()
-        except (OSError, ValueError):       # 对方关了管道（SIGPIPE 已忽略，这里拿到的是 EPIPE）
+        except (OSError, ValueError):       # Broken stdout pipe
             self.stdout_dead = True
 
     def emit(self, step, level, msg, detail=None):
@@ -473,7 +428,7 @@ class Op:
         try:
             self.ctx.run(["logger", "-t", "microduck-helper", "--",
                           f"[{self.verb}] {step} {level}: {msg}"], timeout=3.0)
-        except Exception:  # noqa: BLE001 —— journal 写不进去也接着做
+        except Exception:  # noqa: BLE001  # Continue even if journal write fails
             pass
 
     def finish(self, code, result, reason=None, detail=None, record=True):
@@ -484,7 +439,7 @@ class Op:
         elif self.verb == "robotd-update" and reason is not None:
             done["reason"] = reason
         self.emit("done", level, reason or result, done)
-        if record:                       # 探测用的坏动词（bus-nope）照样回 done，但不覆盖 last-result / oplog
+        if record:                       # Probe bad_verb does not overwrite last-result/oplog
             row = {"verb": self.verb, "version": VERSION, "result": result, "exit": code, "reason": reason,
                    "detail": detail, "by": self.by, "ms": self.ms(), "mono_ms": int(self.ctx.now() * 1000),
                    "boot_id": self.ctx.boot_id(), "request_id": self.request_id, "wall": time.time(),
@@ -499,11 +454,11 @@ class Op:
         self.release_lock()
         return code
 
-    def take_lock(self, what="总线操作", path=None):
+    def take_lock(self, what="bus operation", path=None):
         ensure_dir(self.ctx, HELPER_DIR, 0o755)
         self.lock_handle = self.ctx.lock(path or LOCK)
         if self.lock_handle is None:
-            raise Stop(EXIT_BUSY, "busy", f"小助手正在跑另一个{what}，等它跑完")
+            raise Stop(EXIT_BUSY, "busy", f"Helper is busy with another {what}; please wait")
 
     def release_lock(self):
         if self.service_lock_handle is not None:
@@ -555,26 +510,26 @@ def is_enabled(op, unit):
 def guard_installed(op):
     paths = show(op, "robotd", ["DropInPaths"]).get("DropInPaths", "")
     if DROPIN_NAME not in paths.split() and not any(p.endswith("/" + DROPIN_NAME) for p in paths.split()):
-        raise Stop(EXIT_STATE, "no_guard", "保护没装好：robotd 的 drop-in zzzz-studio-bus.conf 没生效（装了要 daemon-reload）。"
-                                            "不装的话接管以后主程序可能被拉起来，两边同时写总线",
+        raise Stop(EXIT_STATE, "no_guard", "Guard not active: zzzz-studio-bus.conf drop-in not loaded (run daemon-reload)."
+                                            " Without it, robotd may restart during servo takeover.",
                    {"DropInPaths": paths})
     if not exists(op.ctx, DROPIN):
-        raise Stop(EXIT_STATE, "no_guard", f"保护没装好：{DROPIN} 不在")
+        raise Stop(EXIT_STATE, "no_guard", f"Guard missing: {DROPIN} not found")
 
 
-# 管理锁：临时单元 microduck-bus-hold 一直拿着 /run/microduck-service-management.lock
+# Service management lock held by transient microduck-bus-hold unit
 
 def hold_active(op):
     return show(op, HOLD_UNIT, ["ActiveState"]).get("ActiveState") == "active"
 
 
 def hold_start(op):
-    """起 microduck-bus-hold。返回 True = 起来了并且站住了。flock -n 拿不到锁会马上退出，所以隔两次查 active。"""
+    """Start microduck-bus-hold transient unit and confirm it holds the lock."""
     rc, _, err = op.ctx.run(["systemd-run", f"--unit={HOLD_UNIT}", "--collect", "--quiet",
                              "--description=Microduck Studio holds the service-management lock while it owns the servo bus",
                              BIN["flock"], "-n", SERVICE_LOCK, BIN["sleep"], "infinity"])
     if rc != 0:
-        op.emit("lock", "warn", "起管理锁单元失败", {"rc": rc, "stderr": err.strip()[:300]})
+        op.emit("lock", "warn", "Failed to start management lock unit", {"rc": rc, "stderr": err.strip()[:300]})
         return False
     for _ in range(2):
         op.ctx.sleep(HOLD_CONFIRM_GAP)
@@ -588,7 +543,7 @@ def hold_stop(op):
     op.ctx.run(["systemctl", "stop", HOLD_UNIT])
 
 
-# 旗
+# Bus-held flag
 
 def flag_present(ctx):
     return exists(ctx, FLAG)
@@ -602,55 +557,54 @@ def flag_write(op, why):
 
 
 def port_free(op):
-    """fuser 的退出码：0 = 有进程开着，1 = 没人开。别的 = 查不了。"""
+    """fuser exit code: 0 = in use, 1 = free, other = error."""
     rc, out, err = op.ctx.run(["fuser", PORT])
     if rc == 1:
         return True, None
     if rc == 0:
         return False, (out + " " + err).strip()
-    return None, f"fuser 退出码 {rc}：{(err or out).strip()[:200]}"
+    return None, f"fuser exit {rc}: {(err or out).strip()[:200]}"
 
 
 def stop_robotd(op, step="stop"):
-    """停 robotd：--no-block，每 100 ms 查一次，10 秒后 KILL。KILL 之前旗必须已经立好（Restart=always 要靠它挡）。
-    SIGTERM 和 KILL 都不写扭矩（fork robotd/src/main.rs:1218-1231、4185-4186）。"""
+    """Stop robotd (--no-block, poll 100ms, SIGKILL after 10s). Bus-held flag must be set first."""
     st = robotd_state(op)
     if stopped(st):
-        op.emit(step, "info", "主程序本来就没在跑", st)
+        op.emit(step, "info", "robotd was already stopped", st)
         return True
     if not flag_present(op.ctx):
-        flag_write(op, "停主程序之前补立旗")
+        flag_write(op, "Set bus-held flag before stopping robotd")
     op.ctx.run(["systemctl", "stop", "--no-block", "robotd"])
     deadline = op.ctx.now() + STOP_WAIT
     while op.ctx.now() < deadline:
         op.ctx.sleep(POLL)
         st = robotd_state(op)
         if stopped(st):
-            op.emit(step, "info", "主程序停下了（SIGTERM，不写扭矩）", st)
+            op.emit(step, "info", "robotd stopped (SIGTERM, torque untouched)", st)
             return True
-    op.emit(step, "warn", f"主程序 {STOP_WAIT:.0f} 秒没停下，KILL（KILL 也不写扭矩）", st)
+    op.emit(step, "warn", f"robotd did not stop within {STOP_WAIT:.0f}s; sending SIGKILL", st)
     if not flag_present(op.ctx):
-        flag_write(op, "KILL 之前补立旗")
+        flag_write(op, "Set bus-held flag before SIGKILL")
     op.ctx.run(["systemctl", "kill", "-s", "KILL", "robotd"])
     deadline = op.ctx.now() + KILL_WAIT
     while op.ctx.now() < deadline:
         op.ctx.sleep(POLL)
         st = robotd_state(op)
         if stopped(st):
-            op.emit(step, "info", "主程序 KILL 以后停了", st)
+            op.emit(step, "info", "robotd stopped after SIGKILL", st)
             return True
-    op.emit(step, "error", "主程序 KILL 以后还没停", st)
+    op.emit(step, "error", "robotd still running after SIGKILL", st)
     return False
 
 
-# 手柄：padd、gamesir-xboxd
+# Gamepad services: padd, gamesir-xboxd
 
 def pads_stop(op):
     was = {"padd": is_active(op, "padd"), "gamesir": is_active(op, GAMESIR)}
     for unit in ("padd", GAMESIR):
         if was["padd" if unit == "padd" else "gamesir"]:
             op.ctx.run(["systemctl", "stop", unit])
-    op.emit("pads", "info", "先停手柄服务：判完状态到停主程序之间，手柄不能再把策略打开", was)
+    op.emit("pads", "info", "Stopped gamepad services before stopping robotd", was)
     return was
 
 
@@ -659,24 +613,24 @@ def pads_restore(op, was):
         op.ctx.run(["systemctl", "start", "--no-block", "padd"])
     if was.get("gamesir"):
         op.ctx.run(["systemctl", "start", "--no-block", GAMESIR])
-    op.emit("pads", "info", "手柄服务恢复成原来的样子", was)
+    op.emit("pads", "info", "Restored gamepad services", was)
 
 
 def pads_start(op):
-    """交还以后：padd 拉起（它自己的 startup_gate 会等 robotd 四步都 success）；gamesir 只在 enabled 时拉。"""
+    """Start padd (and gamesir-xboxd if enabled) after handback."""
     op.ctx.run(["systemctl", "reset-failed", "padd"])
     op.ctx.run(["systemctl", "start", "--no-block", "padd"])
     gs = is_enabled(op, GAMESIR)
     if gs:
         op.ctx.run(["systemctl", "start", "--no-block", GAMESIR])
-    op.emit("pads", "info", "手柄服务拉起来了", {"padd": True, "gamesir": gs})
+    op.emit("pads", "info", "Started gamepad services", {"padd": True, "gamesir": gs})
 
 
 # ---------------------------------------------------------------------------
-# 写进主程序的标定：组 TOML / 校验。studio/commit.py 里有逐字相同的一份（tests/test_commit.py 核对两边输出一样）。
+# Calibration TOML builder/validator (matches studio/commit.py).
 
 class CalibError(Exception):
-    """要写进主程序的这份标定没过 robotd 的校验。消息直接给人看。"""
+    """Raised when calibration fails robotd validation."""
 
 
 JOINT_ORDER = (
@@ -689,14 +643,14 @@ JOINT_ID = {
     "neck_pitch": 30, "head_pitch": 31, "head_yaw": 32, "head_roll": 33, "mouth": 34,
     "right_hip_yaw": 10, "right_hip_roll": 11, "right_hip_pitch": 12, "right_knee": 13, "right_ankle": 14,
 }
-# fork robotd 的官方 HOME（deployment.rs 的 DEFAULT_POSITION），按 JOINT_ORDER
+# Official robotd HOME (deployment.rs DEFAULT_POSITION), ordered by JOINT_ORDER
 HOME_RAD = {
     "left_hip_yaw": 0.0, "left_hip_roll": -0.0873, "left_hip_pitch": -0.4579, "left_knee": -0.0049,
     "left_ankle": 0.453, "neck_pitch": 0.3491, "head_pitch": 0.3491, "head_yaw": 0.0, "head_roll": 0.0,
     "mouth": 0.0, "right_hip_yaw": 0.0, "right_hip_roll": 0.0873, "right_hip_pitch": 0.4579,
     "right_knee": 0.0049, "right_ankle": -0.453,
 }
-# 真鸭子上用的标准限位（度）：左右髋偏航是镜像的
+# Standard joint limits (deg): left/right hip yaw are mirrored
 LIMITS_DEG = {
     "left_hip_yaw": (-25.0, 30.0), "left_hip_roll": (-22.0, 22.0), "left_hip_pitch": (-90.0, 90.0),
     "left_knee": (-90.0, 90.0), "left_ankle": (-70.0, 70.0),
@@ -706,24 +660,33 @@ LIMITS_DEG = {
     "right_knee": (-90.0, 90.0), "right_ankle": (-70.0, 70.0),
 }
 IMU_SOURCES = ("bus", "bno08x", "lsm6dsv16x")
-CHIP_CN = {"bus": "总线小板（ID 200）", "bno08x": "BNO085（I²C）", "lsm6dsv16x": "LSM6DSV16X（I²C）"}
-DEFAULT_BUS_QUAT = [math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0]     # fork imu.rs: SflpDecoder::DEFAULT_MOUNT
+CHIP_CN = {"bus": "Bus IMU (ID 200)", "bno08x": "BNO085 (I2C)", "lsm6dsv16x": "LSM6DSV16X (I2C)"}
+DEFAULT_BUS_QUAT = [math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0]     # SflpDecoder::DEFAULT_MOUNT
+# Fallback default IMU mounts when step 2 was skipped/completed without IMU calibration
+DEFAULT_MOUNTS = {
+    "bno08x": [0.5, 0.5, 0.5, 0.5],                                  # BNO08X_DEFAULT_MOUNT
+    # Recommended replica mount: module x down, z forward
+    "lsm6dsv16x": [0.7071067811865476, 0.0, 0.7071067811865476, 0.0],
+}
+DEFAULT_HOW = {"bus": "Factory mount", "bno08x": "Default fork mount", "lsm6dsv16x": "Replica mount (x down, z forward)"}
 TOP_KEYS = ("motion_enabled", "imu_mount_verified", "imu_mount_quat", "imu_bus_protocol", "imu_bus_profile", "current_ma_per_count", "units_verified")
 TAU = 2.0 * math.pi
 
 SERVO_CENTERED = "servo-centered.json"
 IMU_PENDING = "imu-pending.json"
+COMMIT_LAST = "commit-last.json"
+COMMIT_WAIT_S = 180.0
 
 
 class CalibError(Exception):
-    """要写进主程序的这份标定没过 robotd 的校验。消息直接给页面 / 人看。"""
+    """Calibration failed robotd validation; message is user-facing."""
 
 
 class Refused(Exception):
-    """现在不能做（准备没齐、读不到标定、小助手不在）。原因直接给页面看。"""
+    """Commit cannot proceed (prerequisites missing, calibration unreadable, or helper absent)."""
 
 
-# ---------------- 组 TOML / 校验（小助手里有逐字相同的一份） ----------------
+# ---------------- Build / Validate TOML (mirrored in helper) ----------------
 
 def _is_int(v):
     return isinstance(v, int) and not isinstance(v, bool)
@@ -735,16 +698,16 @@ def _is_num(v):
 
 def _quat(q, what):
     if not isinstance(q, (list, tuple)) or len(q) != 4 or not all(_is_num(x) for x in q):
-        raise CalibError(f"{what} 要是 [w, x, y, z] 四个有限数")
+        raise CalibError(f"{what} must be 4 finite numbers [w, x, y, z]")
     return [float(x) for x in q]
 
 
 def normalize_quat(q):
-    """单位化；零向量、nan、inf 都拒。误差 1e-6 之内才算数（跟 robotd 一样）。"""
-    v = _quat(q, "四元数")
+    """Normalize quaternion; reject zero-vector, NaN, and Inf."""
+    v = _quat(q, "Quaternion")
     n = math.sqrt(sum(x * x for x in v))
     if not math.isfinite(n) or n <= 1e-12:
-        raise CalibError("四元数是零向量，没法归一化")
+        raise CalibError("Quaternion is zero; cannot normalize")
     return [x / n for x in v]
 
 
@@ -757,55 +720,50 @@ def _bool_text(v):
 
 
 def build_calibration(current, joints, imu, joint_mode="recorded"):
-    """按现在文件里的 name / id，加这次的方向和 IMU 方向，组一份完整的标定。
-
-    current：现在文件的字典（calibration-status 里的 calibration，或者 tomllib 读出来的）；
-    joints：[{"id": int, "direction": 1|-1}, ... 15 个]；
-    imu：{"source": "bus"|"bno08x"|"lsm6dsv16x", "quat": [w,x,y,z]}。
-    """
+    """Build a complete calibration dict from current robotd calibration + new joint directions and IMU mount."""
     if not isinstance(current, dict):
-        raise CalibError("主程序现在的标定文件不是一个对象")
+        raise CalibError("Current robotd calibration is not an object")
     rows = current.get("joints")
     if not isinstance(rows, list):
-        raise CalibError("主程序现在的标定文件里没有 joints")
+        raise CalibError("Current robotd calibration is missing joints")
     by_name = {}
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("name"), str):
-            raise CalibError("主程序现在的标定文件里有一行关节没有 name")
+            raise CalibError("A joint entry in robotd calibration is missing 'name'")
         name = row["name"]
         if name not in JOINT_ID:
-            raise CalibError(f"主程序现在的标定文件里有不认识的关节：{name}")
+            raise CalibError(f"Unknown joint in robotd calibration: {name}")
         if name in by_name:
-            raise CalibError(f"主程序现在的标定文件里 {name} 出现了两次")
+            raise CalibError(f"Duplicate joint in robotd calibration: {name}")
         by_name[name] = row
     if set(by_name) != set(JOINT_ORDER):
         missing = [n for n in JOINT_ORDER if n not in by_name]
-        raise CalibError("主程序现在的标定文件不是 15 颗官方关节" + (f"（少了 {', '.join(missing)}）" if missing else ""))
+        raise CalibError("robotd calibration does not match the 15 official joints" + (f" (missing {', '.join(missing)})" if missing else ""))
 
     if not isinstance(joints, list) or len(joints) != 15:
-        raise CalibError("joints 要正好 15 个 {id, direction}")
+        raise CalibError("joints must contain exactly 15 {id, direction} entries")
     dirs = {}
     centered_ids = set()
     for row in joints:
         if not isinstance(row, dict) or not _is_int(row.get("id")) or row.get("direction") not in (-1, 1):
-            raise CalibError("joints 的每一行要是 {id: 整数, direction: 1 或 -1}")
+            raise CalibError("Each joint entry must be {id: int, direction: 1 or -1}")
         if row["id"] in dirs:
-            raise CalibError(f"joints 里 id {row['id']} 出现了两次")
+            raise CalibError(f"Duplicate joint id {row['id']}")
         dirs[row["id"]] = row["direction"]
         if joint_mode == "recorded" and row.get("centered") is True:
             centered_ids.add(row["id"])
     file_ids = {row.get("id") for row in by_name.values()}
     if set(dirs) != file_ids:
-        raise CalibError(f"这次的 15 颗（{sorted(dirs)}）跟主程序文件里的（{sorted(file_ids, key=str)}）对不上")
+        raise CalibError(f"Provided 15 joint IDs ({sorted(dirs)}) do not match robotd file ({sorted(file_ids, key=str)})")
 
     if joint_mode not in ("recorded", "keep", "imu_only"):
-        raise CalibError("不认识的舵机标定写入方式")
+        raise CalibError("Unknown joint calibration write mode")
     out_joints = []
     for name in JOINT_ORDER:
         src = by_name[name]
         jid = src.get("id")
         if not _is_int(jid):
-            raise CalibError(f"{name} 的 id 不是整数")
+            raise CalibError(f"{name} id is not an integer")
         row = dict(src)
         if joint_mode == "recorded":
             row["direction"] = dirs[jid]
@@ -833,11 +791,11 @@ def build_calibration(current, joints, imu, joint_mode="recorded"):
     if "imu_bus_protocol" in current:
         protocol = current["imu_bus_protocol"]
         if protocol not in ("feetech", "dxl2"):
-            raise CalibError("imu_bus_protocol 只能是 feetech 或 dxl2（由主程序验证后写入）")
+            raise CalibError("imu_bus_protocol must be 'feetech' or 'dxl2'")
         out["imu_bus_protocol"] = protocol
     if "imu_bus_profile" in current:
         if current["imu_bus_profile"] not in ("legacy", "qinmo"):
-            raise CalibError("imu_bus_profile 只能是 legacy 或 qinmo")
+            raise CalibError("imu_bus_profile must be 'legacy' or 'qinmo'")
         out["imu_bus_profile"] = current["imu_bus_profile"]
 
     raw_mounts = current.get("imu_mounts")
@@ -847,17 +805,17 @@ def build_calibration(current, joints, imu, joint_mode="recorded"):
             if mount is None:
                 continue
             if not isinstance(mount, dict):
-                raise CalibError(f"imu_mounts.{kind} 不是一个对象")
+                raise CalibError(f"imu_mounts.{kind} must be an object")
             out["imu_mounts"][kind] = {"quat": _quat(mount.get("quat"), f"imu_mounts.{kind}.quat"),
                                        "verified": bool(mount.get("verified", False))}
 
     if joint_mode == "imu_only":
         out = {**current, "imu_mounts": dict(current.get("imu_mounts") or {})}
     if not isinstance(imu, dict):
-        raise CalibError("imu 要是一个对象")
+        raise CalibError("imu must be an object")
     source = imu.get("source")
     if source not in IMU_SOURCES:
-        raise CalibError(f"imu.source 只能是 bus / bno08x / lsm6dsv16x，现在是 {source!r}")
+        raise CalibError(f"imu.source must be bus / bno08x / lsm6dsv16x, got {source!r}")
     quat = normalize_quat(imu.get("quat"))
     if source == "bus":
         out["imu_mount_quat"], out["imu_mount_verified"] = quat, True
@@ -871,97 +829,97 @@ def _raw_position(zero_raw, radians, direction):
 
 
 def validate_calibration(cal, source=None):
-    """照 fork robotd 的 Calibration::validate 一条一条查。不过就抛 CalibError，说清哪颗、哪条。"""
+    """Validate against robotd Calibration::validate rules; raises CalibError with details."""
     if not isinstance(cal, dict):
-        raise CalibError("标定不是一个对象")
+        raise CalibError("Calibration must be an object")
     allowed = set(TOP_KEYS) | {"imu_mounts", "joints"}
     extra = sorted(set(cal) - allowed)
     if extra:
-        raise CalibError(f"顶层有不认识的键：{extra}（robotd 会拒绝整个文件）")
+        raise CalibError(f"Unknown top-level keys: {extra} (robotd will reject the file)")
 
     if not isinstance(cal.get("motion_enabled"), bool):
-        raise CalibError("motion_enabled 要是 true / false")
+        raise CalibError("motion_enabled must be true or false")
     if not isinstance(cal.get("imu_mount_verified"), bool):
-        raise CalibError("imu_mount_verified 要是 true / false")
+        raise CalibError("imu_mount_verified must be true or false")
     if "imu_bus_protocol" in cal and cal["imu_bus_protocol"] not in ("feetech", "dxl2"):
-        raise CalibError("imu_bus_protocol 只能是 feetech 或 dxl2")
+        raise CalibError("imu_bus_protocol must be 'feetech' or 'dxl2'")
     if "imu_bus_profile" in cal and cal["imu_bus_profile"] not in ("legacy", "qinmo"):
-        raise CalibError("imu_bus_profile 只能是 legacy 或 qinmo")
+        raise CalibError("imu_bus_profile must be 'legacy' or 'qinmo'")
     if cal.get("imu_bus_profile") == "qinmo" and cal.get("imu_bus_protocol", "feetech") != "feetech":
-        raise CalibError("Qinmo 只支持 Feetech")
+        raise CalibError("Qinmo profile only supports Feetech protocol")
     if not _is_num(cal.get("current_ma_per_count")):
-        raise CalibError("current_ma_per_count 要是有限数")
+        raise CalibError("current_ma_per_count must be a finite number")
     if not isinstance(cal.get("units_verified"), bool):
-        raise CalibError("units_verified 要是 true / false")
+        raise CalibError("units_verified must be true or false")
 
     bus_q = _quat(cal.get("imu_mount_quat"), "imu_mount_quat")
     mounts = cal.get("imu_mounts")
     mounts = mounts if isinstance(mounts, dict) else {}
     if set(mounts) - {"bno08x", "lsm6dsv16x"}:
-        raise CalibError(f"imu_mounts 里有不认识的来源：{sorted(set(mounts) - {'bno08x', 'lsm6dsv16x'})}")
-    checked = [("总线小板", bus_q)]
+        raise CalibError(f"Unknown IMU sources in imu_mounts: {sorted(set(mounts) - {'bno08x', 'lsm6dsv16x'})}")
+    checked = [("Bus IMU", bus_q)]
     for kind in ("bno08x", "lsm6dsv16x"):
         mount = mounts.get(kind)
         if mount is None:
             continue
         if not isinstance(mount, dict):
-            raise CalibError(f"imu_mounts.{kind} 不是一个对象")
+            raise CalibError(f"imu_mounts.{kind} must be an object")
         if not isinstance(mount.get("verified"), bool):
-            raise CalibError(f"imu_mounts.{kind}.verified 要是 true / false")
+            raise CalibError(f"imu_mounts.{kind}.verified must be true or false")
         checked.append((CHIP_CN[kind], _quat(mount.get("quat"), f"imu_mounts.{kind}.quat")))
     for label, q in checked:
         norm = sum(x * x for x in q)
         if not math.isfinite(norm) or abs(norm - 1.0) > 1e-6:
-            raise CalibError(f"{label} 的安装方向四元数不是单位长度（误差要 ≤ 1e-6，现在是 {norm - 1.0:+.2e}）")
+            raise CalibError(f"{label} mount quaternion is not unit length (error {norm - 1.0:+.2e}, max 1e-6)")
 
     if cal.get("units_verified") and float(cal["current_ma_per_count"]) <= 0.0:
-        raise CalibError("units_verified = true 时 current_ma_per_count 必须是正数")
+        raise CalibError("current_ma_per_count must be positive when units_verified = true")
 
     joints = cal.get("joints")
     if not isinstance(joints, list) or len(joints) != 15:
-        raise CalibError("要正好 15 颗关节（官方顺序）")
+        raise CalibError("Exactly 15 joints (in official order) are required")
     seen = set()
     for i, name in enumerate(JOINT_ORDER):
         j = joints[i]
         if not isinstance(j, dict):
-            raise CalibError(f"{name}（第 {i + 1} 颗）不是一个对象")
+            raise CalibError(f"{name} (joint #{i + 1}) must be an object")
         if j.get("name") != name:
-            raise CalibError(f"第 {i + 1} 颗要是 {name}，现在是 {j.get('name')!r}（15 颗必须按官方顺序）")
+            raise CalibError(f"Joint #{i + 1} must be {name}, got {j.get('name')!r} (official order required)")
         jid = j.get("id")
         if not _is_int(jid) or jid >= 254 or jid == 200:
-            raise CalibError(f"{name}：id 要是小于 254 的整数、不能是 200（IMU 小板），现在是 {jid!r}")
+            raise CalibError(f"{name}: id must be < 254 and not 200 (IMU board), got {jid!r}")
         if jid in seen:
-            raise CalibError(f"{name}：id {jid} 跟前面重复了")
+            raise CalibError(f"{name}: duplicate id {jid}")
         seen.add(jid)
         zero = j.get("zero_raw")
         if not _is_int(zero) or not 0 <= zero <= 4095:
-            raise CalibError(f"{name}：zero_raw 要是 0–4095，现在是 {zero!r}")
+            raise CalibError(f"{name}: zero_raw must be 0-4095, got {zero!r}")
         direction = j.get("direction")
         if direction not in (-1, 1):
-            raise CalibError(f"{name}：direction 只能是 1 或 -1，现在是 {direction!r}")
+            raise CalibError(f"{name}: direction must be 1 or -1, got {direction!r}")
         if not isinstance(j.get("calibrated"), bool):
-            raise CalibError(f"{name}：calibrated 要是 true / false")
+            raise CalibError(f"{name}: calibrated must be true or false")
         lo, hi = j.get("min_rad"), j.get("max_rad")
         if lo is None and hi is None:
             if j.get("calibrated"):
-                raise CalibError(f"{name}：标了 calibrated 就必须有限位")
+                raise CalibError(f"{name}: limits are required when calibrated = true")
             continue
         if not (_is_num(lo) and _is_num(hi)):
-            raise CalibError(f"{name}：限位要两个都有、都是有限数")
+            raise CalibError(f"{name}: both min_rad and max_rad must be finite numbers")
         lo, hi = float(lo), float(hi)
         if not lo < hi:
-            raise CalibError(f"{name}：min_rad 要小于 max_rad（{lo:g} / {hi:g}）")
+            raise CalibError(f"{name}: min_rad must be < max_rad ({lo:g} / {hi:g})")
         for edge, value in (("min", lo), ("max", hi)):
             raw = _raw_position(zero, value, direction)
             if not math.isfinite(raw) or not 0.0 <= round(raw) <= 4095.0:
-                raise CalibError(f"{name}：{edge}_rad 换成的读数 {raw:.1f} 不在 0–4095（会跨过单圈边界）")
+                raise CalibError(f"{name}: {edge}_rad maps to raw {raw:.1f}, outside 0-4095")
         home = HOME_RAD[name]
         if not lo <= home <= hi:
-            raise CalibError(f"{name}：限位 {lo:.4f}–{hi:.4f} 没包住官方 HOME {home:.4f}")
+            raise CalibError(f"{name}: limits {lo:.4f}..{hi:.4f} do not include official HOME {home:.4f}")
 
     if cal.get("motion_enabled"):
         if any(not j.get("calibrated") or j.get("min_rad") is None or j.get("max_rad") is None for j in joints):
-            raise CalibError("motion_enabled = true 时 15 颗都要 calibrated 且有限位")
+            raise CalibError("All 15 joints must be calibrated with limits when motion_enabled = true")
         if source in ("bno08x", "lsm6dsv16x"):
             mount = mounts.get(source) or {}
             verified = bool(mount.get("verified")) if isinstance(mount, dict) else False
@@ -971,14 +929,14 @@ def validate_calibration(cal, source=None):
         else:
             verified = bool(cal.get("imu_mount_verified")) or any(
                 isinstance(m, dict) and m.get("verified") for m in mounts.values())
-            label = "正在用的那颗"
+            label = "active"
         if not verified:
-            raise CalibError(f"motion_enabled = true 时正在用的 {label} IMU 方向要 verified")
+            raise CalibError(f"Active {label} IMU mount must be verified when motion_enabled = true")
     return cal
 
 
 def render_calibration(cal):
-    """自己写 TOML：顶层键 → [imu_mounts.*] → [[joints]]。写完要再用 tomllib 读回来核对。"""
+    """Render calibration TOML: top-level keys -> [imu_mounts.*] -> [[joints]]."""
     lines = [
         f"motion_enabled = {_bool_text(cal.get('motion_enabled'))}",
         f"imu_mount_verified = {_bool_text(cal.get('imu_mount_verified'))}",
@@ -988,11 +946,11 @@ def render_calibration(cal):
     ]
     if "imu_bus_protocol" in cal:
         if cal["imu_bus_protocol"] not in ("feetech", "dxl2"):
-            raise CalibError("imu_bus_protocol 只能是 feetech 或 dxl2")
+            raise CalibError("imu_bus_protocol must be 'feetech' or 'dxl2'")
         lines.append(f'imu_bus_protocol = "{cal["imu_bus_protocol"]}"')
     if "imu_bus_profile" in cal:
         if cal["imu_bus_profile"] not in ("legacy", "qinmo"):
-            raise CalibError("imu_bus_profile 只能是 legacy 或 qinmo")
+            raise CalibError("imu_bus_profile must be 'legacy' or 'qinmo'")
         lines.append(f'imu_bus_profile = "{cal["imu_bus_profile"]}"')
     mounts = cal.get("imu_mounts") or {}
     for kind in ("bno08x", "lsm6dsv16x"):
@@ -1017,14 +975,14 @@ def render_calibration(cal):
 
 
 def normalized_calibration(cal):
-    """读回来以后比对用：空的 [imu_mounts] 不写出来，读回来就没有这个键。"""
+    """For round-trip comparison: empty [imu_mounts] is omitted when writing TOML."""
     out = dict(cal)
     out["imu_mounts"] = dict(cal.get("imu_mounts") or {})
     return out
 
 
 def same_calibration(a, b):
-    """逐项严格比：TOML 用 repr 写浮点，读回来一定一模一样。"""
+    """Strict structural comparison after TOML round-trip."""
     if isinstance(a, dict) and isinstance(b, dict):
         return set(a) == set(b) and all(same_calibration(a[k], b[k]) for k in a)
     if isinstance(a, list) and isinstance(b, list):
@@ -1036,8 +994,10 @@ def same_calibration(a, b):
     return a == b
 
 
+# ---------------- Studio State Files ----------------
+
 # ---------------------------------------------------------------------------
-# 参数校验
+# Argument validation
 
 def is_int(v):
     return isinstance(v, int) and not isinstance(v, bool)
@@ -1046,27 +1006,27 @@ def is_int(v):
 def check_by(args):
     by = args.get("by")
     if not isinstance(by, str) or not by.strip() or len(by) > 200:
-        raise Stop(EXIT_ARGS, "bad_args", "by 要是 1–200 个字的字符串（谁、从哪台电脑）")
+        raise Stop(EXIT_ARGS, "bad_args", "by must be a 1-200 char string")
     return by.strip()
 
 
 def check_keys(obj, allowed, what):
     extra = sorted(set(obj) - set(allowed))
     if extra:
-        raise Stop(EXIT_ARGS, "bad_args", f"{what} 里有不认识的键：{extra}")
+        raise Stop(EXIT_ARGS, "bad_args", f"Unknown keys in {what}: {extra}")
 
 
 def check_mac(value):
     if not isinstance(value, str):
-        raise Stop(EXIT_ARGS, "bad_args", "mac 要是像 AA:BB:CC:DD:EE:FF 的字符串")
+        raise Stop(EXIT_ARGS, "bad_args", "mac must be a string like AA:BB:CC:DD:EE:FF")
     mac = value.strip().upper()
     if not MAC_RE.match(mac):
-        raise Stop(EXIT_ARGS, "bad_args", f"mac 格式不对：{value!r}（要像 AA:BB:CC:DD:EE:FF）")
+        raise Stop(EXIT_ARGS, "bad_args", f"Invalid mac format: {value!r} (expected AA:BB:CC:DD:EE:FF)")
     return mac
 
 
 def check_pad_pair_args(args):
-    check_keys(args, ("by", "mac", "timeout"), "pad-pair 的参数")
+    check_keys(args, ("by", "mac", "timeout"), "pad-pair args")
     by = check_by(args)
     mac = args.get("mac")
     if mac is not None:
@@ -1074,15 +1034,15 @@ def check_pad_pair_args(args):
     timeout = args.get("timeout", PAD_TIMEOUT_DEFAULT)
     if not is_int(timeout) or not PAD_TIMEOUT_MIN <= timeout <= PAD_TIMEOUT_MAX:
         raise Stop(EXIT_ARGS, "bad_args",
-                   f"timeout 要是 {PAD_TIMEOUT_MIN}–{PAD_TIMEOUT_MAX} 的整数（秒，默认 {PAD_TIMEOUT_DEFAULT}）")
+                   f"timeout must be an int in {PAD_TIMEOUT_MIN}-{PAD_TIMEOUT_MAX}s (default {PAD_TIMEOUT_DEFAULT})")
     return by, mac, timeout
 
 
 def check_pad_forget_args(args):
-    check_keys(args, ("by", "mac"), "pad-forget 的参数")
+    check_keys(args, ("by", "mac"), "pad-forget args")
     by = check_by(args)
     if "mac" not in args:
-        raise Stop(EXIT_ARGS, "bad_args", "pad-forget 要 mac（要忘掉哪一个）")
+        raise Stop(EXIT_ARGS, "bad_args", "pad-forget requires mac")
     return by, check_mac(args["mac"])
 
 
@@ -1091,53 +1051,53 @@ JOINT_OPTIONAL = {"load": (-32767, 32767), "temp": (0, 255), "status": (0, 255)}
 
 
 def build_marker(op, given, by):
-    """校验 Studio 给的标记内容，填上 boot_id、mono_ms。ttl_ms 超过 30000 直接拒（不悄悄截断）。"""
+    """Validate handover marker from Studio and stamp boot_id and mono_ms."""
     if not isinstance(given, dict):
-        raise Stop(EXIT_ARGS, "bad_marker", "marker 要是一个对象")
+        raise Stop(EXIT_ARGS, "bad_marker", "marker must be an object")
     check_keys(given, ("schema", "requested_by", "ttl_ms", "port", "arm_registers", "joints", "boot_id", "mono_ms"),
                "marker")
     if "schema" in given and given["schema"] != SCHEMA:
-        raise Stop(EXIT_ARGS, "bad_marker", f"marker.schema 只认 {SCHEMA}")
+        raise Stop(EXIT_ARGS, "bad_marker", f"marker.schema must be {SCHEMA}")
     rb = given.get("requested_by", by)
     if not isinstance(rb, str) or not rb or len(rb) > 200:
-        raise Stop(EXIT_ARGS, "bad_marker", "marker.requested_by 要是 1–200 个字的字符串")
+        raise Stop(EXIT_ARGS, "bad_marker", "marker.requested_by must be a 1-200 char string")
     ttl = given.get("ttl_ms", TTL_DEFAULT_MS)
     if not is_int(ttl) or not TTL_MIN_MS <= ttl <= TTL_MAX_MS:
-        raise Stop(EXIT_ARGS, "bad_marker", f"marker.ttl_ms 要在 {TTL_MIN_MS}–{TTL_MAX_MS} 之间（robotd 最多认 30 秒）")
+        raise Stop(EXIT_ARGS, "bad_marker", f"marker.ttl_ms must be in {TTL_MIN_MS}-{TTL_MAX_MS}")
     port = given.get("port", PORT)
     if port != PORT:
-        raise Stop(EXIT_ARGS, "bad_marker", f"marker.port 只能是 {PORT}")
+        raise Stop(EXIT_ARGS, "bad_marker", f"marker.port must be {PORT}")
     arm = given.get("arm_registers")
     if arm is not None:
         if not isinstance(arm, dict) or set(arm) != {"limit", "p", "d"} or not all(is_int(v) for v in arm.values()) \
                 or not 0 <= arm["limit"] <= 65535 or not 0 <= arm["p"] <= 255 or not 0 <= arm["d"] <= 255:
-            raise Stop(EXIT_ARGS, "bad_marker", "marker.arm_registers 要是 {limit 0–65535, p 0–255, d 0–255}")
+            raise Stop(EXIT_ARGS, "bad_marker", "marker.arm_registers must be {limit 0-65535, p 0-255, d 0-255}")
     joints = given.get("joints")
     if not isinstance(joints, list) or len(joints) != 15:
-        raise Stop(EXIT_ARGS, "bad_marker", "marker.joints 要正好 15 行")
+        raise Stop(EXIT_ARGS, "bad_marker", "marker.joints must have 15 entries")
     seen, rows = set(), []
     for j in joints:
         if not isinstance(j, dict):
-            raise Stop(EXIT_ARGS, "bad_marker", "marker.joints 每一行要是对象")
-        check_keys(j, JOINT_REQUIRED + tuple(JOINT_OPTIONAL), "marker.joints 的一行")
+            raise Stop(EXIT_ARGS, "bad_marker", "Each marker.joints entry must be an object")
+        check_keys(j, JOINT_REQUIRED + tuple(JOINT_OPTIONAL), "marker.joints entry")
         for k in JOINT_REQUIRED:
             if not is_int(j.get(k)):
-                raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints：{k} 要是整数（{j.get('id')}）")
+                raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints: {k} must be int ({j.get('id')})")
         jid = j["id"]
         if jid not in JOINT_IDS or jid in seen:
-            raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints：id {jid} 不在 15 颗里，或者重复了")
+            raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints: invalid or duplicate id {jid}")
         seen.add(jid)
         if j["torque"] != 1:
-            raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints：#{jid} 没上力（torque 要是 1）。主程序只接手 15 颗全开的")
+            raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints: #{jid} torque must be 1")
         for k in ("goal", "present", "offset"):
             if not -32767 <= j[k] <= 32767:
-                raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints：#{jid} 的 {k} 超出 −32767..32767")
+                raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints: #{jid} {k} out of range -32767..32767")
         for k, (lo, hi) in JOINT_OPTIONAL.items():
             if k in j and (not is_int(j[k]) or not lo <= j[k] <= hi):
-                raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints：#{jid} 的 {k} 要是 {lo}..{hi} 的整数")
+                raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints: #{jid} {k} must be int in {lo}..{hi}")
         rows.append({k: j[k] for k in JOINT_REQUIRED + tuple(JOINT_OPTIONAL) if k in j})
     if seen != JOINT_IDS:
-        raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints 少了 {sorted(JOINT_IDS - seen)}")
+        raise Stop(EXIT_ARGS, "bad_marker", f"marker.joints missing {sorted(JOINT_IDS - seen)}")
     out = {"schema": SCHEMA, "requested_by": rb, "boot_id": op.ctx.boot_id(), "mono_ms": int(op.ctx.now() * 1000),
            "ttl_ms": ttl, "port": PORT, "joints": rows}
     if arm is not None:
@@ -1146,43 +1106,43 @@ def build_marker(op, given, by):
 
 
 # ---------------------------------------------------------------------------
-# 接管的门槛（handover-plan.md §2.1）
+# Takeover gate
 
 def judge(bus, safe, pol, allow_seated):
-    """一次读数的判决：("ok"|"seated"|"wait"|"refuse", 原因)。"""
+    """Evaluate one busStatus reading: ("ok"|"seated"|"wait"|"refuse", reason)."""
     if not isinstance(bus, dict):
-        return "refuse", "主程序回的 busStatus 不是对象"
+        return "refuse", "robotd busStatus is not an object"
     phase, mode = bus.get("phase"), bus.get("mode")
     if phase in STARTING_PHASES:
-        return "ok", f"主程序还在启动阶段（{phase}），没发过目标"
+        return "ok", f"robotd still booting ({phase}), no target sent"
     if mode == "commissioning":
-        return "ok", "标定模式"
+        return "ok", "Commissioning mode"
     if mode != "motion" or phase != "control":
-        return "refuse", f"看不懂主程序现在的状态（mode={mode}，phase={phase}）"
+        return "refuse", f"Unrecognized robotd state (mode={mode}, phase={phase})"
     native = bus.get("native") if isinstance(bus.get("native"), dict) else {}
     torque = native.get("torque_state_confirmed")
     sitting = isinstance(pol, dict) and pol.get("sitting") is True
     if bus.get("policy_enabled") is True:
         if sitting:
             if not allow_seated:
-                return "refuse", "坐着（策略在做坐姿），这次没允许坐姿接管"
+                return "refuse", "Duck is seated (policy active) and allow_seated is false"
             if not (isinstance(safe, dict) and safe.get("safe") is True):
-                return "refuse", "坐下或站起的动作还没做完（safeToRestart 不是 true）"
-            return "seated", "坐着，坐姿动作已经做完"
-        return "refuse", "策略在跑（站着、技能或身体姿态模式）：先按手柄 Start 或点「停下」，等它 2 秒平滑回站姿，再点接管"
+                return "refuse", "Sit/stand transition not finished (safeToRestart != true)"
+            return "seated", "Seated and settled"
+        return "refuse", "Policy is running: press Start or click Stop, wait 2s to return to stand, then retry"
     if bus.get("home_recovery") is True:
-        return "refuse", "LB 起身还没结束"
+        return "refuse", "Stand-up still in progress"
     if isinstance(safe, dict) and safe.get("safe") is False:
-        return "refuse", f"主程序说现在不能打断：{safe.get('reason')}"
+        return "refuse", f"robotd reports unsafe to interrupt: {safe.get('reason')}"
     if torque is False:
-        return "ok", "卸力着"
+        return "ok", "Torque is off"
     if native.get("handover_hold") is True:
-        return "ok", "主程序接手保持中"
+        return "ok", "robotd holding pose"
     if torque is True:
         if bus.get("homed") is True:
-            return "ok", "站姿保持（策略关着）"
-        return "wait", "正在回站姿"
-    return "refuse", "主程序没报扭矩状态（torque_state_confirmed 不知道）"
+            return "ok", "Standing hold (policy off)"
+        return "wait", "Returning to stand pose"
+    return "refuse", "robotd did not report torque_state_confirmed"
 
 
 def joint_positions(bus):
@@ -1195,7 +1155,7 @@ def joint_positions(bus):
 
 
 def read_robotd(op):
-    """busStatus（必须读到）、safeToRestart、policies（运动模式控制阶段才读）。"""
+    """Read busStatus, safeToRestart, and policies."""
     bus = op.ctx.rpc("robot.busStatus", {}, 1.0)
     try:
         safe = op.ctx.rpc("robot.safeToRestart", {}, 1.0)
@@ -1211,21 +1171,21 @@ def read_robotd(op):
 
 
 def gate(op, allow_seated):
-    """隔 200 ms 读两次，两次都满足才放行。正在回站姿最多等 3 秒。返回放行原因；不放行就抛 Stop(3)。"""
+    """Confirm takeover gate across two reads 200ms apart; raises Stop(3) if refused."""
     deadline = op.ctx.now() + HOMING_WAIT
     while True:
         if stopped(robotd_state(op)):
-            return "主程序没在跑"
+            return "robotd is not running"
         try:
             r1 = read_robotd(op)
             op.ctx.sleep(GATE_GAP)
             r2 = read_robotd(op)
         except RpcError as e:
             if stopped(robotd_state(op)):
-                return "主程序没在跑"
-            raise Stop(EXIT_STATE, "refused", f"主程序在跑，但不回话：{e}。等几秒再试") from e
+                return "robotd is not running"
+            raise Stop(EXIT_STATE, "refused", f"robotd is running but unresponsive: {e}") from e
         v1, v2 = judge(*r1, allow_seated), judge(*r2, allow_seated)
-        op.emit("gate", "info", "两次读主程序状态", {"first": v1, "second": v2})
+        op.emit("gate", "info", "Two robotd gate reads", {"first": v1, "second": v2})
         if v1[0] == "refuse" or v2[0] == "refuse":
             raise Stop(EXIT_STATE, "refused", (v2 if v2[0] == "refuse" else v1)[1])
         if v1[0] == v2[0] == "ok":
@@ -1233,22 +1193,18 @@ def gate(op, allow_seated):
         if v1[0] == v2[0] == "seated":
             a, b = joint_positions(r1[0]), joint_positions(r2[0])
             if set(a) != set(b) or len(a) != 15:
-                raise Stop(EXIT_STATE, "refused", "坐着，但读不全 15 颗关节的位置，判不了动没动")
+                raise Stop(EXIT_STATE, "refused", "Seated, but missing 15-joint positions to check stillness")
             moved = {jid: round(abs(a[jid] - b[jid]) * 57.29578, 2) for jid in a if abs(a[jid] - b[jid]) >= STILL_RAD}
             if moved:
-                raise Stop(EXIT_STATE, "refused", "坐着，但关节还在动（要 0.5 秒内每颗都 <1°）", {"moved_deg": moved})
-            return "坐着、不动：原样冻住坐姿"
+                raise Stop(EXIT_STATE, "refused", "Seated, but joints still moving (must be <1 deg over 0.5s)", {"moved_deg": moved})
+            return "Seated and still: freezing seated pose"
         if op.ctx.now() >= deadline:
-            raise Stop(EXIT_STATE, "refused", f"等了 {HOMING_WAIT:.0f} 秒还没到站姿保持：{v2[1]}")
+            raise Stop(EXIT_STATE, "refused", f"Did not reach stand hold within {HOMING_WAIT:.0f}s: {v2[1]}")
         op.ctx.sleep(GATE_GAP)
 
 
 # ---------------------------------------------------------------------------
-# calib-read / calib-commit：读标定，或者把舵机零位 / 方向 / IMU 方向写进 robotd 的标定文件
-#
-# 出厂镜像让主程序跑标定模式（--commissioning），第 3 步写成功时删掉镜像放的 drop-in，
-# 让主程序回到运动模式。成功不只看 mode=motion：还要 phase=control，并且 calibration-status
-# 读回来跟写进去的逐项一致。写文件从第一步开始无论哪里出错都先换回备份。
+# calib-read / calib-commit: read or commit servo/IMU calibration to robotd.
 
 CALIB_ERR = re.compile(
     r"(calibrat|motion_enabled|IMU mounting|motion requires|Feetech configuration|invalid Feetech|"
@@ -1256,7 +1212,7 @@ CALIB_ERR = re.compile(
 
 
 def check_calib_read_args(args):
-    check_keys(args, ("by",), "calib-read 的参数")
+    check_keys(args, ("by",), "calib-read args")
     return check_by(args) if "by" in args else None
 
 
@@ -1265,104 +1221,102 @@ def exec_start(op):
 
 
 def calib_mode(op, strict=True):
-    """commissioning = 镜像放的 drop-in 在；motion = 不在且 ExecStart 也没有 --commissioning。
-    ExecStart 有而 drop-in 不在：不是镜像设的，不敢自动删 / 切。calib-read 只读，strict=False
-    如实报 "foreign"，好让人看见现状；calib-commit 必须 strict=True 拒绝。"""
+    """Detect robotd mode (commissioning / motion / foreign)."""
     if exists(op.ctx, COMMISSIONING_DROPIN):
-        return "commissioning", "标定模式，写完要切运动模式"
+        return "commissioning", "Commissioning mode (will switch to motion after commit)"
     start = exec_start(op)
     if "--commissioning" in start:
         if strict:
             raise Stop(EXIT_STATE, "foreign_commissioning",
-                       "主程序的标定模式不是镜像设的，不敢自动切，去日志页导出诊断包",
+                       "robotd commissioning mode is not managed by the image drop-in; export diagnostics",
                        {"ExecStart": start, "commissioning_file": COMMISSIONING_DROPIN})
-        return "foreign", "ExecStart 里有 --commissioning，但镜像的 drop-in 不在（不是镜像设的，写入不敢自动切）"
-    return "motion", "运动模式，只换标定"
+        return "foreign", "ExecStart has --commissioning without managed drop-in"
+    return "motion", "Motion mode (updating calibration)"
 
 
 def calib_posture(bus):
-    """写标定前后的姿势门槛。只拦运动模式下策略在跑 / 还上着力的情况；标定模式照常放行。"""
+    """Check posture gate before committing calibration."""
     if not isinstance(bus, dict):
-        return "refuse", "主程序回的 busStatus 不是对象"
+        return "refuse", "robotd busStatus is not an object"
     mode, phase = bus.get("mode"), bus.get("phase")
     if mode == "commissioning":
-        return "ok", "标定模式"
+        return "ok", "Commissioning mode"
     if mode != "motion":
-        return "refuse", f"看不懂主程序现在的状态（mode={mode}，phase={phase}）"
+        return "refuse", f"Unrecognized robotd state (mode={mode}, phase={phase})"
     if phase in STARTING_PHASES:
-        return "ok", f"主程序还在启动阶段（{phase}）"
+        return "ok", f"robotd still booting ({phase})"
     if phase == "waiting_for_bus":
-        return "ok", "主程序还没打开舵机总线（没有策略在跑），可以重写标定"
+        return "ok", "robotd bus not open yet (no policy active); safe to write calibration"
     if phase != "control":
-        return "refuse", f"主程序现在不是控制阶段（phase={phase}）"
+        return "refuse", f"robotd not in control phase (phase={phase})"
     native = bus.get("native") if isinstance(bus.get("native"), dict) else {}
     if bus.get("policy_enabled") is True or native.get("torque_state_confirmed") is True:
-        return "refuse", "鸭子在走 / 站着：先坐下或卸力再写"
+        return "refuse", "Duck is walking/standing: sit or release torque first"
     if bus.get("home_recovery") is True:
-        return "refuse", "LB 起身还没结束：等它回站姿再写"
-    return "ok", "主程序在运动模式、没在走也没站着"
+        return "refuse", "Stand-up still in progress; wait until settled"
+    return "ok", "robotd in motion mode, idle and relaxed"
 
 
 def calib_gate(op, mode):
-    """隔 200 ms 读两次。commissioning 没有策略，按模式直接放行。"""
+    """Check calibration commit gate across two reads 200ms apart."""
     if mode == "commissioning":
-        op.emit("gate", "info", "标定模式：没有策略，照常写")
-        return "标定模式"
+        op.emit("gate", "info", "Commissioning mode: safe to write")
+        return "Commissioning mode"
     deadline = op.ctx.now() + HOMING_WAIT
     while True:
         if stopped(robotd_state(op)):
-            return "主程序没在跑"
+            return "robotd is not running"
         try:
             r1 = read_robotd(op)
             op.ctx.sleep(GATE_GAP)
             r2 = read_robotd(op)
         except RpcError as e:
             if stopped(robotd_state(op)):
-                return "主程序没在跑"
-            raise Stop(EXIT_STATE, "refused", f"主程序在跑，但不回话：{e}。等几秒再试") from e
+                return "robotd is not running"
+            raise Stop(EXIT_STATE, "refused", f"robotd is running but unresponsive: {e}") from e
         v1, v2 = calib_posture(r1[0]), calib_posture(r2[0])
-        op.emit("gate", "info", "两次读主程序姿势", {"first": v1, "second": v2})
+        op.emit("gate", "info", "Two robotd posture reads", {"first": v1, "second": v2})
         if v1[0] == "refuse" or v2[0] == "refuse":
             raise Stop(EXIT_STATE, "refused", (v2 if v2[0] == "refuse" else v1)[1])
         if v1[0] == v2[0] == "ok":
             return v2[1]
         if op.ctx.now() >= deadline:
-            raise Stop(EXIT_STATE, "refused", f"等了 {HOMING_WAIT:.0f} 秒还没法判断姿势：{v2[1]}")
+            raise Stop(EXIT_STATE, "refused", f"Could not verify posture within {HOMING_WAIT:.0f}s: {v2[1]}")
         op.ctx.sleep(GATE_GAP)
 
 
 def check_calib_commit_args(args):
-    check_keys(args, ("by", "joints", "imu", "dry_run", "joint_mode"), "calib-commit 的参数")
+    check_keys(args, ("by", "joints", "imu", "dry_run", "joint_mode"), "calib-commit args")
     joint_mode = args.get("joint_mode", "recorded")
     if joint_mode not in ("recorded", "keep", "imu_only"):
-        raise Stop(EXIT_ARGS, "bad_args", "joint_mode 不受支持")
+        raise Stop(EXIT_ARGS, "bad_args", "Unsupported joint_mode")
     by = check_by(args)
     joints = args.get("joints")
     if not isinstance(joints, list) or len(joints) != 15:
-        raise Stop(EXIT_ARGS, "bad_args", "joints 要正好 15 个 {id, direction}")
+        raise Stop(EXIT_ARGS, "bad_args", "joints must contain 15 {id, direction} entries")
     rows = []
     for row in joints:
         if not isinstance(row, dict):
-            raise Stop(EXIT_ARGS, "bad_args", "joints 的每一行要是对象")
-        check_keys(row, ("id", "direction", "centered") if joint_mode == "recorded" else ("id", "direction"), "joints 的一行")
+            raise Stop(EXIT_ARGS, "bad_args", "Each joints entry must be an object")
+        check_keys(row, ("id", "direction", "centered") if joint_mode == "recorded" else ("id", "direction"), "joints entry")
         if "centered" in row and row["centered"] is not True:
-            raise Stop(EXIT_ARGS, "bad_args", "centered 只能标记已实际校准的舵机")
+            raise Stop(EXIT_ARGS, "bad_args", "centered can only be set on calibrated servos")
         if not is_int(row.get("id")) or row.get("direction") not in (-1, 1):
-            raise Stop(EXIT_ARGS, "bad_args", "joints 的每一行要是 {id: 整数, direction: 1 或 -1}")
+            raise Stop(EXIT_ARGS, "bad_args", "Each joints entry must be {id: int, direction: 1 or -1}")
         rows.append(dict(row))
     imu = args.get("imu")
     if not isinstance(imu, dict):
-        raise Stop(EXIT_ARGS, "bad_args", "imu 要是一个对象")
-    check_keys(imu, ("source", "quat"), "imu 的参数")
+        raise Stop(EXIT_ARGS, "bad_args", "imu must be an object")
+    check_keys(imu, ("source", "quat"), "imu args")
     if imu.get("source") not in IMU_SOURCES:
-        raise Stop(EXIT_ARGS, "bad_args", "imu.source 只能是 bus / bno08x / lsm6dsv16x")
+        raise Stop(EXIT_ARGS, "bad_args", "imu.source must be bus / bno08x / lsm6dsv16x")
     try:
         quat = normalize_quat(imu.get("quat"))
     except CalibError as e:
-        raise Stop(EXIT_ARGS, "bad_args", f"imu.quat 不对：{e}") from e
+        raise Stop(EXIT_ARGS, "bad_args", f"Invalid imu.quat: {e}") from e
     dry = args.get("dry_run", False)
     if not isinstance(dry, bool):
-        raise Stop(EXIT_ARGS, "bad_args", "dry_run 要是 true / false")
+        raise Stop(EXIT_ARGS, "bad_args", "dry_run must be boolean")
     return by, rows, {"source": imu["source"], "quat": quat}, dry
 
 
@@ -1372,12 +1326,12 @@ def read_calibration(op):
             data = tomllib.load(f)
         st = os.stat(op.ctx.p(CALIB))
     except FileNotFoundError as e:
-        raise Stop(EXIT_STATE, "no_calibration", f"找不到主程序的标定文件：{CALIB}", {"path": CALIB}) from e
+        raise Stop(EXIT_STATE, "no_calibration", f"Calibration file not found: {CALIB}", {"path": CALIB}) from e
     except (OSError, tomllib.TOMLDecodeError) as e:
-        raise Stop(EXIT_STATE, "bad_calibration", f"主程序的标定文件读不出来：{type(e).__name__}: {e}",
+        raise Stop(EXIT_STATE, "bad_calibration", f"Failed to read calibration file: {type(e).__name__}: {e}",
                    {"path": CALIB}) from e
     if not isinstance(data, dict):
-        raise Stop(EXIT_STATE, "bad_calibration", "主程序的标定文件顶层不是对象", {"path": CALIB})
+        raise Stop(EXIT_STATE, "bad_calibration", "Calibration TOML root is not a table", {"path": CALIB})
     return data, st
 
 
@@ -1396,17 +1350,16 @@ def file_meta(ctx, path):
     except FileNotFoundError:
         return {"existed": False}, None
     except OSError as e:
-        raise Stop(EXIT_FAIL, "backup_failed", f"备份时读不到 {path}：{type(e).__name__}: {e}") from e
+        raise Stop(EXIT_FAIL, "backup_failed", f"Failed to read {path} for backup: {type(e).__name__}: {e}") from e
 
 
 def calib_backup(op):
-    """一组一个目录 calib-backups/<序号>-<时间>/：主文件、saved、commissioning（有就备）、manifest。
-    序号按已有目录最大值 +1，不看墙钟（板子没有 RTC）。只留最近 10 组。"""
+    """Back up calibration files and drop-in to calib-backups/<seq>-<utc>/ (keeps last 10)."""
     ensure_dir(op.ctx, CALIB_BACKUP_DIR, 0o700)
     try:
         names = os.listdir(op.ctx.p(CALIB_BACKUP_DIR))
     except OSError as e:
-        raise Stop(EXIT_FAIL, "backup_failed", f"列不出旧备份：{type(e).__name__}: {e}") from e
+        raise Stop(EXIT_FAIL, "backup_failed", f"Failed to list backups: {type(e).__name__}: {e}") from e
     seq = 0
     for name in names:
         m = re.match(r"^(\d{4,})-", name)
@@ -1436,7 +1389,7 @@ def calib_backup(op):
             shutil.rmtree(op.ctx.p(f"{CALIB_BACKUP_DIR}/{old}"), ignore_errors=True)
     except OSError:
         pass
-    op.emit("backup", "info", f"备份了写之前的文件：{path}", {"path": path, "keep": CALIB_BACKUPS_KEEP})
+    op.emit("backup", "info", f"Backed up calibration files: {path}", {"path": path, "keep": CALIB_BACKUPS_KEEP})
     return path
 
 
@@ -1448,13 +1401,13 @@ def _write_preserving(op, path, data, meta, default_mode):
 
 
 def install_calibration(op, text, old, main_meta, saved_meta):
-    """旧主文件留 .previous；主文件和 saved 各用自己原来的属主 / 权限原子写。"""
+    """Save .previous and atomically write main and saved calibration files."""
     _write_preserving(op, CALIB_PREVIOUS, old, main_meta, 0o644)
-    op.emit("write", "info", f"旧文件留了一份：{CALIB_PREVIOUS}")
+    op.emit("write", "info", f"Saved previous calibration: {CALIB_PREVIOUS}")
     payload = text.encode("utf-8")
     _write_preserving(op, CALIB, payload, main_meta, 0o644)
     _write_preserving(op, CALIB_SAVED, payload, saved_meta, int(main_meta.get("mode", 0o644)))
-    op.emit("write", "info", f"写好了：{CALIB} 和 {CALIB_SAVED}，属主和权限照旧")
+    op.emit("write", "info", f"Wrote {CALIB} and {CALIB_SAVED}")
 
 
 def _load_toml(op, path):
@@ -1462,16 +1415,16 @@ def _load_toml(op, path):
         with open(op.ctx.p(path), "rb") as f:
             return tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError) as e:
-        raise Stop(EXIT_FAIL, "bad_toml", f"{path} 读不回来：{type(e).__name__}: {e}") from e
+        raise Stop(EXIT_FAIL, "bad_toml", f"Failed to re-read {path}: {type(e).__name__}: {e}") from e
 
 
 def verify_calibration_file(op, data, source):
     for path in (CALIB, CALIB_SAVED):
         back = _load_toml(op, path)
         if not same_calibration(normalized_calibration(back), normalized_calibration(data)):
-            raise Stop(EXIT_FAIL, "bad_toml", f"新写的 {path} 读回来跟要写的不一样")
+            raise Stop(EXIT_FAIL, "bad_toml", f"Readback mismatch in newly written {path}")
         validate_calibration(back, source)
-    op.emit("check", "info", "两个文件读回来逐项对过：15 颗、限位、IMU 方向都在")
+    op.emit("check", "info", "Verified both calibration files on disk (15 joints, limits, IMU)")
 
 
 def robotd_hello(op):
@@ -1480,11 +1433,11 @@ def robotd_hello(op):
     except RpcError as e:
         return False, str(e)
     if not isinstance(hello, dict):
-        return False, "hello 回的不是对象"
+        return False, "hello did not return an object"
     return True, hello
 
 
-def wait_robotd(op, what="主程序"):
+def wait_robotd(op, what="robotd"):
     deadline = op.ctx.now() + CALIB_RESTART_WAIT
     last_emit = op.ctx.now()
     st = {}
@@ -1493,12 +1446,12 @@ def wait_robotd(op, what="主程序"):
         if st.get("ActiveState") == "active":
             ok, why = robotd_hello(op)
             if ok:
-                op.emit("wait", "info", f"{what}起来了，hello 通了", {"robotd": st, "hello": why})
+                op.emit("wait", "info", f"{what} is up (hello OK)", {"robotd": st, "hello": why})
                 return True, st
             st = dict(st, hello=why)
         if op.ctx.now() - last_emit >= 5.0:
             last_emit = op.ctx.now()
-            op.emit("wait", "info", f"等{what}（ActiveState={st.get('ActiveState', '?')}）", st)
+            op.emit("wait", "info", f"Waiting for {what} (ActiveState={st.get('ActiveState', '?')})", st)
         op.ctx.sleep(0.25)
     return False, st
 
@@ -1509,7 +1462,7 @@ def robotd_bus_status(op):
     except RpcError as e:
         return None, str(e)
     if not isinstance(st, dict):
-        return None, "busStatus 回的不是对象"
+        return None, "busStatus did not return an object"
     return st, None
 
 
@@ -1518,7 +1471,7 @@ def calibration_status(op):
         r = op.ctx.rpc("robot.busCommand", {"action": "calibration-status"}, 2.0)
     except RpcError as e:
         return None, str(e)
-    return (r, None) if isinstance(r, dict) else (None, "calibration-status 回的不是对象")
+    return (r, None) if isinstance(r, dict) else (None, "calibration-status did not return an object")
 
 
 def status_summary(st):
@@ -1539,22 +1492,21 @@ def _same_field(a, b):
 
 
 def readback_mismatches(expected, calibration):
-    """按 calibration_status() 的 calibration 逐项比：15 颗的 7 个字段、motion_enabled、
-    总线小板的 quat / verified、imu_mounts 每一格。浮点容差 1e-9。"""
+    """Compare calibration-status against expected calibration dict (1e-9 float tolerance)."""
     got = calibration if isinstance(calibration, dict) else {}
     exp = expected if isinstance(expected, dict) else {}
     out = []
 
     def one(label, a, b):
         if not _same_field(a, b):
-            out.append(f"{label}：写 {a!r}，读回 {b!r}")
+            out.append(f"{label}: wrote {a!r}, read {b!r}")
 
     for key in ("motion_enabled", "imu_mount_verified", "imu_bus_protocol", "imu_bus_profile"):
         one(key, exp.get(key), got.get(key))
     one("imu_mount_quat", exp.get("imu_mount_quat"), got.get("imu_mount_quat"))
     ejs, gjs = exp.get("joints") if isinstance(exp.get("joints"), list) else [], got.get("joints") if isinstance(got.get("joints"), list) else []
     if len(ejs) != 15 or len(gjs) != 15:
-        out.append(f"joints：写 {len(ejs)} 颗，读回 {len(gjs)} 颗")
+        out.append(f"joints: wrote {len(ejs)}, read {len(gjs)}")
     for i in range(min(len(ejs), len(gjs))):
         e, g = ejs[i] if isinstance(ejs[i], dict) else {}, gjs[i] if isinstance(gjs[i], dict) else {}
         for field in ("name", "id", "zero_raw", "direction", "calibrated", "min_rad", "max_rad"):
@@ -1570,9 +1522,7 @@ def readback_mismatches(expected, calibration):
 
 
 def wait_motion(op, expected, expected_mode="motion"):
-    """重启后每 0.5 秒看一次，最多 30 秒。预期模式、阶段和逐项标定读回都一致才成功。
-    waiting_for_bus 带标定校验的错误立刻判失败（重试也一样）；带别的错误（总线打不开）
-    可能只是刚启动那一下，主程序每秒重试，等到 30 秒还这样才判失败。回一个可写进 last-result 的判定字典。"""
+    """Poll every 0.5s up to 30s after restart until expected mode, phase, and calibration readback match."""
     expected_phase = "control" if expected_mode == "motion" else "ready"
     deadline = op.ctx.now() + CALIB_MOTION_WAIT
     last, why = {}, None
@@ -1594,20 +1544,20 @@ def wait_motion(op, expected, expected_mode="motion"):
                 if status.get("imu_source") in (None, "bus") and metadata_error:
                     mismatches.append(metadata_error)
                 if not mismatches:
-                    op.emit("wait", "info", "主程序已回到预期模式，标定读回来逐项一致",
+                    op.emit("wait", "info", "robotd entered expected mode with matching calibration readback",
                             {"busStatus": status_summary(last), "readback_ok": True})
                     return {"ok": True, "kind": "committed", "bus": last, "status": status,
                             "readback_ok": True, "mismatches": []}
-                op.emit("wait", "warn", f"标定读回来跟写进去的不一致（{len(mismatches)} 处）",
+                op.emit("wait", "warn", f"Calibration readback mismatch ({len(mismatches)} items)",
                         {"mismatches": mismatches[:20]})
             else:
-                op.emit("wait", "info", f"已进预期模式，标定还没读回来：{cs_err}", {"busStatus": status_summary(last)})
+                op.emit("wait", "info", f"In expected mode, calibration-status pending: {cs_err}", {"busStatus": status_summary(last)})
         if op.ctx.now() >= deadline:
             break
         if op.ctx.now() - last_emit >= 5.0:
             last_emit = op.ctx.now()
             op.emit("wait", "info",
-                    f"等主程序进入 {expected_mode} 并读回标定（mode={mode or '?'}，phase={phase or '?'}）",
+                    f"Waiting for robotd {expected_mode} and calibration readback (mode={mode or '?'}, phase={phase or '?'})",
                     {"busStatus": status_summary(last), "mismatches": mismatches[:20]})
         op.ctx.sleep(CALIB_STATUS_INTERVAL)
     if not last and why:
@@ -1630,7 +1580,7 @@ def journal_tail(op):
     return lines[-30:]
 
 
-def restart_robotd(op, what="重启主程序"):
+def restart_robotd(op, what="Restart robotd"):
     op.ctx.run(["systemctl", "reset-failed", "robotd"])
     rc, out, err = op.ctx.run(["systemctl", "restart", "robotd"], timeout=20.0)
     op.emit("restart", "info", what, {"rc": rc, "stderr": err.strip()[:300]})
@@ -1640,7 +1590,7 @@ def restart_robotd(op, what="重启主程序"):
 def _restore_one(op, backup_dir, row, errors):
     path = row.get("path") if isinstance(row, dict) else None
     if not isinstance(path, str):
-        errors.append("manifest 里有一项没有 path")
+        errors.append("Manifest entry missing path")
         return False
     try:
         if row.get("existed"):
@@ -1648,18 +1598,18 @@ def _restore_one(op, backup_dir, row, errors):
             with open(op.ctx.p(f"{backup_dir}/{name}"), "rb") as f:
                 data = f.read()
             if _sha256(data) != row.get("sha256"):
-                raise OSError(f"备份文件 {name} 的 sha256 不对")
+                raise OSError(f"Backup file {name} sha256 mismatch")
             _write_preserving(op, path, data, row, 0o644)
         elif exists(op.ctx, path):
             remove(op.ctx, path)
         return True
     except (OSError, Stop) as e:
-        errors.append(f"{path}：{type(e).__name__}: {e}")
+        errors.append(f"{path}: {type(e).__name__}: {e}")
         return False
 
 
 def rollback(op, backup_path):
-    """从备份把主文件 / saved / commissioning 各自换回。结果分开报，回滚自己失败也如实写。"""
+    """Rollback calibration files and commissioning drop-in from backup."""
     out = {"files_restored": False, "mode_restored": False, "robotd_up_after_rollback": False,
            "errors": [], "backup": backup_path}
     try:
@@ -1667,9 +1617,9 @@ def rollback(op, backup_path):
             manifest = json.load(f)
         rows = manifest.get("files") if isinstance(manifest, dict) else None
         if not isinstance(rows, list):
-            raise ValueError("manifest 里没有 files")
+            raise ValueError("Manifest missing files")
     except (OSError, ValueError) as e:
-        out["errors"].append(f"读不了备份 manifest：{type(e).__name__}: {e}")
+        out["errors"].append(f"Failed to read backup manifest: {type(e).__name__}: {e}")
         return out
     by_path = {r.get("path"): r for r in rows if isinstance(r, dict)}
     ok = True
@@ -1677,35 +1627,35 @@ def rollback(op, backup_path):
         ok = _restore_one(op, backup_path, by_path.get(path) or {"path": path, "existed": False}, out["errors"]) and ok
     crow = by_path.get(COMMISSIONING_DROPIN) or {"path": COMMISSIONING_DROPIN, "existed": False}
     mode_ok = _restore_one(op, backup_path, crow, out["errors"])
-    out["files_restored"] = bool(ok)                    # 只算 .toml / .saved.toml，模式另外报
+    out["files_restored"] = bool(ok)                    # Tracks .toml/.saved.toml restore
     out["mode_restored"] = bool(mode_ok and exists(op.ctx, COMMISSIONING_DROPIN) == bool(crow.get("existed")))
     op.ctx.run(["systemctl", "daemon-reload"])
-    op.emit("rollback", "warn", "已经把标定文件和标定模式换回写之前的样子", out)
-    restart_robotd(op, "再起一次主程序（用原来的文件）")
-    up, rst = wait_robotd(op, "回滚后的主程序")
+    op.emit("rollback", "warn", "Restored previous calibration files and mode", out)
+    restart_robotd(op, "Restart robotd with restored files")
+    up, rst = wait_robotd(op, "rolled-back robotd")
     out["robotd_up_after_rollback"] = bool(up)
     out["robotd"] = rst
     if not up:
-        out["errors"].append("回滚后主程序没在 40 秒内回 hello")
+        out["errors"].append("Rolled-back robotd did not answer hello within 40s")
     op.emit("rollback", "info" if up else "error",
-            "回滚后主程序起来了" if up else "回滚后主程序没起来：去日志页导出诊断包",
+            "Rolled-back robotd is up" if up else "Rolled-back robotd failed to start: export diagnostics",
             {"robotd_up_after_rollback": up})
     return out
 
 
 def _rollback_words(rb):
     if not isinstance(rb, dict):
-        return "；回滚结果不知道，去日志页导出诊断包"
+        return "; rollback status unknown, export diagnostics"
     if rb.get("files_restored") and rb.get("mode_restored") and rb.get("robotd_up_after_rollback"):
-        return "；已经换回原来的文件和模式，又起了一次主程序"
+        return "; restored original files/mode and restarted robotd"
     bits = []
     if not rb.get("files_restored"):
-        bits.append("文件没完全换回")
+        bits.append("files not fully restored")
     if not rb.get("mode_restored"):
-        bits.append("标定 / 运动模式没换回")
+        bits.append("mode not restored")
     if not rb.get("robotd_up_after_rollback"):
-        bits.append("主程序回滚后没起来")
-    return "；回滚没完全成功（" + "、".join(bits) + "），去日志页导出诊断包"
+        bits.append("robotd did not start after rollback")
+    return "; rollback incomplete (" + ", ".join(bits) + "), export diagnostics"
 
 
 def _commit_detail(base, judged, rb=None, journal=None):
@@ -1739,7 +1689,7 @@ def verb_calib_read(op, args):
               "commissioning_present": exists(op.ctx, COMMISSIONING_DROPIN),
               "exec_has_commissioning": "--commissioning" in exec_start(op), "path": CALIB,
               "mode_text": text, "mode_bits": stat.S_IMODE(st.st_mode)}
-    return op.finish(EXIT_OK, "read", f"读到标定文件：{mode}（{text}）", detail, record=False)
+    return op.finish(EXIT_OK, "read", f"Read calibration file: {mode} ({text})", detail, record=False)
 
 
 def verb_calib_commit(op, args, raw):
@@ -1747,12 +1697,12 @@ def verb_calib_commit(op, args, raw):
     op.by = by
     if not dry and op.ctx.env.get(DETACH_ENV) != "1":
         return detach(op, raw, "calib-commit")
-    # 先拿锁再查旗：跟 bus-take / bus-give-back 共用 helper.lock
-    op.take_lock("写标定")
+    # Acquire helper.lock before checking bus-held flag
+    op.take_lock("calibration commit")
     imu_redo_conflict(op)
     if flag_present(op.ctx):
-        raise Stop(EXIT_STATE, "bus_held", "舵机页正占着总线：先在舵机页点「交还主程序」再写")
-    op.emit("bus", "info", "舵机页没占着总线，可以写")
+        raise Stop(EXIT_STATE, "bus_held", "Servo page holds the bus: click Hand Back to Main first")
+    op.emit("bus", "info", "Servo bus is free; safe to commit")
     mode, mode_text = calib_mode(op)
     op.emit("mode", "info", mode_text, {"mode": mode, "commissioning_file": COMMISSIONING_DROPIN})
     why = calib_gate(op, mode)
@@ -1767,37 +1717,37 @@ def verb_calib_commit(op, args, raw):
             if (not isinstance(info, dict) or info.get("profile", "legacy") != data.get("imu_bus_profile", "legacy")
                     or configured != info.get("profile", "legacy")
                     or info.get("protocol") != data.get("imu_bus_protocol", "feetech")):
-                raise Stop(EXIT_STATE, "readback_mismatch", "总线 IMU 类型与已验证方向不一致：先到 IMU 页重新标定")
+                raise Stop(EXIT_STATE, "readback_mismatch", "Bus IMU type mismatches verified mount: recalibrate on IMU page")
             status, err = calibration_status(op)
             top = (status or {}).get("imu_mount")
             if (status is None or imu_redo_source(live, status) != "bus"
                     or (configured == "qinmo" and (data.get("imu_mount_verified") is not True
                         or (isinstance(top, dict) and top.get("verified") is not True)))):
-                raise Stop(EXIT_STATE, "readback_mismatch", "Qinmo 安装方向还未由主程序验证，不能跳过")
+                raise Stop(EXIT_STATE, "readback_mismatch", "Qinmo IMU orientation not yet verified by robotd; cannot skip")
     file_ids = {r.get("id") for r in rows if isinstance(r, dict)}
     given = {r["id"] for r in joints}
     if file_ids != given:
         raise Stop(EXIT_STATE, "joint_mismatch",
-                   f"这次的 15 颗（{sorted(given)}）跟主程序文件里的（{sorted(file_ids, key=str)}）对不上",
+                   f"Provided 15 joint IDs ({sorted(given)}) do not match calibration file ({sorted(file_ids, key=str)})",
                    {"file_ids": sorted(file_ids, key=str), "given": sorted(given)})
-    op.emit("read", "info", f"读了主程序的标定：{len(rows)} 颗，id 对得上")
+    op.emit("read", "info", f"Read robotd calibration: {len(rows)} joints match")
 
     try:
         joint_mode = args.get("joint_mode", "recorded")
         built = build_calibration(data, joints, imu, joint_mode)
         validate_calibration(built, imu["source"])
     except CalibError as e:
-        raise Stop(EXIT_ARGS, "invalid", f"要写的内容没过校验：{e}") from e
-    op.emit("build", "info", "已生成待写标定", {"joint_mode": joint_mode})
+        raise Stop(EXIT_ARGS, "invalid", f"Calibration failed validation: {e}") from e
+    op.emit("build", "info", "Built pending calibration", {"joint_mode": joint_mode})
     text = render_calibration(built)
     back = tomllib.loads(text)
     if not same_calibration(normalized_calibration(back), normalized_calibration(built)):
-        raise Stop(EXIT_FAIL, "bad_toml", "自己写出来的 TOML 跟要写的数据对不上")
+        raise Stop(EXIT_FAIL, "bad_toml", "Rendered TOML does not match pending calibration")
     validate_calibration(back, imu["source"])
-    op.emit("check", "info", "写之前校验过了：15 颗、限位、IMU 方向都合规")
+    op.emit("check", "info", "Pre-write validation passed (15 joints, limits, IMU)")
 
     if dry:
-        return op.finish(EXIT_OK, "preview", "预览好了：没写文件、没重启",
+        return op.finish(EXIT_OK, "preview", "Preview ready (no files written, no restart)",
                          {"toml": text, "by": by, "source": imu["source"], "dry_run": True,
                           "mode": mode, "gate": why})
 
@@ -1812,7 +1762,7 @@ def verb_calib_commit(op, args, raw):
         with open(op.ctx.p(CALIB), "rb") as f:
             old = f.read()
     except OSError as e:
-        raise Stop(EXIT_FAIL, "read_failed", f"写之前读不到现在的文件：{type(e).__name__}: {e}") from e
+        raise Stop(EXIT_FAIL, "read_failed", f"Failed to read existing files before write: {type(e).__name__}: {e}") from e
     base = {"by": by, "backup": backup_path, "toml": text, "source": imu["source"],
             "mode_before": mode, "mode_text": mode_text, "gate": why}
     journal = []
@@ -1822,46 +1772,46 @@ def verb_calib_commit(op, args, raw):
         verify_calibration_file(op, built, imu["source"])
         if mode == "commissioning" and joint_mode != "imu_only":
             if not remove(op.ctx, COMMISSIONING_DROPIN):
-                raise OSError(f"commissioning 文件不见了：{COMMISSIONING_DROPIN}")
+                raise OSError(f"Commissioning drop-in missing: {COMMISSIONING_DROPIN}")
             op.ctx.run(["systemctl", "daemon-reload"])
-            op.emit("mode", "info", "删掉出厂标定模式 drop-in，主程序下次启动进运动模式")
+            op.emit("mode", "info", "Removed factory commissioning drop-in; switching to motion mode")
         restart_robotd(op)
         up, rst = wait_robotd(op)
         base["robotd"] = rst
         journal = journal_tail(op)
         if not up:
-            return _commit_fail(op, "restart_failed", "写进去了，但主程序没在 40 秒内起来（没连上 hello）",
+            return _commit_fail(op, "restart_failed", "Written, but robotd did not start within 40s (hello timeout)",
                                 base, {"bus": None, "readback_ok": False, "mismatches": []}, journal)
         judged = wait_motion(op, built, mode if joint_mode == "imu_only" else "motion")
         if judged.get("ok"):
             detail = _commit_detail(base, judged, None, journal)
             return op.finish(EXIT_OK, "committed",
-                             "IMU 方向已写入，15 颗舵机的原标定已逐颗读回" if joint_mode == "imu_only" else
-                             "写进主程序了：主程序进了运动模式，15 颗和 IMU 方向读回来都一致", detail)
+                             "IMU orientation committed; all 15 servo calibrations verified" if joint_mode == "imu_only" else
+                             "Committed to robotd: motion mode active with 15 joints & IMU verified", detail)
         bus = status_summary(judged.get("bus"))
         if judged.get("kind") == "calib_rejected":
-            why = f"标定没通过主程序的检查：{judged.get('error')}"
+            why = f"Calibration rejected by robotd: {judged.get('error')}"
         elif judged.get("kind") == "bus_unavailable":
-            why = f"主程序打不开舵机总线：{judged.get('error')}。舵机电源开了吗？"
+            why = f"robotd failed to open servo bus: {judged.get('error')}. Check servo power."
         elif judged.get("kind") == "readback_mismatch":
-            first = (judged.get("mismatches") or ["没读到 calibration-status"])[0]
-            why = f"主程序已重启，但标定读回来跟写进去的不一致：{first}"
+            first = (judged.get("mismatches") or ["calibration-status unavailable"])[0]
+            why = f"robotd restarted, but calibration readback mismatched: {first}"
         else:
-            stuck = bus.get("error") or f"mode={bus.get('mode') or '?'}，phase={bus.get('phase') or '?'}"
-            target_mode = "标定模式" if joint_mode == "imu_only" and mode == "commissioning" else "运动模式"
-            why = f"等 30 秒主程序还没进{target_mode}：{stuck}"
+            stuck = bus.get("error") or f"mode={bus.get('mode') or '?'}, phase={bus.get('phase') or '?'}"
+            target_mode = "commissioning" if joint_mode == "imu_only" and mode == "commissioning" else "motion"
+            why = f"robotd did not enter {target_mode} within 30s: {stuck}"
         return _commit_fail(op, judged.get("kind") or "not_motion", why, base, judged, journal)
     except Stop as e:
         rb = rollback(op, backup_path)
         detail = _commit_detail(base, judged, rb, journal_tail(op))
         if isinstance(e.detail, dict):
             detail.update({k: v for k, v in e.detail.items() if k not in detail})
-        reason = f"写到一半出错：{e.reason}" + _rollback_words(rb)
+        reason = f"Write failed: {e.reason}" + _rollback_words(rb)
         return op.finish(EXIT_FAIL, e.result, reason, detail)
-    except Exception as e:  # noqa: BLE001 —— 第一次写开始以后任何异常都先回滚
+    except Exception as e:  # noqa: BLE001  # Rollback on any failure after first write
         rb = rollback(op, backup_path)
         detail = _commit_detail(base, judged, rb, journal_tail(op))
-        reason = f"写到一半出错：{type(e).__name__}: {e}" + _rollback_words(rb)
+        reason = f"Write failed: {type(e).__name__}: {e}" + _rollback_words(rb)
         return op.finish(EXIT_FAIL, "write_failed", reason, detail)
 
 
@@ -1872,7 +1822,7 @@ def imu_redo_file(op, path):
     """Only root-owned regular files; never follow a caller's symlink."""
     st = os.lstat(op.ctx.p(path))
     if not stat.S_ISREG(st.st_mode) or (op.ctx.check_owner and (st.st_uid != 0 or st.st_mode & 0o022)):
-        raise Stop(EXIT_STATE, "imu_session_tampered", f"IMU 会话文件不安全：{path}")
+        raise Stop(EXIT_STATE, "imu_session_tampered", f"Unsafe IMU session file: {path}")
     with open(op.ctx.p(path), "rb") as stream:
         return stream.read()
 
@@ -1882,17 +1832,17 @@ def imu_redo_arguments(description):
     match = re.fullmatch(r"\{\s*path=([^;{}]+?)\s*;\s*argv\[\]=([^{}]*?)\s*;\s*(?:ignore_errors=[^{}]*?)?\}",
                          description.strip(), re.S)
     if not match:
-        raise Stop(EXIT_STATE, "unsupported_exec", "读不清主程序唯一的实际启动命令：未修改服务")
+        raise Stop(EXIT_STATE, "unsupported_exec", "Cannot determine unique robotd ExecStart; service untouched")
     if re.search(r"\\(?:x[0-9a-fA-F]{2}|[0-7]{3}|[nrt])|[$%]", match.group(2)):
-        raise Stop(EXIT_STATE, "unsupported_exec", "启动参数含无法确定的转义 / 环境展开：未修改服务")
+        raise Stop(EXIT_STATE, "unsupported_exec", "ExecStart contains unsupported escapes/env expansion; service untouched")
     try:
         argv = shlex.split(match.group(2))
     except ValueError as err:
-        raise Stop(EXIT_STATE, "unsupported_exec", "主程序启动参数有歧义：未修改服务") from err
+        raise Stop(EXIT_STATE, "unsupported_exec", "Ambiguous robotd ExecStart; service untouched") from err
     path = match.group(1).strip()
     if (not argv or argv[0] != path or not path.startswith("/") or path.rsplit("/", 1)[-1] != "robotd"
             or any(any(c in a for c in "\n\r\0") for a in argv)):
-        raise Stop(EXIT_STATE, "unsupported_exec", "主程序使用包装命令或不明确的参数：未修改服务")
+        raise Stop(EXIT_STATE, "unsupported_exec", "robotd uses wrapper command or unsupported args; service untouched")
     return argv
 
 
@@ -1914,46 +1864,46 @@ def imu_redo_load(op):
         for path in (OPLOG_DIR, IMU_REDO_DIR):
             st = os.lstat(op.ctx.p(path))
             if not stat.S_ISDIR(st.st_mode) or (op.ctx.check_owner and (st.st_uid != 0 or st.st_mode & 0o022)):
-                raise ValueError("会话目录不安全")
+                raise ValueError("Unsafe session directory")
         m = json.loads(imu_redo_file(op, IMU_REDO_MANIFEST))
         if (m.get("schema") != IMU_REDO_SCHEMA or type(m.get("active")) is not bool
                 or not re.fullmatch(r"[0-9a-f]{32}", m.get("session_id", ""))
                 or m.get("source") not in IMU_SOURCES or not isinstance(m.get("exec_args"), list)
                 or not all(isinstance(a, str) for a in m["exec_args"])
                 or not m["exec_args"] or "--commissioning" in m["exec_args"]):
-            raise ValueError("manifest 格式不对")
+            raise ValueError("Invalid manifest format")
         expected_paths = (CALIB, CALIB_SAVED)
         if (not isinstance(m.get("files"), list) or len(m["files"]) != 2
                 or tuple(row.get("path") for row in m["files"]) != expected_paths
                 or tuple(row.get("name") for row in m["files"]) != ("main.toml", "saved.toml")):
-            raise ValueError("备份清单格式不对")
+            raise ValueError("Invalid backup list format")
         if m.get("override_sha256") != _sha256(imu_redo_override(m)):
-            raise ValueError("模式文件摘要不对")
+            raise ValueError("Mode file digest mismatch")
         if "profile" in m:
             if (m["profile"] not in ("legacy", "qinmo") or m.get("original_mode") not in ("motion", "commissioning", "startup")
                     or tuple(row.get("path") for row in m.get("config_files", [])) != (IMU_CONFIG, IMU_CONFIG_SAVED)
                     or tuple(row.get("name") for row in m.get("config_files", [])) != ("config.toml", "config-saved.toml")):
-                raise ValueError("类型备份清单格式不对")
+                raise ValueError("Invalid profile backup list format")
         if m["active"]:
             directory = IMU_REDO_DIR + "/" + m["session_id"]
             st = os.lstat(op.ctx.p(directory))
             if not stat.S_ISDIR(st.st_mode) or (op.ctx.check_owner and (st.st_uid != 0 or st.st_mode & 0o022)):
-                raise ValueError("备份目录不安全")
+                raise ValueError("Unsafe backup directory")
             for row in m["files"] + m.get("config_files", []):
                 if row.get("existed") and _sha256(imu_redo_file(op, directory + "/" + row["name"])) != row.get("sha256"):
-                    raise ValueError("备份摘要不对")
+                    raise ValueError("Backup digest mismatch")
             raw = imu_redo_file(op, directory + "/calibration.json")
             if _sha256(raw) != m.get("calibration_sha256"):
-                raise ValueError("标定快照摘要不对")
+                raise ValueError("Calibration snapshot digest mismatch")
         return m
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as err:
-        raise Stop(EXIT_STATE, "imu_session_tampered", f"IMU 会话读不回来或已改变：{err}；保留现场") from err
+        raise Stop(EXIT_STATE, "imu_session_tampered", f"IMU session unreadable or modified: {err}; preserving state") from err
 
 
 def imu_redo_conflict(op):
     m = imu_redo_load(op)
     if (m and m["active"]) or exists(op.ctx, IMU_REDO_DROPIN):
-        raise Stop(EXIT_STATE, "imu_recalibrate_active", "初次 IMU 校准正在重做：先完成或取消，再操作舵机 / 写整份标定")
+        raise Stop(EXIT_STATE, "imu_recalibrate_active", "IMU recalibration is active: finish or cancel first")
 
 
 def imu_redo_save(op, manifest, phase, **fields):
@@ -1966,7 +1916,7 @@ def imu_redo_source(bus, status):
     sample = (bus.get("last_sample") or {}).get("imu") or {}
     source = native.get("imu_source") or sample.get("source") or status.get("imu_source")
     if source not in IMU_SOURCES or status.get("imu_source") != source:
-        raise Stop(EXIT_STATE, "imu_source_changed", "当前 IMU 来源读回不一致：停止重做")
+        raise Stop(EXIT_STATE, "imu_source_changed", "Current IMU source readback mismatch; aborting recalibration")
     return source
 
 
@@ -1989,7 +1939,7 @@ def imu_redo_gate(op, mode, source=None):
             op.ctx.sleep(GATE_GAP)
         bus, err = robotd_bus_status(op)
         if bus is None:
-            raise Stop(EXIT_STATE, "refused", f"主程序状态读不回：{err}")
+            raise Stop(EXIT_STATE, "refused", f"robotd status unreadable: {err}")
         native = bus.get("native") if isinstance(bus.get("native"), dict) else {}
         hd = native.get("hd1910") if isinstance(native.get("hd1910"), dict) else {}
         safe = bus.get("mode") == mode and bus.get("torque_off_pending") is not True and not bus.get("home_recovery")
@@ -2002,11 +1952,11 @@ def imu_redo_gate(op, mode, source=None):
                     and not bus.get("motion") and not (bus.get("hold") or {}).get("active")
                     and bus.get("policy_motion_enabled") is not True)
         if not safe:
-            raise Stop(EXIT_STATE, "refused", "先扶稳鸭子并卸力，等主程序明确确认全部失能、临时增益恢复，再重做初次 IMU 校准")
+            raise Stop(EXIT_STATE, "refused", "Support the duck, release torque, and wait for confirmation before IMU recalibration")
         if source is not None:
             status, err = calibration_status(op)
             if status is None or imu_redo_source(bus, status) != source:
-                raise Stop(EXIT_STATE, "imu_source_changed", "IMU 来源已改变或读不回，停止重做")
+                raise Stop(EXIT_STATE, "imu_source_changed", "IMU source changed or unreadable; aborting recalibration")
     return bus
 
 
@@ -2014,10 +1964,10 @@ def imu_redo_readback(op, expected, source, quat=None):
     bus, err = robotd_bus_status(op)
     status, cs_err = calibration_status(op)
     if bus is None or status is None or imu_redo_source(bus, status) != source:
-        raise Stop(EXIT_STATE, "readback_mismatch", f"当前 IMU 来源读不回：{err or cs_err or source}")
+        raise Stop(EXIT_STATE, "readback_mismatch", f"Current IMU source unreadable: {err or cs_err or source}")
     cal = status.get("calibration")
     if not imu_redo_same(normalized_calibration(expected), normalized_calibration(cal or {})):
-        raise Stop(EXIT_STATE, "readback_mismatch", "主程序标定读回与文件逐项不一致：保留会话")
+        raise Stop(EXIT_STATE, "readback_mismatch", "robotd calibration readback mismatches file; keeping session")
     info, configured, metadata_error = imu_bus_metadata(bus)
     if source == "bus" and metadata_error:
         raise Stop(EXIT_STATE, "readback_mismatch", metadata_error)
@@ -2026,16 +1976,16 @@ def imu_redo_readback(op, expected, source, quat=None):
                 and (info.get("protocol") != cal.get("imu_bus_protocol", "feetech")
                      or info.get("profile", "legacy") != cal.get("imu_bus_profile", "legacy")
                      or info.get("profile", "legacy") not in ("legacy", "qinmo"))):
-            raise Stop(EXIT_STATE, "readback_mismatch", "当前总线 IMU 协议 / 类型与已验证的安装方向标定不匹配")
+            raise Stop(EXIT_STATE, "readback_mismatch", "Bus IMU protocol/profile mismatches verified calibration")
         if source == "bus" and imu_profile_configured(bus) is not None and not isinstance(info, dict):
-            raise Stop(EXIT_STATE, "readback_mismatch", "当前总线 IMU 还未连接，不能确认安装方向")
+            raise Stop(EXIT_STATE, "readback_mismatch", "Bus IMU not connected; cannot verify orientation")
         mount = ({"quat": cal.get("imu_mount_quat"), "verified": cal.get("imu_mount_verified")}
                  if source == "bus" else (cal.get("imu_mounts") or {}).get(source) or {})
         top = status.get("imu_mount")
         if mount.get("verified") is not True or not imu_redo_same(mount.get("quat"), quat):
-            raise Stop(EXIT_STATE, "readback_mismatch", "新 IMU 方向 / verified 没有逐项读回")
+            raise Stop(EXIT_STATE, "readback_mismatch", "New IMU orientation / verified failed readback")
         if isinstance(top, dict) and (top.get("verified") is not True or not imu_redo_same(top.get("quat"), quat)):
-            raise Stop(EXIT_STATE, "readback_mismatch", "主程序当前生效的 IMU 方向不一致")
+            raise Stop(EXIT_STATE, "readback_mismatch", "Active robotd IMU orientation mismatch")
     return status
 
 
@@ -2047,27 +1997,27 @@ def imu_redo_owned(op, m, allow_missing=False):
             # neither tells us which mode the still-running process is using.
             loaded = imu_redo_arguments(exec_start(op))
             if loaded not in (m["exec_args"], m["exec_args"] + ["--commissioning"]):
-                raise Stop(EXIT_STATE, "imu_session_tampered", "会话中断后主程序生效的启动参数已改变：保留现场")
+                raise Stop(EXIT_STATE, "imu_session_tampered", "robotd ExecStart changed after session start; preserving state")
             return
-        raise Stop(EXIT_STATE, "imu_session_tampered", "IMU 会话自己的模式文件不见了：保留现场")
+        raise Stop(EXIT_STATE, "imu_session_tampered", "IMU session mode drop-in missing; preserving state")
     if imu_redo_file(op, IMU_REDO_DROPIN) != imu_redo_override(m):
-        raise Stop(EXIT_STATE, "imu_session_tampered", "IMU 会话模式文件已改变，不删除别人的内容")
+        raise Stop(EXIT_STATE, "imu_session_tampered", "IMU session mode drop-in modified externally")
     loaded = imu_redo_arguments(exec_start(op))
     if (loaded != m["exec_args"] + ["--commissioning"]
             and not (allow_missing and loaded == m["exec_args"])):
-        raise Stop(EXIT_STATE, "imu_session_tampered", "主程序生效的启动参数已改变：保留现场")
+        raise Stop(EXIT_STATE, "imu_session_tampered", "robotd ExecStart modified externally; preserving state")
 
 
 def imu_redo_restart(op, mode, expected, source):
     if not restart_robotd(op) or not wait_robotd(op)[0]:
-        raise Stop(EXIT_FAIL, "restart_failed", "主程序重启失败，会话保留，可重试或取消")
+        raise Stop(EXIT_FAIL, "restart_failed", "robotd restart failed; session kept for retry or cancel")
     deadline = op.ctx.now() + CALIB_MOTION_WAIT
     while True:
         bus, _ = robotd_bus_status(op)
         if bus and bus.get("mode") == mode and bus.get("phase") == ("control" if mode == "motion" else "ready"):
             break
         if op.ctx.now() >= deadline:
-            raise Stop(EXIT_FAIL, "restart_failed", "主程序还没回到预期模式，会话保留")
+            raise Stop(EXIT_FAIL, "restart_failed", "robotd did not reach expected mode; session kept")
         op.ctx.sleep(CALIB_STATUS_INTERVAL)
     # Motion startup may need a bounded relax to confirm the torque readback.
     if mode == "motion" and (bus.get("native") or {}).get("torque_state_confirmed") is not False:
@@ -2087,7 +2037,7 @@ def imu_redo_restore_original(op, m):
     imu_redo_owned(op, m, allow_missing=True)
     remove(op.ctx, IMU_REDO_DROPIN)
     if op.ctx.run(["systemctl", "daemon-reload"])[0] != 0 or imu_redo_arguments(exec_start(op)) != m["exec_args"]:
-        raise Stop(EXIT_FAIL, "rollback_failed", "原来的启动参数没恢复，会话保留")
+        raise Stop(EXIT_FAIL, "rollback_failed", "Original ExecStart not restored; session kept")
     expected = _load_toml(op, CALIB)
     status = imu_redo_restart(op, "motion", expected, m["source"])
     pads_restore(op, m["controllers"])
@@ -2106,15 +2056,15 @@ def imu_bus_metadata(bus):
         if (not isinstance(info, dict) or info.get("protocol") not in ("feetech", "dxl2")
                 or info.get("profile", "legacy") not in ("legacy", "qinmo")
                 or (info.get("profile") == "qinmo" and info.get("protocol") != "feetech")):
-            error = "主程序报告了不支持或不一致的 IMU 协议 / 类型：待确认，不能使用旧方向或继续标定"
+            error = "robotd reported an unsupported or inconsistent IMU protocol/profile; cannot use old mount or calibrate"
     if any(profile not in ("legacy", "qinmo") for profile in profiles):
-        error = "主程序报告了不支持或不一致的 IMU 协议 / 类型：待确认，不能使用旧方向或继续标定"
+        error = "robotd reported an unsupported or inconsistent IMU protocol/profile; cannot use old mount or calibrate"
     if not error:
         bindings = [(info["protocol"], info.get("profile", "legacy")) for info in infos]
         if (any(binding != bindings[0] for binding in bindings[1:])
                 or any(profile != profiles[0] for profile in profiles[1:])
                 or (bindings and profiles and bindings[0][1] != profiles[0])):
-            error = "主程序报告了不支持或不一致的 IMU 协议 / 类型：待确认，不能使用旧方向或继续标定"
+            error = "robotd reported an unsupported or inconsistent IMU protocol/profile; cannot use old mount or calibrate"
     return (infos[0] if infos and isinstance(infos[0], dict) else None,
             profiles[0] if profiles else None, error)
 
@@ -2129,7 +2079,7 @@ def imu_profile_controllers_stop(op):
     if is_active(op, "duck-echo"):
         op.ctx.run(["systemctl", "stop", "duck-echo"])
     if any(is_active(op, unit) for unit in ("padd", GAMESIR, "duck-echo")):
-        raise Stop(EXIT_STATE, "refused", "手柄 / 语音控制服务未停下，未切换类型")
+        raise Stop(EXIT_STATE, "refused", "Gamepad/voice services did not stop; profile unchanged")
 
 
 def imu_profile_controllers_restore(op, was):
@@ -2144,7 +2094,7 @@ def imu_profile_safe_file(op, path):
     for index in range(1, len(parts)):
         st = os.lstat(op.ctx.p("/" + "/".join(parts[:index])))
         if not stat.S_ISDIR(st.st_mode) or (op.ctx.check_owner and (st.st_uid != 0 or st.st_mode & 0o022)):
-            raise Stop(EXIT_STATE, "unsafe_config", "主程序配置目录的属主 / 权限不安全，未修改")
+            raise Stop(EXIT_STATE, "unsafe_config", "Unsafe robotd config directory ownership/permissions")
     return imu_redo_file(op, path)
 
 
@@ -2153,12 +2103,12 @@ def imu_profile_config(op, argv):
     sockets = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--socket"]
     if (values != [IMU_CONFIG] or sockets != [SOCK]
             or any(a.startswith(("--params=", "--socket=")) or a in ("--read-only", "--config", "--fake") for a in argv)):
-        raise Stop(EXIT_STATE, "unsupported_config", "主程序未使用受支持的固定配置路径，未修改")
+        raise Stop(EXIT_STATE, "unsupported_config", "robotd not using supported fixed config path")
     dropins = show(op, "robotd", ["DropInPaths"]).get("DropInPaths", "").split()
     allowed = {"/etc/systemd/system/robotd.service.d/zzzz-r17-0151.conf",
                "/etc/systemd/system/robotd.service.d/zzzz-studio-bus.conf", COMMISSIONING_DROPIN, IMU_REDO_DROPIN}
     if not dropins or set(dropins) - allowed:
-        raise Stop(EXIT_STATE, "unsupported_exec", "主程序存在未支持的服务覆盖，未修改")
+        raise Stop(EXIT_STATE, "unsupported_exec", "Unsupported robotd service drop-in overrides")
     # The executable and its ancestors are also pinned to safe root-owned files.
     if op.ctx.check_owner:
         imu_profile_safe_file(op, argv[0])
@@ -2168,13 +2118,13 @@ def imu_profile_config(op, argv):
         try:
             data = tomllib.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeError) as err:
-            raise Stop(EXIT_STATE, "bad_toml", "主程序配置读不回，未修改") from err
+            raise Stop(EXIT_STATE, "bad_toml", "robotd config unreadable") from err
         bus = data.get("bus") or {}
         if (bus.get("protocol") != "feetech" or bus.get("imu_protocol", "auto") not in ("auto", "feetech", "dxl2")
                 or bus.get("imu_profile", "legacy") not in ("legacy", "qinmo")
                 or (data.get("trunk_imu") or {}).get("source", "bus") != "bus"
                 or data.get("feetech_calibration") != CALIB):
-            raise Stop(EXIT_STATE, "unsupported_config", "类型选择只支持 Feetech 舵机总线的 IMU；当前配置不匹配")
+            raise Stop(EXIT_STATE, "unsupported_config", "Profile selection only supports Feetech bus IMU")
         result.append((path, raw, data))
     return result
 
@@ -2193,7 +2143,7 @@ def imu_profile_text(raw, profile):
     lines = text.splitlines(keepends=True)
     headers = [i for i, line in enumerate(lines) if re.fullmatch(r'\s*\[\s*(?:bus|"bus"|\x27bus\x27)\s*\]\s*(?:#[^\n]*)?\n?', line)]
     if len(headers) != 1:
-        raise Stop(EXIT_STATE, "bad_toml", "bus 段没有唯一的受支持写法，未修改")
+        raise Stop(EXIT_STATE, "bad_toml", "Ambiguous [bus] section in robotd config")
     start = headers[0] + 1
     end = next((i for i in range(start, len(lines)) if re.match(r"\s*\[", lines[i])), len(lines))
     block = lines[start:end]
@@ -2202,7 +2152,7 @@ def imu_profile_text(raw, profile):
         matches = [i for i, line in enumerate(block) if pattern.match(line)]
         replacement = key + ' = "' + expected["bus"][key] + '"\n'
         if len(matches) > 1:
-            raise Stop(EXIT_STATE, "bad_toml", "类型字段重复，未修改")
+            raise Stop(EXIT_STATE, "bad_toml", "Duplicate IMU profile key in robotd config")
         if matches:
             block[matches[0]] = replacement
         else:
@@ -2211,7 +2161,7 @@ def imu_profile_text(raw, profile):
         lines[start-1] += "\n"
     result = "".join(lines[:start] + block + lines[end:]).encode()
     if not imu_redo_same(tomllib.loads(result.decode()), expected):
-        raise Stop(EXIT_STATE, "bad_toml", "类型修改会改变其他配置，未修改")
+        raise Stop(EXIT_STATE, "bad_toml", "Profile edit would alter unrelated config keys")
     return result
 
 
@@ -2223,7 +2173,7 @@ def imu_profile_unverify(raw):
     text, count = re.subn(r'(?m)^\s*(?:imu_mount_verified|"imu_mount_verified"|\x27imu_mount_verified\x27)\s*=\s*(?:true|false)\s*(?:#[^\n]*)?$',
                           'imu_mount_verified = false', raw.decode("utf-8"))
     if count != 1 or not imu_redo_same(tomllib.loads(text), expected):
-        raise Stop(EXIT_STATE, "bad_toml", "安装方向确认字段没有唯一的安全写法，未修改")
+        raise Stop(EXIT_STATE, "bad_toml", "Ambiguous imu_mount_verified key in calibration")
     return text.encode()
 
 
@@ -2237,7 +2187,7 @@ def imu_profile_gate(op):
         if metadata_error:
             raise Stop(EXIT_STATE, "unsupported_daemon", metadata_error)
         if profile not in ("legacy", "qinmo"):
-            raise Stop(EXIT_STATE, "unsupported_daemon", "主程序版本尚不支持网页选择 IMU 类型：请先由维护者更新主程序")
+            raise Stop(EXIT_STATE, "unsupported_daemon", "robotd version does not support IMU profile selection")
         mode, phase = bus.get("mode"), bus.get("phase")
         if mode == "motion" and phase == "control":
             imu_redo_gate(op, "motion")
@@ -2245,11 +2195,11 @@ def imu_profile_gate(op):
               and not bus.get("policy_enabled") and not bus.get("policy_motion_enabled")
               and not bus.get("motion") and not bus.get("home_recovery") and not bus.get("hold")):
             if not running(robotd_state(op)):
-                raise Stop(EXIT_STATE, "refused", "主程序启动状态无法确认，未修改")
+                raise Stop(EXIT_STATE, "refused", "Cannot confirm robotd startup state")
         elif mode == "commissioning" and phase in COMMISSIONING_UP:
             imu_redo_gate(op, "commissioning")
         else:
-            raise Stop(EXIT_STATE, "refused", "主程序处于未知 / 活动状态：先扶稳并卸力，未修改类型")
+            raise Stop(EXIT_STATE, "refused", "robotd active/unknown state: support duck and release torque first")
     return bus
 
 
@@ -2259,24 +2209,24 @@ def imu_profile_readback(op, profile, require_discovery=False):
     if metadata_error:
         raise Stop(EXIT_STATE, "readback_mismatch", metadata_error)
     if bus is None or configured != profile:
-        raise Stop(EXIT_STATE, "readback_mismatch", "主程序配置类型没有准确读回，会话保留")
+        raise Stop(EXIT_STATE, "readback_mismatch", "robotd IMU profile readback mismatch; session kept")
     if ((isinstance(info, dict) and (info.get("profile", "legacy") != profile
                                     or (profile == "qinmo" and info.get("protocol") != "feetech")))
             or (require_discovery and not isinstance(info, dict))):
-        raise Stop(EXIT_STATE, "readback_mismatch", "实际连接的 IMU 类型未读回一致，不能完成")
+        raise Stop(EXIT_STATE, "readback_mismatch", "Connected IMU profile readback mismatch")
     return bus
 
 
 def imu_profile_restart(op, profile):
     if not restart_robotd(op) or not wait_robotd(op)[0]:
-        raise Stop(EXIT_FAIL, "restart_failed", "重连主程序失败，可取消恢复原参数")
+        raise Stop(EXIT_FAIL, "restart_failed", "Failed to reconnect to robotd; cancel to restore")
     deadline = op.ctx.now() + CALIB_MOTION_WAIT
     while True:
         bus = imu_profile_readback(op, profile)
         if bus.get("mode") == "commissioning" and bus.get("phase") in (*COMMISSIONING_UP, "configuring_bus", "waiting_for_bus"):
             break
         if op.ctx.now() >= deadline:
-            raise Stop(EXIT_FAIL, "restart_failed", "尚未回到标定模式，可取消恢复原参数")
+            raise Stop(EXIT_FAIL, "restart_failed", "Not yet back in commissioning mode; cancel to restore")
         op.ctx.sleep(CALIB_STATUS_INTERVAL)
     imu_profile_gate(op)
     return bus
@@ -2297,19 +2247,19 @@ def imu_profile_restore(op, m):
         recovery = ("# microduck-helper: recovered pre-control IMU selection\n[Service]\nExecStart=\nExecStart=" +
                     " ".join(imu_redo_quote(a) for a in m["exec_args"] + ["--commissioning"]) + "\n").encode()
         if exists(op.ctx, COMMISSIONING_DROPIN) and imu_profile_safe_file(op, COMMISSIONING_DROPIN) != recovery:
-            raise Stop(EXIT_STATE, "imu_session_tampered", "出厂标定模式文件已改变，保留会话")
+            raise Stop(EXIT_STATE, "imu_session_tampered", "Factory commissioning file changed; session kept")
         write_atomic(op.ctx, COMMISSIONING_DROPIN, recovery, 0o644)
         remove(op.ctx, IMU_REDO_DROPIN)
         if op.ctx.run(["systemctl", "daemon-reload"])[0] != 0 or imu_redo_arguments(exec_start(op)) != m["exec_args"] + ["--commissioning"]:
-            raise Stop(EXIT_FAIL, "rollback_failed", "安全标定启动参数未加载，会话保留")
+            raise Stop(EXIT_FAIL, "rollback_failed", "Safe commissioning args not loaded; session kept")
         imu_profile_restart(op, m["old_profile"])
         imu_profile_controllers_restore(op, m["controllers"])
-        imu_redo_save(op, m, "cancelled", active=False, reason="已恢复原类型，保持标定模式；可重新选择并验证")
+        imu_redo_save(op, m, "cancelled", active=False, reason="Restored previous profile in commissioning mode")
         return {}
     remove(op.ctx, IMU_REDO_DROPIN)
     target = m.get("original_args", m["exec_args"])
     if op.ctx.run(["systemctl", "daemon-reload"])[0] != 0 or imu_redo_arguments(exec_start(op)) != target:
-        raise Stop(EXIT_FAIL, "rollback_failed", "原启动参数未恢复，会话保留")
+        raise Stop(EXIT_FAIL, "rollback_failed", "Original ExecStart not restored; session kept")
     expected = _load_toml(op, CALIB)
     mode = m["original_mode"]
     if mode == "commissioning":
@@ -2324,11 +2274,11 @@ def imu_profile_restore(op, m):
 
 def imu_profile_enter(op, args, previous):
     if (previous and previous["active"]) or exists(op.ctx, IMU_REDO_DROPIN):
-        raise Stop(EXIT_STATE, "imu_recalibrate_active", "标定会话已经开着：先完成或取消")
+        raise Stop(EXIT_STATE, "imu_recalibrate_active", "IMU recalibration session already active")
     original_args = imu_redo_arguments(exec_start(op))
     factory = exists(op.ctx, COMMISSIONING_DROPIN)
     if ("--commissioning" in original_args) != factory or original_args.count("--commissioning") > 1:
-        raise Stop(EXIT_STATE, "foreign_commissioning", "外来标定启动参数，未修改")
+        raise Stop(EXIT_STATE, "foreign_commissioning", "Foreign commissioning args; untouched")
     argv = [a for a in original_args if a != "--commissioning"]
     configs = imu_profile_config(op, argv)
     # Build and validate every candidate before writing any file.
@@ -2336,9 +2286,9 @@ def imu_profile_enter(op, args, previous):
     bus = imu_profile_gate(op)
     status, err = calibration_status(op)
     if status is None or imu_redo_source(bus, status) != "bus":
-        raise Stop(EXIT_STATE, "imu_source_changed", "当前主程序 IMU 来源不是总线或无法确认，未修改")
+        raise Stop(EXIT_STATE, "imu_source_changed", "robotd IMU source is not bus or unconfirmed")
     if imu_profile_configured(bus) != configs[0][2]["bus"].get("imu_profile", "legacy"):
-        raise Stop(EXIT_STATE, "readback_mismatch", "文件类型与正在运行的主程序不一致，未修改")
+        raise Stop(EXIT_STATE, "readback_mismatch", "Config profile mismatches running robotd")
     data, _ = read_calibration(op)
     imu_redo_readback(op, data, "bus")
     mode = "commissioning" if factory else ("motion" if bus.get("phase") == "control" else "startup")
@@ -2374,22 +2324,22 @@ def imu_profile_enter(op, args, previous):
         imu_profile_controllers_stop(op)
         imu_profile_gate(op)
         if imu_redo_arguments(exec_start(op)) != original_args:
-            raise Stop(EXIT_STATE, "readback_mismatch", "主程序启动参数已改变，未修改")
+            raise Stop(EXIT_STATE, "readback_mismatch", "robotd ExecStart changed; untouched")
         for row in files + config_files:
             if _sha256(imu_profile_safe_file(op, row["path"])) != row["sha256"]:
-                raise Stop(EXIT_STATE, "readback_mismatch", "配置 / 标定在进入前改变，未修改")
+                raise Stop(EXIT_STATE, "readback_mismatch", "Config/calibration changed before enter")
         changed = True
         write_atomic(op.ctx, IMU_REDO_DROPIN, imu_redo_override(m), 0o644)
         for row in config_files + files:
             _write_preserving(op, row["path"], candidates[row["path"]], row, 0o644)
             if imu_profile_safe_file(op, row["path"]) != candidates[row["path"]]:
-                raise Stop(EXIT_FAIL, "readback_mismatch", "类型配置写后读回不一致")
+                raise Stop(EXIT_FAIL, "readback_mismatch", "Profile config readback mismatch after write")
         if op.ctx.run(["systemctl", "daemon-reload"])[0] != 0:
-            raise Stop(EXIT_FAIL, "restart_failed", "模式配置未加载")
+            raise Stop(EXIT_FAIL, "restart_failed", "Mode config not loaded")
         imu_redo_owned(op, m)
         imu_profile_restart(op, m["profile"])
         imu_redo_save(op, m, "commissioning")
-        return op.finish(EXIT_OK, "imu_entered", "类型已保存，已重连到标定模式；请完成安装方向采集与主程序验证", m)
+        return op.finish(EXIT_OK, "imu_entered", "Profile saved in commissioning mode; complete orientation verification", m)
     except Exception as err:
         try:
             if changed:
@@ -2399,7 +2349,7 @@ def imu_profile_enter(op, args, previous):
                 imu_redo_save(op, m, "cancelled", active=False)
         except Exception as rollback_error:
             imu_redo_save(op, m, "recovery_required", reason=str(rollback_error))
-            return op.finish(EXIT_FAIL, "rollback_failed", "选择未完成，恢复也未完成；会话和备份仍在，可取消恢复", m)
+            return op.finish(EXIT_FAIL, "rollback_failed", "Selection and rollback incomplete; session and backup preserved", m)
         return op.finish(err.code if isinstance(err, Stop) else EXIT_FAIL,
                          err.result if isinstance(err, Stop) else "enter_failed", str(err), m)
 
@@ -2410,22 +2360,22 @@ def check_imu_redo_args(args):
             "cancel": ("by", "action", "confirmed", "session_id"),
             "finish": ("by", "action", "session_id", "source", "quat")}
     if action not in keys:
-        raise Stop(EXIT_ARGS, "bad_args", "imu-recalibrate 只认 enter / status / finish / cancel")
-    check_keys(args, keys[action], "imu-recalibrate 的参数")
+        raise Stop(EXIT_ARGS, "bad_args", "imu-recalibrate action must be enter / status / finish / cancel")
+    check_keys(args, keys[action], "imu-recalibrate args")
     if "profile" in args and args["profile"] not in ("legacy", "qinmo"):
-        raise Stop(EXIT_ARGS, "bad_args", "profile 只能是 legacy 或 qinmo")
+        raise Stop(EXIT_ARGS, "bad_args", "profile must be legacy or qinmo")
     by = check_by(args)
     if action in ("enter", "cancel") and args.get("confirmed") is not True:
-        raise Stop(EXIT_ARGS, "bad_args", "先明确确认扶稳并卸力，再进入或取消")
+        raise Stop(EXIT_ARGS, "bad_args", "Confirm duck is supported and relaxed before enter or cancel")
     if action in ("finish", "cancel") and not re.fullmatch(r"[0-9a-f]{32}", str(args.get("session_id", ""))):
-        raise Stop(EXIT_ARGS, "bad_args", "session_id 不正确")
+        raise Stop(EXIT_ARGS, "bad_args", "Invalid session_id")
     if action == "finish":
         try:
             q = normalize_quat(args.get("quat"))
         except CalibError as err:
             raise Stop(EXIT_ARGS, "bad_args", str(err)) from err
         if args.get("source") not in IMU_SOURCES or not imu_redo_same(q, args["quat"]):
-            raise Stop(EXIT_ARGS, "bad_args", "source / normalized quat 不正确")
+            raise Stop(EXIT_ARGS, "bad_args", "Invalid source or normalized quat")
     return by, action
 
 
@@ -2433,31 +2383,31 @@ def verb_imu_recalibrate(op, args, raw):
     op.by, action = check_imu_redo_args(args)
     if action != "status" and op.ctx.env.get(DETACH_ENV) != "1":
         return detach(op, raw, "imu-recalibrate")
-    op.take_lock("IMU 校准")
+    op.take_lock("IMU calibration")
     m = imu_redo_load(op)
     if action == "status":
-        return op.finish(EXIT_OK, "imu_status", "读到初次 IMU 校准会话", m or {"active": False, "phase": "idle"}, record=False)
+        return op.finish(EXIT_OK, "imu_status", "Read IMU recalibration session", m or {"active": False, "phase": "idle"}, record=False)
     if flag_present(op.ctx):
-        raise Stop(EXIT_STATE, "bus_held", "舵机页占着总线：先交还主程序")
+        raise Stop(EXIT_STATE, "bus_held", "Servo page holds the bus: hand back first")
     if "profile" in args or (m and "profile" in m):
         op.service_lock_handle = op.ctx.lock(SERVICE_LOCK)
         if op.service_lock_handle is None:
-            raise Stop(EXIT_BUSY, "busy", "主程序管理 / 更新正在进行：稍后再试")
+            raise Stop(EXIT_BUSY, "busy", "Service management/update in progress; retry later")
     if action == "enter" and "profile" in args:
         return imu_profile_enter(op, args, m)
     if action == "enter":
         if (m and m["active"]) or exists(op.ctx, IMU_REDO_DROPIN):
-            raise Stop(EXIT_STATE, "imu_recalibrate_active", "初次 IMU 校准会话已经开着：继续或取消")
+            raise Stop(EXIT_STATE, "imu_recalibrate_active", "IMU recalibration session already active")
         if exists(op.ctx, COMMISSIONING_DROPIN):
-            raise Stop(EXIT_STATE, "refused", "出厂标定模式直接做粗校，无需重做会话")
+            raise Stop(EXIT_STATE, "refused", "Already in factory commissioning mode; no recalibration session needed")
         argv = imu_redo_arguments(exec_start(op))
         if "--commissioning" in argv:
-            raise Stop(EXIT_STATE, "foreign_commissioning", "主程序已经在外来的标定模式")
+            raise Stop(EXIT_STATE, "foreign_commissioning", "robotd already in foreign commissioning mode")
         bus = imu_redo_gate(op, "motion")
         data, _ = read_calibration(op)
         status, err = calibration_status(op)
         if status is None:
-            raise Stop(EXIT_STATE, "readback_mismatch", f"原始标定读不回：{err}")
+            raise Stop(EXIT_STATE, "readback_mismatch", f"Original calibration unreadable: {err}")
         source = imu_redo_source(bus, status)
         imu_redo_readback(op, data, source)
         # Save service states before stopping, and save every backup before touching ExecStart.
@@ -2485,18 +2435,18 @@ def verb_imu_recalibrate(op, args, raw):
         try:
             pads_stop(op)
             if is_active(op, "padd") or is_active(op, GAMESIR):
-                raise Stop(EXIT_STATE, "refused", "手柄服务没停下，未切换模式")
+                raise Stop(EXIT_STATE, "refused", "Gamepad services did not stop; mode unchanged")
             imu_redo_gate(op, "motion", source)
             if imu_redo_arguments(exec_start(op)) != argv or _sha256(imu_redo_file(op, CALIB)) != files[0]["sha256"]:
-                raise Stop(EXIT_STATE, "readback_mismatch", "进入前主程序参数或标定文件已改变")
+                raise Stop(EXIT_STATE, "readback_mismatch", "robotd args or calibration changed before enter")
             write_atomic(op.ctx, IMU_REDO_DROPIN, imu_redo_override(m), 0o644)
             override_written = True
             if op.ctx.run(["systemctl", "daemon-reload"])[0] != 0:
-                raise Stop(EXIT_FAIL, "restart_failed", "模式配置没有重新加载")
+                raise Stop(EXIT_FAIL, "restart_failed", "Mode config not reloaded")
             imu_redo_owned(op, m)
             imu_redo_restart(op, "commissioning", data, source)
             imu_redo_save(op, m, "commissioning")
-            return op.finish(EXIT_OK, "imu_entered", "已进入初次 IMU 校准：保持失能，按原来的静止 / 前倾粗校再验证", m)
+            return op.finish(EXIT_OK, "imu_entered", "Entered IMU recalibration mode; keep relaxed and run calibration + verification", m)
         except Exception as err:
             try:
                 if override_written or exists(op.ctx, IMU_REDO_DROPIN):
@@ -2508,12 +2458,12 @@ def verb_imu_recalibrate(op, args, raw):
                     imu_redo_save(op, m, "cancelled", active=False)
             except Exception as rb:
                 imu_redo_save(op, m, "recovery_required", reason=str(rb))
-                return op.finish(EXIT_FAIL, "rollback_failed", f"进入没完成，恢复也没完成：{rb}；保留会话", m)
+                return op.finish(EXIT_FAIL, "rollback_failed", f"Enter and rollback failed: {rb}; session kept", m)
             if isinstance(err, Stop):
                 return op.finish(err.code, err.result, err.reason, m)
-            return op.finish(EXIT_FAIL, "enter_failed", f"进入失败，已恢复原来的文件和模式：{err}", m)
+            return op.finish(EXIT_FAIL, "enter_failed", f"Enter failed; restored previous files/mode: {err}", m)
     if not m or not m["active"] or args["session_id"] != m["session_id"]:
-        raise Stop(EXIT_STATE, "no_session", "这份初次 IMU 校准会话已改变或已结束")
+        raise Stop(EXIT_STATE, "no_session", "IMU recalibration session changed or ended")
     imu_redo_owned(op, m, allow_missing=(m["phase"] in ("entering", "finishing", "cancelling", "recovery_required")))
     # A reboot may have started pad services again while the persistent override
     # kept robotd in commissioning. Stop them again before returning to motion.
@@ -2522,7 +2472,7 @@ def verb_imu_recalibrate(op, args, raw):
     else:
         pads_stop(op)
     if is_active(op, "padd") or is_active(op, GAMESIR):
-        raise Stop(EXIT_STATE, "refused", "手柄服务没停下，会话保留")
+        raise Stop(EXIT_STATE, "refused", "Gamepad services did not stop; session kept")
     if action == "cancel":
         # Disk config, loaded ExecStart and the live process can differ after a
         # killed transition. Choose the safety gate from a fresh live snapshot;
@@ -2530,7 +2480,7 @@ def verb_imu_recalibrate(op, args, raw):
         live, err = robotd_bus_status(op)
         mode = (live or {}).get("mode")
         if mode not in ("motion", "commissioning"):
-            raise Stop(EXIT_STATE, "refused", f"取消前主程序的当前模式读不回：{err or mode}；会话保留")
+            raise Stop(EXIT_STATE, "refused", f"robotd mode unreadable before cancel: {err or mode}; session kept")
         if "profile" in m:
             imu_profile_gate(op)
         else:
@@ -2538,26 +2488,26 @@ def verb_imu_recalibrate(op, args, raw):
         imu_redo_save(op, m, "cancelling")
         try:
             status = imu_redo_restore_original(op, m)
-            note = ("已恢复原类型和 IMU 标定，保持标定模式；可重新选择并验证"
+            note = ("Restored previous IMU profile and calibration in commissioning mode"
                     if m.get("original_mode") in ("startup", "commissioning") else
-                    "已取消重做，恢复原来的 IMU 标定和运动模式，保持失能")
+                    "Cancelled recalibration; restored previous IMU calibration and motion mode")
             return op.finish(EXIT_OK, "imu_cancelled", note, dict(m, calibration=status))
         except Exception as err:
             imu_redo_save(op, m, "recovery_required", reason=str(err))
-            return op.finish(EXIT_FAIL, "cancel_failed", f"取消未完成，会话和备份仍在：{err}", m)
+            return op.finish(EXIT_FAIL, "cancel_failed", f"Cancel incomplete; session and backup kept: {err}", m)
     source, quat = args["source"], args["quat"]
     if source != m["source"]:
-        raise Stop(EXIT_STATE, "imu_source_changed", "当前来源与进入会话时不同")
+        raise Stop(EXIT_STATE, "imu_source_changed", "IMU source differs from session start")
     imu_redo_gate(op, "commissioning", source)
     current = _load_toml(op, CALIB)
     if not imu_redo_same(normalized_calibration(current), normalized_calibration(_load_toml(op, CALIB_SAVED))):
-        raise Stop(EXIT_STATE, "readback_mismatch", "主标定与 saved 读回不一致")
+        raise Stop(EXIT_STATE, "readback_mismatch", "Main and saved calibration readback mismatch")
     imu_redo_readback(op, current, source, quat)
     if "profile" in m:
         imu_profile_config(op, m["exec_args"])
         for row in m["config_files"]:
             if _sha256(imu_profile_safe_file(op, row["path"])) != row.get("selected_sha256"):
-                raise Stop(EXIT_STATE, "readback_mismatch", "已选类型的配置文件已改变，保留会话")
+                raise Stop(EXIT_STATE, "readback_mismatch", "Selected profile config changed; session kept")
         imu_profile_readback(op, m["profile"], require_discovery=True)
     directory = IMU_REDO_DIR + "/" + m["session_id"]
     baseline = json.loads(imu_redo_file(op, directory + "/calibration.json"))
@@ -2577,29 +2527,29 @@ def verb_imu_recalibrate(op, args, raw):
                 mount.pop("verified", None)
         return normalized_calibration(cal)
     if not imu_redo_same(without_allowed(baseline), without_allowed(current)):
-        raise Stop(EXIT_STATE, "readback_mismatch", "除当前 IMU 方向和 motion_enabled 外，其他标定已改变：停止完成")
+        raise Stop(EXIT_STATE, "readback_mismatch", "Unrelated calibration fields changed; aborting finish")
     before = {path: file_meta(op.ctx, path) for path in (CALIB, CALIB_SAVED)}
     text = before[CALIB][1].decode("utf-8")
     replacement = "motion_enabled = " + _bool_text(baseline.get("motion_enabled"))
     text, count = re.subn(r"(?m)^motion_enabled\s*=\s*(?:true|false)\s*(?:#[^\n]*)?$", replacement, text)
     if count != 1:
-        raise Stop(EXIT_STATE, "bad_toml", "motion_enabled 没有唯一的顶层写法，不猜测修改")
+        raise Stop(EXIT_STATE, "bad_toml", "Ambiguous motion_enabled key in calibration")
     expected = tomllib.loads(text)
     restored = copy.deepcopy(current)
     restored["motion_enabled"] = baseline["motion_enabled"]
     if not imu_redo_same(expected, restored):
-        raise Stop(EXIT_STATE, "bad_toml", "恢复 motion_enabled 会改变其他字段，停止完成")
+        raise Stop(EXIT_STATE, "bad_toml", "Restoring motion_enabled would alter other fields")
     imu_redo_save(op, m, "finishing", expected_quat=quat)
     try:
         for path in (CALIB, CALIB_SAVED):
             _write_preserving(op, path, text.encode(), before[path][0], 0o644)
             if not imu_redo_same(_load_toml(op, path), expected):
-                raise Stop(EXIT_FAIL, "readback_mismatch", "安装后文件读回不一致")
+                raise Stop(EXIT_FAIL, "readback_mismatch", "Post-write calibration readback mismatch")
         imu_redo_owned(op, m)
         remove(op.ctx, IMU_REDO_DROPIN)
         target_args = m.get("original_args", m["exec_args"])
         if op.ctx.run(["systemctl", "daemon-reload"])[0] != 0 or imu_redo_arguments(exec_start(op)) != target_args:
-            raise Stop(EXIT_FAIL, "restart_failed", "原来的启动参数没有恢复")
+            raise Stop(EXIT_FAIL, "restart_failed", "Original ExecStart not restored")
         target_mode = "commissioning" if m.get("original_mode") == "commissioning" else "motion"
         status = imu_redo_restart(op, target_mode, expected, source)
         imu_redo_readback(op, expected, source, quat)
@@ -2608,9 +2558,9 @@ def verb_imu_recalibrate(op, args, raw):
         else:
             pads_restore(op, m["controllers"])
         imu_redo_save(op, m, "finished", active=False)
-        note = ("IMU 方向已验证，类型已保存，继续出厂标定流程"
+        note = ("IMU orientation verified and profile saved; continue factory commissioning"
                 if target_mode == "commissioning" else
-                "初次 IMU 校准已重新验证，原有舵机标定保持，已回运动模式并失能")
+                "IMU recalibration verified; servo calibrations preserved, returned to motion mode (relaxed)")
         return op.finish(EXIT_OK, "imu_finished", note, dict(m, calibration=status))
     except Exception as err:
         # Keep the successfully verified commissioning state, never the original unverified candidate.
@@ -2618,40 +2568,40 @@ def verb_imu_recalibrate(op, args, raw):
             for path, (meta, contents) in before.items():
                 _write_preserving(op, path, contents, meta, 0o644)
             if exists(op.ctx, IMU_REDO_DROPIN) and imu_redo_file(op, IMU_REDO_DROPIN) != imu_redo_override(m):
-                raise Stop(EXIT_STATE, "imu_session_tampered", "模式文件已改变，未覆盖")
+                raise Stop(EXIT_STATE, "imu_session_tampered", "Mode drop-in modified; not overwriting")
             write_atomic(op.ctx, IMU_REDO_DROPIN, imu_redo_override(m), 0o644)
             op.ctx.run(["systemctl", "daemon-reload"])
             imu_redo_restart(op, "commissioning", current, source)
             imu_redo_save(op, m, "finish_failed", reason=str(err))
         except Exception as rb:
             imu_redo_save(op, m, "recovery_required", reason=str(rb))
-        return op.finish(EXIT_FAIL, "finish_failed", f"完成没成功，已保留标定会话和验证后的方向，可重试或取消：{err}", m)
+        return op.finish(EXIT_FAIL, "finish_failed", f"Finish failed; session and verified orientation kept: {err}", m)
 
 
-# 动词
+# Verbs
 
 def verb_take(op, args):
-    check_keys(args, ("by", "allow_seated"), "bus-take 的参数")
+    check_keys(args, ("by", "allow_seated"), "bus-take args")
     op.by = check_by(args)
     allow_seated = args.get("allow_seated", False)
     if not isinstance(allow_seated, bool):
-        raise Stop(EXIT_ARGS, "bad_args", "allow_seated 要是 true / false")
+        raise Stop(EXIT_ARGS, "bad_args", "allow_seated must be boolean")
     op.take_lock()
     imu_redo_conflict(op)
     guard_installed(op)
     session_open = flag_present(op.ctx)
     if session_open:
-        op.emit("session", "info", "旗已经在（上次调舵机没退出）：核对主程序确实停着就行")
+        op.emit("session", "info", "Bus-held flag already set; verifying robotd is stopped")
     started_hold = False
     if hold_active(op):
-        op.emit("lock", "info", "管理锁已经在 Studio 手里")
+        op.emit("lock", "info", "Management lock already held by Studio")
     else:
         if not hold_start(op):
-            raise Stop(EXIT_BUSY, "busy", "拿不到管理锁 /run/microduck-service-management.lock：板端脚本正在跑？等它跑完再试")
+            raise Stop(EXIT_BUSY, "busy", "Failed to acquire /run/microduck-service-management.lock; service script may be running")
         started_hold = True
-        op.emit("lock", "info", "管理锁拿到了（microduck-bus-hold）")
+        op.emit("lock", "info", "Acquired management lock (microduck-bus-hold)")
     pads = pads_stop(op)
-    why = "主程序没在跑"
+    why = "robotd is not running"
     if running(robotd_state(op)):
         try:
             why = gate(op, allow_seated)
@@ -2660,50 +2610,50 @@ def verb_take(op, args):
             if started_hold and not session_open:
                 hold_stop(op)
             raise
-    op.emit("gate", "info", f"可以接管：{why}")
+    op.emit("gate", "info", f"Takeover allowed: {why}")
     flag_write(op, "bus-take")
-    op.emit("flag", "info", "立旗：robotd 从现在起起不来（ConditionPathExists=!）")
+    op.emit("flag", "info", "Set bus-held flag: robotd blocked by ConditionPathExists")
     if not stop_robotd(op):
-        raise Stop(EXIT_FAIL, "stop_failed", "主程序停不下来（KILL 以后也没停）。旗留着，别开串口",
+        raise Stop(EXIT_FAIL, "stop_failed", "robotd failed to stop even after SIGKILL; do not open serial port",
                    {"flag": True, "lock": True})
     free, who = port_free(op)
     if free is not True:
         raise Stop(EXIT_FAIL, "port_busy",
-                   f"串口 {PORT} 还被占着（{who}）。旗留着；看是谁开着它" if free is False else f"查不了串口有没有人占：{who}",
+                   f"Serial port {PORT} still in use ({who})" if free is False else f"Cannot check serial port usage: {who}",
                    {"flag": True, "lock": True})
-    return op.finish(EXIT_OK, "taken", f"接管好了：{why}；主程序停着，Studio 可以开串口",
+    return op.finish(EXIT_OK, "taken", f"Bus taken over: {why}; robotd stopped, Studio may open serial port",
                      {"pads_were": pads, "session_was_open": session_open})
 
 
 def check_give_args(args):
-    check_keys(args, ("by", "soft", "marker"), "bus-give-back 的参数")
+    check_keys(args, ("by", "soft", "marker"), "bus-give-back args")
     by = check_by(args)
     soft = "soft" in args
     if soft == ("marker" in args):
-        raise Stop(EXIT_ARGS, "bad_args", "bus-give-back 要么 {soft: true}，要么 {marker: {...}}，二选一")
+        raise Stop(EXIT_ARGS, "bad_args", "bus-give-back requires either {soft: true} or {marker: {...}}")
     if soft and args["soft"] is not True:
-        raise Stop(EXIT_ARGS, "bad_args", "soft 只能是 true")
+        raise Stop(EXIT_ARGS, "bad_args", "soft must be true")
     return by, soft
 
 
 def verb_give_back(op, args, raw):
     op.by, soft = check_give_args(args)
     if not soft:
-        build_marker(op, args["marker"], op.by)        # 先在这里校验一遍，参数错就不用转出去了
+        build_marker(op, args["marker"], op.by)        # Validate marker before detaching
     if op.ctx.env.get(DETACH_ENV) != "1":
         return detach(op, raw)
     op.take_lock()
     if not flag_present(op.ctx) or not hold_active(op):
-        raise Stop(EXIT_STATE, "no_session", "没有调舵机的会话（旗或管理锁不在）：总线现在不归 Studio，没东西可交还",
+        raise Stop(EXIT_STATE, "no_session", "No active servo session (flag or lock missing); nothing to hand back",
                    {"flag": flag_present(op.ctx), "lock": hold_active(op)})
     requested = parse_requested_ms(op)
     if abort_requested(op, requested, consume=False):
         remove(op.ctx, ABORT)
-        raise Stop(EXIT_BUSY, "aborted", "交还还没开始就被中止了（页面按了卸力）", {"lock": True})
+        raise Stop(EXIT_BUSY, "aborted", "Handback aborted before start (E-Stop pressed)", {"lock": True})
     stale = read_json(op.ctx, ABORT)
     if stale is not None or exists(op.ctx, ABORT):
         remove(op.ctx, ABORT)
-        op.emit("abort", "info", "清掉以前留下的中止请求（比这次交还早）")
+        op.emit("abort", "info", "Cleared stale abort request")
     return give_soft(op, requested) if soft else give_marker(op, args["marker"], requested)
 
 
@@ -2725,8 +2675,7 @@ def abort_requested(op, requested_ms, consume=True):
 
 
 def detach(op, raw, verb="bus-give-back"):
-    """第一次被调用：用 systemd-run 把自己放进独立的临时单元再跑一遍，stdin 原样转过去，输出原样转回来。
-    Studio 死了，这边的 systemd-run 跟着死，临时单元里那个照样跑完（它忽略 SIGPIPE，写不出去就只写 journal）。"""
+    """Re-exec inside a transient systemd-run unit so handback/commit survives Studio exit."""
     token = secrets.token_hex(8)
     stamp = f"{int(time.time())}-{op.ctx.pid()}"
     requested = int(op.ctx.now() * 1000)
@@ -2741,7 +2690,7 @@ def detach(op, raw, verb="bus-give-back"):
     if rc in (EXIT_OK, EXIT_ARGS, EXIT_STATE, EXIT_BUSY, EXIT_FAIL, EXIT_RETAKE) and rc != EXIT_OK:
         return rc
     return op.finish(EXIT_FAIL, "detach_failed",
-                     f"独立单元没跑出结果（systemd-run 退出码 {rc}）：看 journalctl -t microduck-helper",
+                     f"Transient unit produced no result (systemd-run rc={rc}); check journalctl -t microduck-helper",
                      {"systemd_run_rc": rc, "unit": unit})
 
 
@@ -2764,7 +2713,7 @@ def bus_status(op):
 
 
 def robotd_up(bus):
-    """主程序起来了吗：运动模式进了 control，或者标定模式回的是实时快照（read_error 也算：起来了，只是读舵机出错）。"""
+    """Check if robotd is up (motion control or commissioning live snapshot)."""
     if not isinstance(bus, dict):
         return False
     mode, phase = bus.get("mode"), bus.get("phase")
@@ -2772,33 +2721,33 @@ def robotd_up(bus):
 
 
 def still_starting_text(bus, waited):
-    """等满了，主程序还在回话、但一直报启动阶段：照实说（Studio 总览「一直报启动中」同一个口气）。"""
+    """Format message when robotd timed out while still reporting startup phase."""
     phase, err = bus.get("phase"), bus.get("error")
     if err:
-        return f"主程序 {waited:.0f} 秒一直报「启动中」（{phase}：{err}）：去日志页看主程序最后说了什么"
-    return f"主程序 {waited:.0f} 秒一直报「启动中」（phase={phase}）：{STILL_STARTING}"
+        return f"robotd still reporting startup after {waited:.0f}s ({phase}: {err}); check robotd logs"
+    return f"robotd still reporting startup after {waited:.0f}s (phase={phase}): {STILL_STARTING}"
 
 
 def start_robotd(op):
     op.ctx.run(["systemctl", "reset-failed", "robotd"])
     rc, out, err = op.ctx.run(["systemctl", "start", "--no-block", "robotd"])
-    op.emit("start", "info", "起主程序（reset-failed 过；成没成看 ActiveState/ConditionResult，不看这个退出码）",
+    op.emit("start", "info", "Starting robotd (after reset-failed)",
             {"rc": rc, "stderr": err.strip()[:200]})
 
 
 def retake(op, reason, detail=None):
-    """交接没成：重新立旗 → 停 robotd（不写扭矩）→ 删标记 → 锁一直在手里。Studio 重开串口接着保持。"""
-    op.emit("retake", "warn", f"交接没成，把总线拿回来给 Studio：{reason}", detail)
+    """Handover failed: restore bus-held flag, stop robotd, remove marker, keep management lock."""
+    op.emit("retake", "warn", f"Handover failed; reclaiming bus for Studio: {reason}", detail)
     flag_write(op, "retake")
     ok = stop_robotd(op, "retake")
     if remove(op.ctx, MARKER):
-        op.emit("retake", "info", "删掉没被读走的交接标记")
+        op.emit("retake", "info", "Removed unread handover marker")
     free, who = port_free(op)
     d = dict(detail or {}, flag=True, lock=True, port_free=free)
     if not ok:
-        return op.finish(EXIT_FAIL, "retake_failed", f"{reason}；而且主程序停不下来：别开串口", d)
+        return op.finish(EXIT_FAIL, "retake_failed", f"{reason}; robotd failed to stop: do not open serial port", d)
     if free is not True:
-        return op.finish(EXIT_FAIL, "retake_failed", f"{reason}；串口还被占着（{who}）", d)
+        return op.finish(EXIT_FAIL, "retake_failed", f"{reason}; serial port still in use ({who})", d)
     return op.finish(EXIT_RETAKE, "retake", reason, d)
 
 
@@ -2808,7 +2757,7 @@ def declined_reason(bus):
     if not detail and bus.get("error"):
         detail["reason"] = bus.get("error")
     parts = [f"#{detail['joint']}" if detail.get("joint") is not None else None, detail.get("item"), detail.get("reason")]
-    text = "主程序核对交接标记没过：" + "，".join(str(p) for p in parts if p)
+    text = "robotd rejected handover marker: " + ", ".join(str(p) for p in parts if p)
     return text, detail
 
 
@@ -2817,13 +2766,13 @@ def give_marker(op, given, requested):
     free, who = port_free(op)
     if free is not True:
         raise Stop(EXIT_FAIL, "refused",
-                   f"串口 {PORT} 还被占着（{who}）：Studio 关了串口没有？没交还，会话照旧" if free is False else f"查不了串口：{who}",
+                   f"Serial port {PORT} still in use ({who})" if free is False else f"Cannot check serial port: {who}",
                    {"flag": True, "lock": True})
     ensure_dir(op.ctx, MARKER_DIR, 0o700)
     write_atomic(op.ctx, MARKER, (json.dumps(marker, ensure_ascii=False) + "\n").encode("utf-8"), 0o600)
-    op.emit("marker", "info", "交接标记写好了", {"ttl_ms": marker["ttl_ms"], "mono_ms": marker["mono_ms"]})
+    op.emit("marker", "info", "Wrote handover marker", {"ttl_ms": marker["ttl_ms"], "mono_ms": marker["mono_ms"]})
     remove(op.ctx, FLAG)
-    op.emit("flag", "info", "撤旗（管理锁不放，等出结果）")
+    op.emit("flag", "info", "Removed bus-held flag (keeping management lock until confirmed)")
     start_robotd(op)
     t_start = op.ctx.now()
     seen_read = False
@@ -2832,34 +2781,34 @@ def give_marker(op, given, requested):
         op.ctx.sleep(GIVE_POLL)
         elapsed = op.ctx.now() - t_start
         if abort_requested(op, requested):
-            return op.finish(EXIT_BUSY, "aborted", "交还被中止（页面按了卸力）：bus-abort 在停主程序、把总线还给 Studio",
+            return op.finish(EXIT_BUSY, "aborted", "Handback aborted (E-Stop pressed): bus-abort reclaiming bus",
                              {"lock": True})
         st = robotd_state(op)
         marker_left = exists(op.ctx, MARKER)
         if not marker_left and not seen_read:
             seen_read = True
-            op.emit("wait", "info", "主程序读走了交接标记")
+            op.emit("wait", "info", "robotd consumed handover marker")
         if stopped(st) and st.get("ConditionResult") == "no":
-            return retake(op, "主程序被 Condition 挡住了，没起来（旗又出现了？）", st)
+            return retake(op, "robotd blocked by ConditionPathExists", st)
         if st.get("Result") == "start-limit-hit":
-            return retake(op, "主程序撞上了启动次数限制（start-limit-hit）", st)
+            return retake(op, "robotd hit systemd start-limit-hit", st)
         bus = bus_status(op)
         if bus is not None:
             phase = bus.get("phase")
             if phase != last_phase:
-                op.emit("wait", "info", f"主程序 phase={phase}")
+                op.emit("wait", "info", f"robotd phase={phase}")
                 last_phase = phase
             ho = bus.get("handover") if isinstance(bus.get("handover"), dict) else {}
             if phase == "handover_declined" or ho.get("result") == "declined":
                 text, detail = declined_reason(bus)
                 return retake(op, text, detail)
             if bus.get("mode") == "commissioning" and robotd_up(bus):
-                # 标定模式不认交接标记：开总线时先全部卸力（feetech_commissioning.rs 的 torque_off），没东西可拿回。
-                # 起来了就别等 15 秒再把总线拿回来
+                # Commissioning mode does not support handover markers; it releases torque on startup.
+                #
                 remove(op.ctx, MARKER)
                 pads_start(op)
                 hold_stop(op)
-                return op.finish(EXIT_FAIL, "limp", "主程序起来了，在标定模式：标定模式不接手保持，起来时已经全部卸力",
+                return op.finish(EXIT_FAIL, "limp", "robotd started in commissioning mode (torque released on startup)",
                                  {"mode": "commissioning", "phase": phase})
             if phase == "control":
                 s4 = startup_step4(op)
@@ -2868,21 +2817,21 @@ def give_marker(op, given, requested):
                         remove(op.ctx, ABORT)
                         pads_start(op)
                         hold_stop(op)
-                        return op.finish(EXIT_OK, "adopted", "主程序接手保持了：15 颗上着力，没开模型；点「站起来」才回站姿",
+                        return op.finish(EXIT_OK, "adopted", "robotd adopted holding pose (15 servos torqued, policy off)",
                                          {"handover": ho, "ms_to_adopt": int(elapsed * 1000)})
-                    # 进了控制循环却没接手：robotd 没认标记（版本旧 / 开关没开），或者接手以后崩溃重启过。
-                    # 这两种舵机都已经照老规矩全卸了，没东西可拿回
+                    # Entered control loop without adopting marker
+                    #
                     remove(op.ctx, MARKER)
                     pads_start(op)
                     hold_stop(op)
-                    why = ("主程序没认交接标记（版本旧，或者 drop-in 里的开关没开）" if marker_left
-                           else "主程序没接手（可能接手以后重启过）")
-                    return op.finish(EXIT_FAIL, "limp", f"{why}：已经照老规矩全部卸力", {"handover": ho or None})
+                    why = ("robotd ignored handover marker (old version or drop-in env disabled)" if marker_left
+                           else "robotd did not adopt marker (may have restarted)")
+                    return op.finish(EXIT_FAIL, "limp", f"{why}: all servos relaxed", {"handover": ho or None})
         if marker_left and elapsed >= MARKER_READ_TIMEOUT:
-            return retake(op, f"{MARKER_READ_TIMEOUT:.0f} 秒没读交接标记（主程序没起来，或者卡在标定 / 参数文件检查）",
+            return retake(op, f"Marker not read within {MARKER_READ_TIMEOUT:.0f}s (robotd stalled or calibration check failed)",
                           {"robotd": st, "phase": last_phase})
         if elapsed >= ADOPT_TIMEOUT:
-            return retake(op, f"{ADOPT_TIMEOUT:.0f} 秒还没走完启动第 4 步（多半卡在等 IMU）",
+            return retake(op, f"Startup step 4 incomplete after {ADOPT_TIMEOUT:.0f}s (likely waiting on IMU)",
                           {"robotd": st, "phase": last_phase})
 
 
@@ -2890,103 +2839,102 @@ def give_soft(op, requested):
     free, who = port_free(op)
     if free is not True:
         raise Stop(EXIT_FAIL, "refused",
-                   f"串口 {PORT} 还被占着（{who}）：Studio 关了串口没有？" if free is False else f"查不了串口：{who}",
+                   f"Serial port {PORT} still in use ({who})" if free is False else f"Cannot check serial port: {who}",
                    {"flag": True, "lock": True})
     if remove(op.ctx, MARKER):
-        op.emit("marker", "info", "删掉以前留下的交接标记（软交还不要它）")
+        op.emit("marker", "info", "Removed stale handover marker")
     remove(op.ctx, FLAG)
-    op.emit("flag", "info", "撤旗")
+    op.emit("flag", "info", "Removed bus-held flag")
     start_robotd(op)
     t_start = op.ctx.now()
     last_bus = None
     while True:
         op.ctx.sleep(GIVE_POLL)
         if abort_requested(op, requested):
-            return op.finish(EXIT_BUSY, "aborted", "交还被中止（页面按了卸力）", {"lock": True})
+            return op.finish(EXIT_BUSY, "aborted", "Handback aborted (E-Stop pressed)", {"lock": True})
         st = robotd_state(op)
         if stopped(st) and st.get("ConditionResult") == "no":
             hold_stop(op)
-            return op.finish(EXIT_FAIL, "soft_failed", "主程序被 Condition 挡住了，没起来（旗又出现了？）", st)
+            return op.finish(EXIT_FAIL, "soft_failed", "robotd blocked by ConditionPathExists", st)
         bus = bus_status(op)
         if bus is not None:
             last_bus = bus
-        # 起来了 = 运动模式 control，或者标定模式的实时快照（ready / moving / read_error / stop_unconfirmed / power_pending）
+        # Started = motion control or commissioning live snapshot
         if robotd_up(bus) and startup_step4(op) == "success":
             pads_start(op)
             hold_stop(op)
             if bus.get("mode") == "commissioning":
                 err = bus.get("last_cycle_error") if bus.get("phase") == "read_error" else None
-                return op.finish(EXIT_OK, "soft", "交还好了：主程序起来了，在标定模式（照老规矩全卸着）"
-                                 + (f"；但读舵机出错：{err}" if err else ""),
+                return op.finish(EXIT_OK, "soft", "Handed back: robotd up in commissioning mode (torque off)"
+                                 + (f" (servo read error: {err})" if err else ""),
                                  {"mode": "commissioning", "phase": bus.get("phase")})
-            return op.finish(EXIT_OK, "soft", "交还好了：主程序起来了（照老规矩全卸着）")
+            return op.finish(EXIT_OK, "soft", "Handed back: robotd is up (torque off)")
         if op.ctx.now() - t_start >= SOFT_TIMEOUT:
             pads_start(op)
             hold_stop(op)
             if isinstance(last_bus, dict) and last_bus.get("phase") in STARTING_PHASES:
-                # 主程序在回话，只是一直报启动阶段（旧 fork 的标定模式永远报 configuring_bus）：照旧判没起来，话照实说。
-                # msg 也放进 detail：Studio 只读 done 那一行的 detail，靠它把整句给页面（不说成「起不来」）
+                # robotd responding but stuck in startup phase
+                #
                 text = still_starting_text(last_bus, SOFT_TIMEOUT)
                 return op.finish(EXIT_FAIL, "soft_failed", text,
                                  dict(st, phase=last_bus.get("phase"), mode=last_bus.get("mode"), still_starting=True, msg=text))
             return op.finish(EXIT_FAIL, "soft_failed",
-                             f"主程序 {SOFT_TIMEOUT:.0f} 秒没走完启动（舵机已经卸着了，不用拿回）：看 robotd 日志", st)
+                             f"robotd did not finish startup within {SOFT_TIMEOUT:.0f}s (servos are relaxed): check robotd logs", st)
 
 
 def require_robotctl(op):
     if not os.path.isfile(op.ctx.p(ROBOTCTL)):
-        raise Stop(EXIT_FAIL, "no_robotctl", f"找不到官方 robotctl：{ROBOTCTL}", {"path": ROBOTCTL})
+        raise Stop(EXIT_FAIL, "no_robotctl", f"robotctl not found: {ROBOTCTL}", {"path": ROBOTCTL})
 
 
 def verb_pad_pair(op, args):
-    """官方 robotctl pad pair --json：停 btd / 重开蓝牙都在 robotctl 里。这里只跑命令、读结果。
-    不碰总线旗子、hold 单元、robotd，也不拿服务管理锁；只用 helper.lock 防止两个配对同时跑。"""
+    """Run /usr/local/bin/robotctl pad pair --json under helper.lock."""
     op.by, mac, timeout = check_pad_pair_args(args)
-    op.take_lock("手柄操作")
+    op.take_lock("gamepad operation")
     require_robotctl(op)
     limit = timeout + PAD_EXTRA_S
     argv = [ROBOTCTL, "pad", "pair", "--json", "--timeout", str(timeout)]
     if mac:
         argv.append(mac)
-    op.emit("pad-pair", "info", f"跑官方 robotctl pad pair（最多 {limit} 秒）",
+    op.emit("pad-pair", "info", f"Running robotctl pad pair (timeout {limit}s)",
             {"argv": argv[1:], "by": op.by})
     rc, out, err, timed_out = op.ctx.run_robotctl(argv, limit)
     stderr = _stderr_lines(err)
     if timed_out:
-        return op.finish(EXIT_FAIL, "timeout", f"robotctl pad pair 超过 {limit} 秒，已经杀掉",
+        return op.finish(EXIT_FAIL, "timeout", f"robotctl pad pair timed out after {limit}s",
                          {"stderr": stderr, "stdout": out[-2000:], "rc": None})
     try:
         pair = json.loads((out or "").strip())
     except ValueError:
         pair = None
     if not isinstance(pair, dict) or pair.get("outcome") not in ("paired", "failed"):
-        why = (err or out or "").strip()[:600] or f"robotctl 退出码 {rc}"
-        return op.finish(EXIT_FAIL, "bad_output", f"robotctl 的回包看不懂：{why}",
+        why = (err or out or "").strip()[:600] or f"robotctl exit {rc}"
+        return op.finish(EXIT_FAIL, "bad_output", f"Unrecognized robotctl output: {why}",
                          {"stderr": stderr, "stdout": out[-2000:], "rc": rc})
     detail = {"pair": pair, "stderr": stderr, "stdout": out.strip()[:4000], "rc": rc}
     if pair.get("outcome") == "paired":
         pad = pair.get("pad") if isinstance(pair.get("pad"), dict) else {}
-        who = pad.get("name") or pad.get("mac") or "手柄"
-        return op.finish(EXIT_OK, "paired", f"配上了：{who}", detail)
+        who = pad.get("name") or pad.get("mac") or "Gamepad"
+        return op.finish(EXIT_OK, "paired", f"Paired: {who}", detail)
     reason = pair.get("reason") or "other"
     detail["reason"] = reason
-    text = f"robotctl 说配对失败：{reason}"
+    text = f"robotctl pairing failed: {reason}"
     if pair.get("detail"):
-        text += f"（{pair['detail']}）"
+        text += f" ({pair['detail']})"
     return op.finish(EXIT_FAIL, "pair_failed", text, detail)
 
 
 def verb_pad_forget(op, args):
     op.by, mac = check_pad_forget_args(args)
-    op.take_lock("手柄操作")
+    op.take_lock("gamepad operation")
     require_robotctl(op)
     argv = [ROBOTCTL, "pad", "forget", mac]
-    op.emit("pad-forget", "info", f"跑官方 robotctl pad forget {mac}", {"argv": argv[1:], "by": op.by})
+    op.emit("pad-forget", "info", f"Running robotctl pad forget {mac}", {"argv": argv[1:], "by": op.by})
     rc, out, err, timed_out = op.ctx.run_robotctl(argv, FORGET_TIMEOUT_S)
     stderr = _stderr_lines(err)
     detail = {"stdout": out.strip()[:4000], "stderr": stderr, "rc": rc}
     if timed_out:
-        return op.finish(EXIT_FAIL, "timeout", f"robotctl pad forget 超过 {FORGET_TIMEOUT_S} 秒，已经杀掉", detail)
+        return op.finish(EXIT_FAIL, "timeout", f"robotctl pad forget timed out after {FORGET_TIMEOUT_S}s", detail)
     if re.search(rf"^forgot\s+{re.escape(mac)}\b", out or "", re.M | re.I):
         removed = True
     elif re.search(rf"{re.escape(mac)}\s+was not paired", out or "", re.I):
@@ -2995,22 +2943,22 @@ def verb_pad_forget(op, args):
         removed = None
     detail["removed"] = removed
     if rc != 0:
-        why = (err or out or "").strip()[:600] or f"robotctl 退出码 {rc}"
-        return op.finish(EXIT_FAIL, "forget_failed", f"robotctl pad forget 没成功：{why}", detail)
+        why = (err or out or "").strip()[:600] or f"robotctl exit {rc}"
+        return op.finish(EXIT_FAIL, "forget_failed", f"robotctl pad forget failed: {why}", detail)
     return op.finish(EXIT_OK, "forgotten",
-                     f"忘掉了 {mac}" if removed is not False else f"{mac} 本来就没配对", detail)
+                     f"Forgot {mac}" if removed is not False else f"{mac} was not paired", detail)
 
 
 def verb_abort(op, args):
-    """中止交接。不拿 helper.lock：不能被正在跑的 bus-give-back 挡住。几步都可以重复做。"""
-    check_keys(args, ("by",), "bus-abort 的参数")
+    """Abort active handover without taking helper.lock."""
+    check_keys(args, ("by",), "bus-abort args")
     op.by = check_by(args)
     if not (flag_present(op.ctx) or hold_active(op) or exists(op.ctx, MARKER)):
         raise Stop(EXIT_STATE, "no_session",
-                   "没有调舵机的会话（旗、管理锁、交接标记都不在）：不中止，不碰主程序")
+                   "No active servo session (flag, lock, and marker all absent); nothing to abort")
     if not flag_present(op.ctx):
         flag_write(op, "bus-abort")
-        op.emit("flag", "info", "立旗")
+        op.emit("flag", "info", "Set bus-held flag")
     ensure_dir(op.ctx, HELPER_DIR, 0o755)
     write_atomic(op.ctx, ABORT, (json.dumps({"by": op.by, "mono_ms": int(op.ctx.now() * 1000)}) + "\n").encode(), 0o644)
     killed = False
@@ -3032,29 +2980,28 @@ def verb_abort(op, args):
         hold = hold_start(op)
     detail = {"killed": killed, "marker_removed": removed, "lock": hold, "robotd": st}
     if running(st):
-        return op.finish(EXIT_FAIL, "abort_incomplete", "主程序 KILL 以后还没停：别开串口，关电源最保险", detail)
+        return op.finish(EXIT_FAIL, "abort_incomplete", "robotd still running after SIGKILL; power off to be safe", detail)
     if free is not True:
-        return op.finish(EXIT_FAIL, "abort_incomplete", f"串口还被占着（{who}）", detail)
-    reason = "中止了：主程序停着，Studio 可以开串口卸力"
+        return op.finish(EXIT_FAIL, "abort_incomplete", f"Serial port still in use ({who})", detail)
+    reason = "Aborted: robotd stopped, Studio may open serial port"
     if not hold:
-        reason += "（管理锁没拿到：板端脚本可能在跑，主程序照样被旗挡着）"
+        reason += " (management lock not acquired; bus-held flag still active)"
     return op.finish(EXIT_OK, "aborted", reason, detail)
 
 
-# WiFi 热点：配网时 Studio 先关热点、再让 configd 连家里的 WiFi
+# Wi-Fi hotspot control
 
 def _nmcli_unescape(s):
-    """nmcli -t 把冒号、反斜杠转义了（SSID 里可能真有冒号）；连接名是我们自己的，还是按规矩解一下。"""
+    """Unescape nmcli -t colons and backslashes."""
     return (s or "").replace("\\:", ":").replace("\\\\", "\\")
 
 
 def wifi_active(op):
-    """wlan0 上现在挂着 Microduck-Hotspot 吗：是就回设备名，不是回 None。
-    查不了（nmcli 不在 / 报错）抛 Stop，让调用方写清卡在哪一步。"""
+    """Return active device name for Microduck-Hotspot, or None."""
     rc, out, err = op.ctx.run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"])
     if rc != 0:
-        why = (err or out).strip()[:300] or f"nmcli 退出码 {rc}"
-        raise Stop(EXIT_FAIL, "nmcli_failed", f"查不了现在的网络连接：{why}", {"rc": rc})
+        why = (err or out).strip()[:300] or f"nmcli exit {rc}"
+        raise Stop(EXIT_FAIL, "nmcli_failed", f"Failed to query active connections: {why}", {"rc": rc})
     for line in (out or "").splitlines():
         name, sep, dev = line.partition(":")
         if sep and _nmcli_unescape(name) == HOTSPOT:
@@ -3063,94 +3010,94 @@ def wifi_active(op):
 
 
 def check_wifi_args(args, verb):
-    check_keys(args, ("by", "ssid") if verb == "wifi-hotspot-down" else ("by",), f"{verb} 的参数")
+    check_keys(args, ("by", "ssid") if verb == "wifi-hotspot-down" else ("by",), f"{verb} args")
     by = check_by(args)
     ssid = args.get("ssid")
     if ssid is not None:
         if not isinstance(ssid, str) or len(ssid.encode("utf-8")) > 32 or "\x00" in ssid:
-            raise Stop(EXIT_ARGS, "bad_args", "ssid 要是 0–32 字节的字符串")
+            raise Stop(EXIT_ARGS, "bad_args", "ssid must be a 0-32 byte string")
     return by, ssid
 
 
 def write_studio_connecting(op, ssid):
-    """关热点前写下 netcheck 的约定文件：until 以前它不插手，Studio 才能安心让 configd 连。"""
+    """Write studio-connecting.json before bringing hotspot down."""
     ensure_dir(op.ctx, STUDIO_CONNECTING_DIR, 0o755)
     payload = {"until": int(time.time()) + STUDIO_CONNECTING_S, "ssid": ssid or ""}
     write_atomic(op.ctx, STUDIO_CONNECTING,
                  (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"), 0o644)
-    op.emit("connecting-window", "info", f"写下连接窗口（{STUDIO_CONNECTING_S} 秒，SSID：{ssid or '未写'}）")
+    op.emit("connecting-window", "info", f"Wrote connecting window ({STUDIO_CONNECTING_S}s, SSID: {ssid or 'unset'})")
 
 
 def clear_studio_connecting(op):
     try:
         if remove(op.ctx, STUDIO_CONNECTING):
-            op.emit("connecting-window", "info", "删掉连接窗口文件")
+            op.emit("connecting-window", "info", "Removed connecting window file")
     except OSError as e:
-        op.emit("connecting-window", "warn", f"删连接窗口文件没成功：{type(e).__name__}: {e}")
+        op.emit("connecting-window", "warn", f"Failed to remove connecting window file: {type(e).__name__}: {e}")
 
 
 def verb_wifi_hotspot_down(op, args):
-    """关热点。热点本来就没开算成功（nmcli 的「不是活动连接」也当成功）。最多等 10 秒，等 wlan0 不再是这个连接。"""
+    """Bring down Microduck-Hotspot under wifi.lock."""
     op.by, ssid = check_wifi_args(args, "wifi-hotspot-down")
-    op.take_lock("WiFi 操作", WIFI_LOCK)
+    op.take_lock("Wi-Fi operation", WIFI_LOCK)
     active = wifi_active(op)
     if active is None:
-        op.emit("hotspot", "info", "热点本来就没开")
-        return op.finish(EXIT_OK, "already_down", "热点本来就没开", {"device": None})
-    op.emit("hotspot", "info", f"关热点：{active} 上挂着 {HOTSPOT}", {"device": active})
+        op.emit("hotspot", "info", "Hotspot already down")
+        return op.finish(EXIT_OK, "already_down", "Hotspot already down", {"device": None})
+    op.emit("hotspot", "info", f"Stopping hotspot on {active} ({HOTSPOT})", {"device": active})
     try:
         write_studio_connecting(op, ssid)
     except (OSError, Stop) as e:
         why = e.reason if isinstance(e, Stop) else f"{type(e).__name__}: {e}"
-        return op.finish(EXIT_FAIL, "window_failed", f"连接窗口文件写不进去：{why}", {"path": STUDIO_CONNECTING})
+        return op.finish(EXIT_FAIL, "window_failed", f"Failed to write connecting window: {why}", {"path": STUDIO_CONNECTING})
     rc, out, err = op.ctx.run(["nmcli", "connection", "down", HOTSPOT], timeout=NMCLI_DOWN_TIMEOUT)
     msg = (err or out).strip()[:300]
     if rc != 0:
         if re.search(r"not an active connection|not active|no active connection", msg, re.I):
-            return op.finish(EXIT_OK, "already_down", "热点本来就关了", {"rc": rc, "stderr": msg})
-        return op.finish(EXIT_FAIL, "down_failed", f"nmcli 关热点没成功：{msg or f'退出码 {rc}'}",
+            return op.finish(EXIT_OK, "already_down", "Hotspot already down", {"rc": rc, "stderr": msg})
+        return op.finish(EXIT_FAIL, "down_failed", f"nmcli hotspot down failed: {msg or f'rc={rc}'}",
                          {"rc": rc, "stderr": msg})
     deadline = op.ctx.now() + WIFI_DOWN_WAIT
     while op.ctx.now() < deadline:
         if wifi_active(op) is None:
-            op.emit("hotspot", "info", "热点关了（wlan0 不再是 Microduck-Hotspot）")
-            return op.finish(EXIT_OK, "hotspot_down", "热点关了", {"device": active})
+            op.emit("hotspot", "info", "Hotspot stopped")
+            return op.finish(EXIT_OK, "hotspot_down", "Hotspot stopped", {"device": active})
         op.ctx.sleep(WIFI_POLL)
-    return op.finish(EXIT_FAIL, "timeout", f"关了 {WIFI_DOWN_WAIT:.0f} 秒，wlan0 还挂着 {HOTSPOT}",
+    return op.finish(EXIT_FAIL, "timeout", f"Hotspot still active after {WIFI_DOWN_WAIT:.0f}s",
                      {"device": active})
 
 
 def verb_wifi_hotspot_up(op, args):
-    """开热点。本来就开着算成功。从 nmcli up 开始算，最多等 30 秒到 wlan0 真的挂上这个连接。"""
+    """Bring up Microduck-Hotspot under wifi.lock."""
     op.by, _ = check_wifi_args(args, "wifi-hotspot-up")
-    op.take_lock("WiFi 操作", WIFI_LOCK)
+    op.take_lock("Wi-Fi operation", WIFI_LOCK)
     active = wifi_active(op)
     if active is not None:
-        op.emit("hotspot", "info", f"热点本来就开着（{active}）")
+        op.emit("hotspot", "info", f"Hotspot already up ({active})")
         clear_studio_connecting(op)
-        return op.finish(EXIT_OK, "already_up", "热点本来就开着", {"device": active})
-    op.emit("hotspot", "info", f"开热点：nmcli connection up {HOTSPOT}")
+        return op.finish(EXIT_OK, "already_up", "Hotspot already up", {"device": active})
+    op.emit("hotspot", "info", f"Starting hotspot: nmcli connection up {HOTSPOT}")
     started = op.ctx.now()
     rc, out, err = op.ctx.run(["nmcli", "connection", "up", HOTSPOT], timeout=WIFI_UP_WAIT)
     msg = (err or out).strip()[:300]
     if rc != 0:
-        return op.finish(EXIT_FAIL, "up_failed", f"nmcli 开热点没成功：{msg or f'退出码 {rc}'}",
+        return op.finish(EXIT_FAIL, "up_failed", f"nmcli hotspot up failed: {msg or f'rc={rc}'}",
                          {"rc": rc, "stderr": msg})
     clear_studio_connecting(op)
     deadline = started + WIFI_UP_WAIT
     while op.ctx.now() < deadline:
         dev = wifi_active(op)
         if dev is not None:
-            op.emit("hotspot", "info", f"热点开了（{dev}）")
-            return op.finish(EXIT_OK, "hotspot_up", "热点开了", {"device": dev})
+            op.emit("hotspot", "info", f"Hotspot started ({dev})")
+            return op.finish(EXIT_OK, "hotspot_up", "Hotspot started", {"device": dev})
         op.ctx.sleep(WIFI_POLL)
-    return op.finish(EXIT_FAIL, "timeout", f"开了 {WIFI_UP_WAIT:.0f} 秒，wlan0 还没挂上 {HOTSPOT}",
+    return op.finish(EXIT_FAIL, "timeout", f"Hotspot did not come up within {WIFI_UP_WAIT:.0f}s",
                      {"rc": rc, "stderr": msg})
 
 
 # ---------------------------------------------------------------------------
-# SSH 密码登录开关（Studio「更多」页）。镜像出厂只认钥匙、不带任何人的钥匙；用户在网页上自己定一个密码再打开，
-# 没有人人都知道的默认密码（热点密码是公开的，默认密码等于给附近的人留门）。
+# SSH password authentication toggle (Studio More page).
+#
 
 def ssh_password_on(ctx):
     return os.path.isfile(ctx.p(SSH_PASSWORD_CONF))
@@ -3165,7 +3112,7 @@ def ssh_key_count(ctx):
 
 
 def ssh_effective_password(op):
-    """sshd -T 读回实际生效的 passwordauthentication：True / False / None（读不出）。"""
+    """Read effective passwordauthentication from sshd -T."""
     rc, out, err = op.ctx.run(["sshd", "-T"], timeout=10.0)
     if rc != 0:
         return None
@@ -3177,20 +3124,20 @@ def ssh_effective_password(op):
 
 
 def verb_ssh_status(op, args):
-    check_keys(args, ("by",), "ssh-status 的参数")
+    check_keys(args, ("by",), "ssh-status args")
     if "by" in args:
         op.by = check_by(args)
     rc, out, _ = op.ctx.run(["systemctl", "is-active", "ssh"], timeout=5.0)
     detail = {"password_login": ssh_password_on(op.ctx), "ssh_active": (out or "").strip() == "active",
               "keys": ssh_key_count(op.ctx), "user": SSH_USER}
-    return op.finish(EXIT_OK, "ssh_status", "读到了 SSH 的状态", detail, record=False)
+    return op.finish(EXIT_OK, "ssh_status", "Read SSH status", detail, record=False)
 
 
 # ---------------------------------------------------------------------------
-# 摄像头 / ToF（用户 11-17：接了就自动用，不用 SSH 改配置）
+# Camera / ToF configuration
 
 def media_source_text(text, source):
-    """只换 [media] 里 source 那一行（官方配置里它可能是注释掉的），别的原样。找不到这一行回 None。"""
+    """Replace source line in [media] section, or return None if not found."""
     lines, section, done = text.split("\n"), None, False
     for index, line in enumerate(lines):
         stripped = line.strip()
@@ -3203,12 +3150,12 @@ def media_source_text(text, source):
 
 
 def read_media_source(op):
-    """回 (整份配置的文字, 现在的 source)。配置读不了、不是 root 的普通文件就停。"""
+    """Read media config text and current source."""
     try:
         text = imu_profile_safe_file(op, MEDIA_CONFIG).decode("utf-8")
         media = tomllib.loads(text).get("media")
     except (OSError, ValueError) as e:
-        raise Stop(EXIT_STATE, "bad_config", f"读不了 {MEDIA_CONFIG}：{type(e).__name__}: {e}") from e
+        raise Stop(EXIT_STATE, "bad_config", f"Failed to read {MEDIA_CONFIG}: {type(e).__name__}: {e}") from e
     return text, media.get("source") if isinstance(media, dict) else None
 
 
@@ -3219,7 +3166,7 @@ def write_media_source(op, text, source):
     except ValueError:
         ok = False
     if not ok:
-        raise Stop(EXIT_STATE, "bad_config", f"{MEDIA_CONFIG} 的 [media] 里找不到能改的 source 这一行，没动它")
+        raise Stop(EXIT_STATE, "bad_config", f"No editable source line in [media] of {MEDIA_CONFIG}")
     mode = stat.S_IMODE(os.lstat(op.ctx.p(MEDIA_CONFIG)).st_mode)
     write_atomic(op.ctx, MEDIA_CONFIG, new.encode("utf-8"), mode)
     return new
@@ -3227,11 +3174,11 @@ def write_media_source(op, text, source):
 
 def restart_mediad(op):
     rc, out, err = op.ctx.run(["systemctl", "restart", "mediad"], timeout=30.0)
-    return None if rc == 0 else ((err or out or "").strip()[:300] or f"systemctl 退出码 {rc}")
+    return None if rc == 0 else ((err or out or "").strip()[:300] or f"systemctl exit {rc}")
 
 
 def mediad_stable(op):
-    """视频服务真起来了没有：隔几秒看两次，都在跑、主进程没换才算。"""
+    """Verify media service stayed active across stability window."""
     op.ctx.sleep(MEDIA_SETTLE_S)
     first = show(op, "mediad", ["ActiveState", "MainPID"])
     op.ctx.sleep(MEDIA_STABLE_S)
@@ -3242,79 +3189,77 @@ def mediad_stable(op):
 
 
 def verb_sensors_apply(op, args):
-    """camera："camera" = 视频用真实画面，"test" = 用测试画面；改了才重启视频服务。
-    切成真实画面以后视频服务起不来（没接好、识别错了）就退回测试画面：网页上的视频和遥控不能跟着没了。
-    tof：true = ToF 服务设成开机启动并马上起（没接传感器它自己安静地等，官方就是这么设计的）。"""
-    check_keys(args, ("by", "camera", "tof"), "sensors-apply 的参数")
+    """Apply camera source ("camera"|"test") with auto-rollback and/or enable ToF service."""
+    check_keys(args, ("by", "camera", "tof"), "sensors-apply args")
     op.by = check_by(args)
     camera, tof = args.get("camera"), args.get("tof")
     if camera not in (None, "camera", "test"):
-        raise Stop(EXIT_ARGS, "bad_args", 'camera 只能是 "camera" 或 "test"')
+        raise Stop(EXIT_ARGS, "bad_args", 'camera must be "camera" or "test"')
     if tof not in (None, True):
-        raise Stop(EXIT_ARGS, "bad_args", "tof 只能是 true")
+        raise Stop(EXIT_ARGS, "bad_args", "tof must be true")
     if camera is None and tof is None:
-        raise Stop(EXIT_ARGS, "bad_args", "camera 和 tof 至少给一个")
+        raise Stop(EXIT_ARGS, "bad_args", "Provide at least one of camera or tof")
     if exists(op.ctx, SOFTWARE_MARKER):
-        raise Stop(EXIT_BUSY, "busy", "软件正在更新：等它装完再设传感器")
+        raise Stop(EXIT_BUSY, "busy", "Software update in progress; retry after it finishes")
     native_update_conflict(op)
-    op.take_lock("传感器设置", SENSORS_LOCK)
+    op.take_lock("sensor settings", SENSORS_LOCK)
     detail = {}
     if tof:
         rc, out, err = op.ctx.run(["systemctl", "enable", "--now", "tofd.service"], timeout=30.0)
         if rc != 0:
-            why = (err or out or "").strip()[:300] or f"systemctl 退出码 {rc}"
-            return op.finish(EXIT_FAIL, "tof_failed", f"ToF 服务没设成开机启动：{why}", {"rc": rc})
-        op.emit("tof", "info", "ToF 服务设成开机启动，已启动")
+            why = (err or out or "").strip()[:300] or f"systemctl exit {rc}"
+            return op.finish(EXIT_FAIL, "tof_failed", f"Failed to enable ToF service: {why}", {"rc": rc})
+        op.emit("tof", "info", "Enabled and started ToF service")
         detail["tof"] = "enabled"
     if camera:
         text, current = read_media_source(op)
         if current == camera:
-            op.emit("camera", "info", f"视频来源本来就是 {camera}，没动")
+            op.emit("camera", "info", f"Camera source already {camera}; unchanged")
             detail["camera"] = "unchanged"
         else:
             write_media_source(op, text, camera)
-            op.emit("camera", "info", f"视频来源 {current} → {camera}，重启视频服务")
+            op.emit("camera", "info", f"Camera source {current} -> {camera}, restarting media service")
             why = restart_mediad(op)
             stable, seen = (False, {}) if why else mediad_stable(op) if camera == "camera" else (True, {})
             if why or not stable:
-                # 退回去：原文整份写回，别让视频服务一直起不来
+                # Rollback media config on failure
                 write_atomic(op.ctx, MEDIA_CONFIG, text.encode("utf-8"),
                              stat.S_IMODE(os.lstat(op.ctx.p(MEDIA_CONFIG)).st_mode))
                 back = restart_mediad(op)
-                op.emit("camera", "warn", "视频服务没起来，视频来源已退回原来的", {"restart": back, **seen})
+                op.emit("camera", "warn", "Media service failed to start; reverted camera source", {"restart": back, **seen})
                 return op.finish(EXIT_FAIL, "camera_unstable" if not why else "restart_failed",
-                                 (f"视频服务重启没成功：{why}" if why else "切到真实画面以后视频服务起不来")
-                                 + f"，已退回 {current}" + (f"（退回后重启也没成功：{back}）" if back else ""),
+                                 (f"Media service restart failed: {why}" if why else "Media service failed to stabilize on camera source")
+                                 + f"; reverted to {current}" + (f" (revert restart failed: {back})" if back else ""),
                                  {**detail, "camera": "reverted", "source": current, **seen})
             detail["camera"] = camera
-    return op.finish(EXIT_OK, "sensors_applied", "传感器设置好了", detail)
+    return op.finish(EXIT_OK, "sensors_applied", "Sensors configured", detail)
 
 
 def check_ssh_password(pw):
     if not isinstance(pw, str):
-        raise Stop(EXIT_ARGS, "bad_args", "password 要是字符串")
+        raise Stop(EXIT_ARGS, "bad_args", "password must be a string")
     if not SSH_PW_MIN <= len(pw) <= SSH_PW_MAX:
-        raise Stop(EXIT_ARGS, "bad_password", f"SSH 密码要 {SSH_PW_MIN}–{SSH_PW_MAX} 位")
+        raise Stop(EXIT_ARGS, "bad_password", f"SSH password must be {SSH_PW_MIN}-{SSH_PW_MAX} characters")
     if any(ord(c) < 32 or ord(c) == 127 for c in pw):
-        raise Stop(EXIT_ARGS, "bad_password", "SSH 密码里不能有换行、制表这类控制字符")
+        raise Stop(EXIT_ARGS, "bad_password", "SSH password cannot contain control characters")
     if pw.strip().lower() in SSH_PW_BANNED:
-        raise Stop(EXIT_ARGS, "bad_password", "这个密码大家都猜得到，换一个")
+        raise Stop(EXIT_ARGS, "bad_password", "Password is too common; choose a stronger one")
     return pw
 
 
 def ssh_reload(op):
     rc, out, err = op.ctx.run(["systemctl", "reload-or-restart", "ssh"], timeout=20.0)
     if rc != 0:
-        return (err or out or "").strip()[:400] or f"systemctl 退出码 {rc}"
+        return (err or out or "").strip()[:400] or f"systemctl exit {rc}"
     return None
 
 
-# ── skill-table：把主程序配置里写成一整行的动作表，改写成主程序自己认的「一条一条」格式 ──────────
+# ── skill-table: convert inline [policy].skill array to [[policy.skill]] ──────────
 #
-# 镜像带的 robotd.toml 里，动作表是 `"skill" = [{...}, {...}]` 这样一整行（内联数组）。主程序自己改配置
-# （robot.setSkill / robot.removeSkill，也就是 Studio 装动作、换踢腿翻滚模型）只认 `[[policy.skill]]`，
-# 碰到内联写法就拒：「[[policy.skill]] is not a table array」。这里只改写格式：改前改后用 tomllib 读出来
-# 必须逐项相等，不等就一个字都不写。跟主程序拿同一把锁（配置旁边的 robotd.lock），不跟它同时写。
+#
+#
+#
+#
 SKILL_TABLE_LOCK_WAIT = 5.0
 SKILL_TABLE_HEADER_RE = re.compile(r'^\s*\[\[\s*"?policy"?\s*\.\s*"?skill"?\s*\]\]', re.M)
 POLICY_HEADER_RE = re.compile(r'^\s*\[\s*"?policy"?\s*\]\s*(#.*)?$')
@@ -3334,42 +3279,42 @@ def _toml_scalar(value):
         return str(value)
     if isinstance(value, float):
         if value != value or value in (float("inf"), float("-inf")):
-            raise Stop(EXIT_STATE, "unsupported_config", "动作表里有无穷大或非数，未修改")
+            raise Stop(EXIT_STATE, "unsupported_config", "Skill table contains NaN or Inf; untouched")
         text = repr(value)
         return text if any(c in text for c in ".eE") else text + ".0"
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list):
         return "[" + ", ".join(_toml_scalar(v) for v in value) + "]"
-    raise Stop(EXIT_STATE, "unsupported_config", f"动作表里有认不出的值：{type(value).__name__}，未修改")
+    raise Stop(EXIT_STATE, "unsupported_config", f"Unsupported value in skill table: {type(value).__name__}; untouched")
 
 
 def _skill_blocks(skills):
     out = []
     for row in skills:
         if not isinstance(row, dict):
-            raise Stop(EXIT_STATE, "unsupported_config", "动作表里有一项不是表，未修改")
+            raise Stop(EXIT_STATE, "unsupported_config", "Skill table item is not a table; untouched")
         lines = ["[[policy.skill]]"]
         subtables = []
         for key, value in row.items():
             if isinstance(value, dict):
                 subtables.append((key, value))
             elif isinstance(value, list) and any(isinstance(v, (dict, list)) for v in value):
-                raise Stop(EXIT_STATE, "unsupported_config", "动作表里有嵌套数组，未修改")
+                raise Stop(EXIT_STATE, "unsupported_config", "Skill table contains nested arrays; untouched")
             else:
                 lines.append(f"{_toml_key(key)} = {_toml_scalar(value)}")
         for key, table in subtables:
             lines.append(f"[policy.skill.{_toml_key(key)}]")
             for k, v in table.items():
                 if isinstance(v, dict):
-                    raise Stop(EXIT_STATE, "unsupported_config", "动作表里有多层嵌套，未修改")
+                    raise Stop(EXIT_STATE, "unsupported_config", "Skill table has multi-level nesting; untouched")
                 lines.append(f"{_toml_key(k)} = {_toml_scalar(v)}")
         out.append("\n".join(lines))
     return "\n\n".join(out) + "\n"
 
 
 def skill_table_rewrite(text):
-    """回改写后的文字；本来就是一条一条的（或没有动作表）回 None。"""
+    """Return rewritten TOML text, or None if already [[policy.skill]] or absent."""
     data = tomllib.loads(text)
     policy = data.get("policy")
     skills = policy.get("skill") if isinstance(policy, dict) else None
@@ -3387,8 +3332,8 @@ def skill_table_rewrite(text):
             start = i
             break
     if start is None:
-        raise Stop(EXIT_STATE, "unsupported_config", "找不到 [policy] 里的 skill 那一行，未修改")
-    # 内联数组可能跨好几行：一行一行往下加，直到能单独读通为止
+        raise Stop(EXIT_STATE, "unsupported_config", "Cannot locate skill line in [policy]; untouched")
+    # Accumulate multiline inline array until valid TOML
     for j in range(start, len(lines)):
         chunk = "".join(lines[start:j + 1])
         try:
@@ -3398,27 +3343,27 @@ def skill_table_rewrite(text):
         end = j + 1
         break
     if end is None:
-        raise Stop(EXIT_STATE, "unsupported_config", "skill 那一段读不通，未修改")
+        raise Stop(EXIT_STATE, "unsupported_config", "Failed to parse skill section; untouched")
     rest = "".join(lines[:start] + lines[end:]).rstrip("\n")
     new = rest + "\n\n" + _skill_blocks(skills)
     if tomllib.loads(new) != data:
-        raise Stop(EXIT_STATE, "unsupported_config", "改写后内容对不上，未修改")
+        raise Stop(EXIT_STATE, "unsupported_config", "Rewritten TOML mismatch; untouched")
     return new
 
 
 def verb_skill_table(op, args):
-    check_keys(args, ("by",), "skill-table 的参数")
+    check_keys(args, ("by",), "skill-table args")
     op.by = check_by(args)
     if exists(op.ctx, SOFTWARE_MARKER):
-        raise Stop(EXIT_BUSY, "busy", "软件正在更新：等它装完再改")
+        raise Stop(EXIT_BUSY, "busy", "Software update in progress; retry after it finishes")
     native_update_conflict(op)
-    op.take_lock("改写动作表格式", SKILL_TABLE_LOCK)
+    op.take_lock("skill table rewrite", SKILL_TABLE_LOCK)
     handle, deadline = None, op.ctx.now() + SKILL_TABLE_LOCK_WAIT
     while handle is None:
         handle = op.ctx.lock(IMU_CONFIG_DIR + "/robotd.lock")
         if handle is None:
             if op.ctx.now() >= deadline:
-                raise Stop(EXIT_BUSY, "busy", "主程序正在改配置，等一下再试")
+                raise Stop(EXIT_BUSY, "busy", "robotd is modifying config; retry shortly")
             op.ctx.sleep(0.1)
     converted = []
     try:
@@ -3430,71 +3375,71 @@ def verb_skill_table(op, args):
                 text = raw.decode("utf-8")
                 new = skill_table_rewrite(text)
             except (UnicodeError, ValueError) as e:
-                raise Stop(EXIT_STATE, "bad_config", f"读不了 {path}：{type(e).__name__}: {e}") from e
+                raise Stop(EXIT_STATE, "bad_config", f"Failed to read {path}: {type(e).__name__}: {e}") from e
             if new is None:
                 continue
             st = os.lstat(op.ctx.p(path))
             write_atomic(op.ctx, path, new.encode("utf-8"), stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid)
             converted.append(path)
-            op.emit("skill-table", "info", f"动作表改成一条一条的格式：{path}")
+            op.emit("skill-table", "info", f"Converted skill table to [[policy.skill]]: {path}")
     finally:
         op.ctx.unlock(handle)
-    return op.finish(EXIT_OK, "ok", "动作表格式已经是主程序认的" if not converted else "动作表格式改好了",
+    return op.finish(EXIT_OK, "ok", "Skill table already in [[policy.skill]] format" if not converted else "Skill table converted",
                      {"converted": converted})
 
 
 def verb_ssh_password(op, args):
-    check_keys(args, ("by", "on", "password"), "ssh-password 的参数")
+    check_keys(args, ("by", "on", "password"), "ssh-password args")
     op.by = check_by(args)
     on = args.get("on")
     if not isinstance(on, bool):
-        raise Stop(EXIT_ARGS, "bad_args", "on 要是 true（打开）或 false（关掉）")
+        raise Stop(EXIT_ARGS, "bad_args", "on must be true or false")
     if not on and "password" in args:
-        raise Stop(EXIT_ARGS, "bad_args", "关掉 SSH 密码登录不用传密码")
+        raise Stop(EXIT_ARGS, "bad_args", "Do not pass password when disabling SSH password auth")
     pw = check_ssh_password(args.get("password")) if on else None
-    op.take_lock("SSH 设置", SSH_LOCK)
+    op.take_lock("SSH settings", SSH_LOCK)
     conf = op.ctx.p(SSH_PASSWORD_CONF)
     if not on:
         existed = os.path.isfile(conf)
         if existed:
             os.remove(conf)
-            op.emit("ssh", "info", "删掉了 SSH 密码登录的开关文件", {"path": SSH_PASSWORD_CONF})
+            op.emit("ssh", "info", "Removed SSH password auth config", {"path": SSH_PASSWORD_CONF})
         why = ssh_reload(op)
         if why:
-            return op.finish(EXIT_FAIL, "reload_failed", f"开关文件删了，但 ssh 没重新加载：{why}（重启鸭子也会生效）",
+            return op.finish(EXIT_FAIL, "reload_failed", f"Removed config, but ssh reload failed: {why} (applies on reboot)",
                              {"password_login": False})
-        return op.finish(EXIT_OK, "ssh_password_off", "SSH 密码登录关掉了，只认钥匙" if existed else "SSH 密码登录本来就是关着的",
+        return op.finish(EXIT_OK, "ssh_password_off", "SSH password auth disabled (key-only)" if existed else "SSH password auth already disabled",
                          {"password_login": False, "keys": ssh_key_count(op.ctx)})
-    # 1. 密码：chpasswd 从 stdin 读「用户:密码」，不进命令行（ps 看得到命令行）、不进日志
+    # 1. Set password via chpasswd stdin (never logged)
     rc, out, err = op.ctx.run(["chpasswd"], input=f"{SSH_USER}:{pw}\n".encode("utf-8"), timeout=15.0)
     if rc != 0:
-        why = (err or out or "").strip()[:300] or f"退出码 {rc}"
-        return op.finish(EXIT_FAIL, "chpasswd_failed", f"{SSH_USER} 的密码没设上：{why}")
-    op.emit("ssh", "info", f"{SSH_USER} 的密码设好了（密码本身不记）")
-    # 2. 开关文件
+        why = (err or out or "").strip()[:300] or f"exit {rc}"
+        return op.finish(EXIT_FAIL, "chpasswd_failed", f"Failed to set password for {SSH_USER}: {why}")
+    op.emit("ssh", "info", f"Updated password for {SSH_USER}")
+    # 2. Drop-in config
     ensure_dir(op.ctx, "/etc/ssh/sshd_config.d", 0o755)
-    body = ("# Microduck Studio「更多」页打开的 SSH 密码登录（microduck-helper ssh-password）。\n"
-            "# 关掉：Studio 里点「关掉 SSH 密码登录」，或者删掉这个文件再 systemctl reload ssh。\n"
+    body = ("# Enabled by Armature x Microduck Studio (microduck-helper ssh-password).\n"
+            "# To disable: use Studio or delete this file and run systemctl reload ssh.\n"
             "PasswordAuthentication yes\n")
     write_atomic(op.ctx, SSH_PASSWORD_CONF, body.encode("utf-8"), 0o644)
-    # 3. 先验配置再生效：语法不对、或者别的配置把密码登录压住了，都退回去
+    # 3. Validate sshd -t and sshd -T before reloading ssh
     rc, out, err = op.ctx.run(["sshd", "-t"], timeout=10.0)
     if rc != 0:
         os.remove(conf)
-        why = (err or out or "").strip()[:400] or f"退出码 {rc}"
-        return op.finish(EXIT_FAIL, "sshd_config_bad", f"sshd 配置检查没过，已经退回去：{why}")
+        why = (err or out or "").strip()[:400] or f"exit {rc}"
+        return op.finish(EXIT_FAIL, "sshd_config_bad", f"sshd -t failed; reverted: {why}")
     eff = ssh_effective_password(op)
     if eff is not True:
         os.remove(conf)
         return op.finish(EXIT_FAIL, "not_effective",
-                         "sshd 读回来密码登录还是关着（别的配置压住了它），已经退回去" if eff is False
-                         else "读不出 sshd 实际生效的配置，已经退回去", {"effective": eff})
+                         "sshd -T reports passwordauthentication still disabled; reverted" if eff is False
+                         else "Failed to read effective sshd config; reverted", {"effective": eff})
     why = ssh_reload(op)
     if why:
         os.remove(conf)
         ssh_reload(op)
-        return op.finish(EXIT_FAIL, "reload_failed", f"ssh 没重新加载，已经退回去：{why}")
-    return op.finish(EXIT_OK, "ssh_password_on", f"SSH 密码登录打开了：用户 {SSH_USER}，密码是你刚设的",
+        return op.finish(EXIT_FAIL, "reload_failed", f"ssh reload failed; reverted: {why}")
+    return op.finish(EXIT_OK, "ssh_password_on", f"SSH password auth enabled for user {SSH_USER}",
                      {"password_login": True, "user": SSH_USER})
 
 
@@ -3524,7 +3469,7 @@ def load_native_update(op):
 
     try:
         current = os.path.realpath(ctx.p(root+'/current'))
-        releases = os.path.abspath(ctx.p(root+'/releases'))
+        releases = os.path.realpath(ctx.p(root+'/releases'))
         version = os.path.basename(current)
         if (not os.path.islink(ctx.p(root+'/current')) or os.path.dirname(current)!=releases
                 or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?',version)
@@ -3559,7 +3504,7 @@ def load_native_update(op):
             namespace['CONTROLLER_BUNDLE']=types.SimpleNamespace(**dependency)
         return types.SimpleNamespace(**namespace), release
     except (OSError,ValueError,TypeError,KeyError,AttributeError) as error:
-        raise Stop(EXIT_STATE,'native_untrusted_release','主程序更新只能从已安装并校验的 root 管理签名软件包运行') from error
+        raise Stop(EXIT_STATE,'native_untrusted_release','robotd update must run from verified signed root-managed package') from error
 
 
 def verb_robotd_update(op, args, raw):
@@ -3567,7 +3512,7 @@ def verb_robotd_update(op, args, raw):
             or args.get('action') not in ('status','install','recover','restore')
             or (args['action']!='status' and args.get('confirmed') is not True)
             or ('confirmed' in args and type(args['confirmed']) is not bool)):
-        raise Stop(EXIT_ARGS,'bad_args','robotd-update 只接受 Studio 的固定动作和明确确认')
+        raise Stop(EXIT_ARGS,'bad_args','robotd-update accepts only fixed Studio actions with explicit confirmation')
     module, release = load_native_update(op)
     if args['action']!='status' and op.ctx.env.get(DETACH_ENV)!='1':
         return detach(op, raw, 'robotd-update')
@@ -3601,7 +3546,7 @@ def native_update_conflict(op):
                     or type(m.get('restore_pending')) is not bool or type(m.get('cleanup_pending')) is not bool):raise ValueError('invalid controller state')
             active=active or m['active'] or m['restore_pending'] or m['cleanup_pending']
         except (OSError,ValueError,TypeError,AttributeError,Stop):active=True
-    if active:raise Stop(EXIT_STATE,'native_update_active','主程序更新尚未完成：先完成或恢复更新，再操作总线 / 标定')
+    if active:raise Stop(EXIT_STATE,'native_update_active','robotd update incomplete: finish or recover before bus/calibration ops')
 
 
 def run(argv, ctx):
@@ -3609,9 +3554,9 @@ def run(argv, ctx):
     op = Op(ctx, verb or "?")
     try:
         if verb not in VERBS or len(argv) != 2:
-            raise Stop(EXIT_ARGS, "bad_verb", f"只认这几个动词：{', '.join(VERBS)}（参数走 stdin 的 JSON）")
+            raise Stop(EXIT_ARGS, "bad_verb", f"Unknown verb; allowed: {', '.join(VERBS)}")
         if not ctx.is_root():
-            raise Stop(EXIT_STATE, "not_root", "要用 root 跑（sudo -n /usr/local/sbin/microduck-helper …）")
+            raise Stop(EXIT_STATE, "not_root", "Must run as root (sudo -n /usr/local/sbin/microduck-helper ...)")
         if verb == "phone-tls" or verb.startswith("maintenance-"):
             # The installed launcher points into a root-owned signed release. Resolve
             # once so a concurrent switch cannot mix helpers from different releases.
@@ -3626,24 +3571,24 @@ def run(argv, ctx):
                                        "--service-type=exec", "--setenv=MICRODUCK_MAINTENANCE_WORKER=1",
                                        SELF_PATH, verb], CHILD_ENV)
                 import fcntl
-                op.take_lock("维护")
+                op.take_lock("maintenance")
                 os.set_inheritable(op.lock_handle, True)
                 service_fd = ctx.lock(SERVICE_LOCK)
                 if service_fd is None:
-                    raise Stop(EXIT_BUSY, "maintenance_busy", "标定或总线操作进行中")
+                    raise Stop(EXIT_BUSY, "maintenance_busy", "Calibration or bus operation in progress")
                 os.set_inheritable(service_fd, True)
                 # Never create a substitute for the updater's fixed motion gate.
                 fd = os.open(ctx.p("/run/microduck-updater/motion.lock"), os.O_RDWR | os.O_NOFOLLOW)
                 info = os.fstat(fd)
                 if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-                    raise Stop(EXIT_STATE, "maintenance_busy", "运动锁身份未确认")
+                    raise Stop(EXIT_STATE, "maintenance_busy", "Motion lock identity unconfirmed")
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    raise Stop(EXIT_BUSY, "maintenance_busy", "更新或语音动作进行中")
+                    raise Stop(EXIT_BUSY, "maintenance_busy", "Update or voice action in progress")
                 os.set_inheritable(fd, True)
                 if exists(ctx, SOFTWARE_MARKER) or exists(ctx, FLAG) or exists(ctx, MARKER):
-                    raise Stop(EXIT_BUSY, "maintenance_busy", "更新或舵机总线交接进行中")
+                    raise Stop(EXIT_BUSY, "maintenance_busy", "Update or servo handover in progress")
                 native_update_conflict(op)
                 imu_redo_conflict(op)
             deploy = os.path.dirname(os.path.realpath(__file__))
@@ -3652,13 +3597,13 @@ def run(argv, ctx):
             os.execve("/usr/bin/python3", ["/usr/bin/python3", "-IS", os.path.join(deploy, script), *args], CHILD_ENV)
         raw = ctx.stdin.read(STDIN_LIMIT + 1)
         if len(raw) > STDIN_LIMIT:
-            raise Stop(EXIT_ARGS, "bad_args", "stdin 太长")
+            raise Stop(EXIT_ARGS, "bad_args", "stdin too large")
         try:
             args = json.loads(raw.decode("utf-8") or "{}")
         except ValueError as e:
-            raise Stop(EXIT_ARGS, "bad_args", f"stdin 不是 JSON：{e}") from e
+            raise Stop(EXIT_ARGS, "bad_args", f"stdin is not valid JSON: {e}") from e
         if not isinstance(args, dict):
-            raise Stop(EXIT_ARGS, "bad_args", "stdin 要是一个 JSON 对象")
+            raise Stop(EXIT_ARGS, "bad_args", "stdin must be a JSON object")
         if verb in ('bus-take','bus-give-back','calib-commit') or (verb=='imu-recalibrate' and args.get('action')!='status'):
             native_update_conflict(op)
         if verb == "bus-take":
@@ -3691,10 +3636,10 @@ def run(argv, ctx):
             return verb_skill_table(op, args)
         return verb_abort(op, args)
     except Stop as s:
-        # bad_verb 是 Studio 探测小助手可用性用的：不能把上一次真正的结果覆盖成 bad_verb
+        # bad_verb is used for probing; do not overwrite last-result.json
         return op.finish(s.code, s.result, s.reason, s.detail, record=(s.result != "bad_verb"))
-    except Exception as e:  # noqa: BLE001 —— 小助手自己的 bug：也要留下结果
-        return op.finish(EXIT_FAIL, "error", f"小助手出错：{type(e).__name__}: {e}")
+    except Exception as e:  # noqa: BLE001  # Record unexpected helper errors
+        return op.finish(EXIT_FAIL, "error", f"Helper error: {type(e).__name__}: {e}")
 
 
 def main():

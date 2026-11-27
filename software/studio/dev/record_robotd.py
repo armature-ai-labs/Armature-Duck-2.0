@@ -1,11 +1,10 @@
-"""在鸭子上录 robotd 的真实回包，给假 robotd 和测试用（只读，不发任何会让鸭子动的命令）。
+"""Record live robotd responses on the duck for fake_robotd and tests (read-only).
 
     python3 -I dev/record_robotd.py --label limp --seconds 3 > limp.jsonl
 
-每行一个 JSON：{"kind": "reply", "method": ..., "params": ..., "reply": ...}，
-订阅的状态帧是 {"kind": "notify", "dt": 收到时距开始几秒, "msg": ...}。
-标签（软着 / 保持 / 策略中 / 坐着 / 调试模式……）写在第一行 {"kind": "meta"}。
-只用标准库，板上直接跑。
+Each line is JSON: {"kind": "reply", "method": ..., "params": ..., "reply": ...}
+or {"kind": "notify", "dt": seconds_since_start, "msg": ...}.
+First line is {"kind": "meta"}. Uses stdlib only.
 """
 import argparse
 import json

@@ -55,7 +55,7 @@ def main():
         report['owner']=True
         key('south',305);key('east',304);key('select',314);key('start',315);key('r3',307)
         handle('learn',role='west');inject(1,305,1);inject(1,305,0)
-        assert 'west' not in view()['draft'] and '已用于' in view()['error'];report['duplicate']=True
+        assert 'west' not in view()['draft'] and 'item' in view()['error'];report['duplicate']=True
         for role,code,value in [('du',17,-1),('dd',17,1),('dl',16,-1),('dr',16,1)]:
             handle('learn',role=role);inject(3,code,value);inject(3,code,0)
             assert view()['draft'][role]=={'kind':'axis_button','code':code,'value':value}

@@ -1,48 +1,16 @@
-"""假 robotd + 假 configd：回放鸭子上录下来的真实回包（dev/record_robotd.py 录的），
-让 Studio 在电脑上不接鸭子也能跑通。
+"""Fake robotd + fake configd: replays recorded duck responses for local Studio testing without hardware.
 
     py -3.13 -I dev/fake_robotd.py --fixture tests/fixtures/now-20261018.jsonl
-    （robotd 听 tcp 127.0.0.1:17001，configd 听 17002；只绑本机）
+    (robotd on tcp 127.0.0.1:17001, configd on 17002; localhost only)
 
-模拟的行为（review-impl-plan I8）：
-- 每条连接串行处理：读一行、答一行；
-- hello 必须带 api_version（真机就是这样，不带回 -32602）；
-- robot.relax 立刻回 accepted:true；过 relax_delay 秒 busStatus 显示扭矩确认 OFF，
-  再过 hd_delay 秒 hd1910 的 restore_pending / temporary_gains_applied 才清掉（真机站着时这两个是 True）；
-- 调试模式下卸力只把 torque_state 改成 off，不切模式；
-- restart(秒)：断开所有现有连接，这段时间拒绝新连接（模拟 robotd 重启）；
-- inject：下一次回包前先塞几行（乱码、非对象的 JSON）；errors：指定方法回错误；
-- robot.subscribe 按 hz 降频推 robot.state，统计订阅者个数；
-- 调试模式下 policies、subscribe 返回错误；
-- delays 可以让某个方法故意慢（测「卸力不被慢请求挡住」）；
-- down=True 时拒绝新连接（模拟主程序不在）；
-- 通知（不带 id：robot.move / head / pose / mouth / sound / do 这些）照 JSON-RPC 不回话（robotd 也不回）；
-- 手柄页的请求（robot.init / enable / do / sound / stop / pose / head / mouth、pad.bindings）回 accepted，
-  enable / init 顺手改姿势（开 → 准备好走，关 / init → 站着保持），网页手柄的 e2e（tests/test_vpad_e2e.py）靠它；
-- --record 文件：收到的每一条（方法、参数、是不是通知、时间）一行 JSON，e2e 拿它核对「发给 robotd 的是什么」；
-- fake.set {posture?, pad_connected?}：测试用的控制口，换姿势、假装实体手柄连着（configd 的 pad.status 回连着）。
-  总览重排（审查 O18）又加了：{calib: ok / seed / uncal / unavailable}、{pads: [...]}（configd 原样回）、
-  {cpu: {c, level, khz, max_khz}}（改 health 里的主板温度、降频）、{errors: {方法: {code, message} 或 null}}。
-- 主程序的模式只由 --mode commissioning|motion 决定（fork main.rs:1300-1315），跟标定文件里写了什么无关。
-  标定模式：calibration-status 马上能读；busStatus 照 fork 的真实行为（main.rs:4687 附近）——第一次读成功之前回启动时那份报告
-  {"build","mode":"commissioning","phase":"configuring_bus","port"}（只有这四个键；舵机没上电时是 waiting_for_bus + error），
-  读成功以后（起来 comm_read_s 秒后）回实时快照：字段照 feetech_commissioning.rs 的 Status（phase ready，舵机断电后 read_error），
-  带 last_sample（15 颗舵机 + fork 同名字段的 imu）。--commissioning-stuck-status（或 fake.set {commissioning_stuck: true}）
-  模拟旧 fork：启动报告永远不清，Studio 永远看到「启动中」（10-20 真机验收就是这样）；
-  运动模式：标定不合格或舵机总线打不开时 phase=waiting_for_bus + error，calibration-status 回
-  「calibration not available yet」（fork main.rs:1500-1555、feetech_commissioning.rs:149-164）。
-  verify-imu 照 fork 的摆正 ≤5°、20 秒内低头 12–30° 模拟；--mode commissioning --calib factory 就是出厂场景。
-- calib=seed：标定文件里的 zero_raw 不是 2048（随包种子值的样子，fork packaging/hd1910-calibration.robot.toml）。
-- 配网（任务 10b）：configd 的 net.status / net.scan / net.connect / net.forget。--net-mode hotspot|wifi|none
-  还会写一份假 net.json 到 --net-state-file（电脑上看「连 WiFi」卡片用）。密码是 wrongpass → bad_key，
-  SSID 是 Ghost → not_found，企业认证 / 没填密码 → unsupported，其余 3 秒后成功。
-- 电池剧本（battery-plan.md v2 §6）：fake.set {battery: {v, drop_per_s, sag, gone, glitch}}，null 关掉。
-  v 卸力时的电压；每颗按二号鸭 10-18 实测那组偏差量化到 0.1 V；保持 / 策略站着再低 0.08 V，sag 是额外压降（假装在走）；
-  drop_per_s 每秒掉多少；gone 15 颗都报 0 V（舵机断电）；glitch 下一次 busStatus 15 颗一起报这个值。
-  health.battery 跟着报：volts 是这串数的 α=0.1 EMA（跟真机一样），percent 用 robotd 的 6.6–8.2 直线。
-- 运行和调参（调参方案 T1–T3）：启动四步 robot.startupSubscribe、姿势 walk_unloaded、策略开着时的 active_*、
-  fake.set 的 startup / servo_parameters / walk_profile / guard / slot_error 这些，都在 dev/fake_tune.py。
-测试里直接 import FakeRobotd，在同一个事件循环里起。
+Simulated behaviors:
+- Per-connection serial request/response handling; hello requires api_version.
+- robot.relax, restart, inject, errors, delays, down=True, notifications, fake.set, commissioning/motion modes.
+  "calibration not available yet" (fork main.rs:1500-1555, feetech_commissioning.rs:149-164).
+  verify-imu simulates upright <=5 deg and nose-down 12-30 deg within 20s.
+- calib=seed: non-2048 zero_raw values.
+- Wi-Fi provisioning: configd net.status/scan/connect/forget + --net-state-file.
+- Battery simulation & tuning payloads (via dev/fake_tune.py).
 """
 import argparse
 import asyncio
@@ -53,7 +21,7 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # -I 跑脚本时不会自己加：fake_tune 跟它放在一起
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # Add script dir to sys.path for -I mode
 import fake_tune  # noqa: E402
 
 
@@ -80,19 +48,19 @@ STUCK_CALIB = "motion requires all 15 calibrated joints, measured limits and ver
 NO_POWER = ("torque readback at register 40: Feetech Sync Read timeout; missing IDs [20, 21, 22, 23, 24, 30, 31, 32, 33, 34, "
             "10, 11, 12, 13, 14]")
 NO_CALIB = {"code": -32603, "message": "calibration not available yet"}
-COMMISSIONING_READ_S = 0.3     # 标定模式（重新）起来以后多久第一次读成功（真机一个周期就读到；留一点让人看得到启动报告）
-COMMISSIONING_BOOT_KEYS = ("build", "mode", "phase", "port")   # 启动报告就这四个键（fork main.rs:1310-1315）
-SEED_ZERO = {20: 2035, 21: 2176, 23: 1990, 24: 2101}     # 随包种子值那种：几颗不是 2048
+COMMISSIONING_READ_S = 0.3     # Delay before first commissioning read succeeds
+COMMISSIONING_BOOT_KEYS = ("build", "mode", "phase", "port")   # Commissioning boot report keys
+SEED_ZERO = {20: 2035, 21: 2176, 23: 1990, 24: 2101}     # Non-2048 seed zeros
 POSTURES = ["holding", "limp", "policy", "commissioning", "starting", "stuck_calib", "walk_unloaded"]
 IMU_VERIFY_UPRIGHT_MAX_DEG = 5.0
 IMU_VERIFY_NOSE_MIN_DEG = 12.0
 IMU_VERIFY_NOSE_MAX_DEG = 30.0
 VERIFY_NO_SAMPLE = "verify-imu needs a live {source} sample; check busStatus last_sample.imu and the reader"
-# 二号鸭 10-18 卸力时 15 颗的电压减去 7.6（ID 20–24 | 30–34 | 10–14，busStatus 的顺序）
+# Per-servo voltage offsets from 7.6V
 BAT_OFFSETS = [0.0, 0.1, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, -0.1, 0.0, 0.0, 0.1, 0.1, 0.0, 0.1]
 BAT_SAG = {"holding": 0.08, "policy": 0.08}
-# 假 configd 的 WiFi：强的在前；Home 没保存（要填密码），Home-5G 已保存。
-# 鸭子自己的热点也在里面（10-20 真机扫出来 Microduck-0de6、显示「已保存」）：Studio 要把它滤掉
+# Fake configd Wi-Fi networks
+# Includes duck own hotspot so Studio filter can be tested
 NETWORKS = [
     {"ssid": "Microduck-fake", "signal": 95, "security": "wpa_psk", "saved": True},
     {"ssid": "Home", "signal": 82, "security": "wpa_psk", "saved": False},
@@ -104,7 +72,7 @@ NETWORKS = [
 
 
 def fake_net_json(mode):
-    """netcheck 会写的那份状态。hostname 用固定的 duck-fake，本机看页面时不跟着电脑名变。"""
+    """Fake netcheck state file."""
     nets = [{k: n[k] for k in ("ssid", "signal", "security")} for n in NETWORKS]
     return {"mode": mode, "hotspot_ssid": "Microduck-fake", "hotspot_ip": "10.42.0.1",
             "hotspot_psk": "microduck", "hostname": "duck-fake", "since": time.time(),
@@ -123,7 +91,7 @@ class FakeRobotd:
     def __init__(self, fixture, posture="holding", record=None, net_mode="none", mode="motion"):
         replies, frames = load_fixture(fixture)
         self.health = copy.deepcopy(replies.get("robot.health"))
-        self._bus0 = copy.deepcopy(replies.get("robot.busStatus"))      # 换成调试 / 等总线的样子以后从录的这份重新开始
+        self._bus0 = copy.deepcopy(replies.get("robot.busStatus"))      # Base busStatus snapshot
         self.bus = copy.deepcopy(self._bus0)
         self.policies = replies.get("robot.policies")
         self._calib0 = copy.deepcopy(replies.get("busCommand:calibration-status"))
@@ -131,11 +99,11 @@ class FakeRobotd:
         self.calib_mode = "ok"
         self.mode = mode if mode in ("commissioning", "motion") else "motion"
         self.servo_power = True
-        self.comm_stuck = False                # 旧 fork：标定模式的启动报告永远不清（--commissioning-stuck-status）
-        self.hold = None                       # 标定模式 hold-home 站着：{stage, max_error_deg, directions}（fork 10-21）
+        self.comm_stuck = False                # Legacy stuck commissioning boot report
+        self.hold = None                       # Commissioning hold-home state
         self.comm_read_s = COMMISSIONING_READ_S
-        self._comm_t0 = time.monotonic()       # 标定模式这次从什么时候起来（重启、切进标定模式时重新算）
-        self._comm_read_ok = False             # 这次起来以后读成功过没有（fork：读成功一次就清掉启动报告）
+        self._comm_t0 = time.monotonic()       # Commissioning boot timestamp
+        self._comm_read_ok = False             # Whether commissioning read succeeded
         self.imu_pose = "upright"              # upright / nose_down / wrong / none
         self.imu_verify_plan = "manual"        # manual / ok / not_upright / wrong / timeout
         self.imu_verify_timeout = 20.0
@@ -153,25 +121,25 @@ class FakeRobotd:
         self.relax_delay = 0.3
         self.hd_delay = 0.2
         self.delays = {}
-        self.errors = {}                      # 方法 -> {"code":..,"message":..}
-        self.inject = []                      # 下一次回包前先发出的原始行（bytes）
+        self.errors = {}                      # method -> {"code":..,"message":..}
+        self.inject = []                      # Raw lines injected before next reply
         self.down = False
         self._writers = set()
         hd = ((self.bus.get("native") or {}).get("hd1910") or {})
         self._hd_hold = {"restore_pending": hd.get("restore_pending", True),
                          "temporary_gains_applied": hd.get("temporary_gains_applied", True)}
         self.subscribers = 0
-        self.calls = []                       # (时间, 方法)：测试看先后
+        self.calls = []                       # (timestamp, method) call log
         self._relax_at = None
         self.bindings = [dict(b) for b in DEFAULT_BINDINGS]
-        self.record = open(record, "a", encoding="utf-8") if record else None   # noqa: SIM115 —— 进程活多久开多久
-        self.battery = None                   # 电池剧本（fake.set battery）；None = 回放录的那份电压
+        self.record = open(record, "a", encoding="utf-8") if record else None   # noqa: SIM115  # Kept open for process lifetime
+        self.battery = None                   # Battery sim config
         self._bat_ema = None
-        self.roller_models = False            # 装没装轮滑模型（robot.setMode 切 roller 要它；fake.set roller_models）
+        self.roller_models = False            # Roller models installed flag
         self.set_posture(posture)
 
     def set_battery(self, cfg):
-        """fake.set {battery: {...}} / null。只给了几项就只改那几项；给了 v 就从现在重新开始算 drop_per_s。"""
+        """Update battery sim parameters via fake.set."""
         if cfg is None:
             self.battery, self._bat_ema = None, None
             return
@@ -193,7 +161,7 @@ class FakeRobotd:
         return [round(base + o, 1) for o in BAT_OFFSETS]
 
     def _motion_error(self):
-        """运动模式启动前照 fork 的关键检查。factory 等不合格 -> waiting_for_bus。"""
+        """Check commissioning readiness before motion mode."""
         if not self.servo_power:
             return NO_POWER
         if self.calib_mode == "unavailable":
@@ -239,14 +207,12 @@ class FakeRobotd:
                 "mount_verified": verified, "tilt_deg": round(tilt, 3), "age_ms": 12, "epoch": 1}
 
     def comm_boot(self, delay=0.0):
-        """标定模式（重新）起来：启动报告从头开始，过 comm_read_s 秒第一次读成功。delay：先停这么久（模拟重启）。"""
+        """Reset commissioning boot state."""
         self._comm_t0 = time.monotonic() + delay
         self._comm_read_ok = False
 
     def comm_phase(self):
-        """标定模式下 busStatus 现在回哪一种（照 fork feetech_commissioning.rs 1123-1160、1497-1556 和 main.rs:4687 附近）：
-        boot = 启动报告（configuring_bus）；waiting = 舵机总线打不开（舵机没上电：waiting_for_bus + error）；up = 实时快照。
-        读成功过一次以后就一直是 up（舵机再断电是快照里的 read_error）；comm_stuck（旧 fork）永远停在启动报告。"""
+        """Return commissioning busStatus phase: boot, waiting, or up."""
         if not self._comm_read_ok:
             if not self.servo_power:
                 return "waiting"
@@ -277,7 +243,7 @@ class FakeRobotd:
         read_error = None if self.servo_power else NO_POWER
         ids = [r["id"] for r in rows]
         imu = self._imu_status()
-        # 字段照 fork 的 Status（feetech_commissioning.rs 1083 行附近）；last_sample 是最近一次读好的那份
+        # Commissioning live snapshot
         return {"build": b0.get("build"), "port": b0.get("port"), "mode": "commissioning",
                 "phase": "read_error" if read_error else ("holding" if self.hold else "ready"),
                 "session": os.getpid(), "target_hz": 50.0, "achieved_hz": 49.9 if not read_error else 0.0,
@@ -292,7 +258,7 @@ class FakeRobotd:
                 "last_failure": {"cycle": cycles, "error": read_error, "missing_ids": ids} if read_error else None,
                 "last_sample": {"cycle": cycles, "at_us": up_us, "servos": rows, "imu": imu},
                 "calibrated": self.calib_mode not in ("uncal", "factory"),
-                "imu_mount_verified": imu["mount_verified"],          # 正在用的那颗 IMU 的（fork：calibration.imu_mount(source)）
+                "imu_mount_verified": imu["mount_verified"],          # Active IMU mount verified
                 "torque_state": self.bus.get("torque_state", "all_enabled"), "torque_off_pending": None,
                 "power_pending": False, "motion": None, "policy_motion_enabled": False, "updated_at_us": up_us,
                 **({"hold": dict(self.hold)} if self.hold else {})}
@@ -317,7 +283,7 @@ class FakeRobotd:
         for j, v in zip(joints, vs):
             j["volts"] = v
         mean = sum(vs) / len(vs)
-        if mean > 0:                    # 舵机断电时真机读不到回包，robotd 沿用上一个读数（不会把 0 V 平均进去）
+        if mean > 0:                    # Keep previous EMA when bus is unpowered
             self._bat_ema = mean if self._bat_ema is None else 0.1 * mean + 0.9 * self._bat_ema
         return bus
 
@@ -336,8 +302,7 @@ class FakeRobotd:
             self.record.flush()
 
     def set_calib(self, mode):
-        """标定文件的样子：ok / committed（15 颗 2048、都标了）、factory（出厂未标定：motion_enabled false、
-        calibrated 全 false、没有限位）、seed 种子值（几颗不是 2048）、uncal 有没标的、unavailable 读不到。"""
+        """Generate calibration-status payload for ok/factory/seed/uncal/unavailable."""
         self.calib_mode = "ok" if mode == "committed" else mode
         self.calib = copy.deepcopy(self._calib0)
         js = ((self.calib or {}).get("calibration") or {}).get("joints") or []
@@ -372,7 +337,7 @@ class FakeRobotd:
         self.sitting = p == "sitting"
         if p == "commissioning":
             if self.mode != "commissioning":
-                self.comm_boot()                  # 模式是启动参数：切进标定模式 = 主程序重新起来，先回启动报告
+                self.comm_boot()                  # Mode switch restarts commissioning boot sequence
             self.mode = "commissioning"
             self._shape(p)
             self.posture = p
@@ -396,7 +361,7 @@ class FakeRobotd:
         elif p in ("policy", "sitting"):
             self.bus["policy_enabled"] = True
         self.posture = p
-        fake_tune.after_posture(self, p)          # 调参卡要的形状（策略开着的 active_*、walk_unloaded）
+        fake_tune.after_posture(self, p)          # Update tuning fields for posture
 
     def posture_frame(self, source):
         """Live sitstand evidence atop the recorded sensors, with physical lag."""
@@ -420,7 +385,7 @@ class FakeRobotd:
         return frame
 
     def _shape(self, p):
-        """真机上这几种时候 busStatus 的样子（审查 O18）：没有 native，只有几个顶层字段。"""
+        """Build busStatus for waiting/debug/error states."""
         b0 = self._bus0
         if p == "commissioning":
             self.bus = {"build": b0.get("build"), "mode": "commissioning", "phase": "ready", "port": b0.get("port"),
@@ -442,7 +407,7 @@ class FakeRobotd:
                 self._relax_at = None
             return
         n = self.bus.get("native")
-        if n is None:                    # 卡在等总线：没有扭矩可卸（真机这时 relax 也只是记一下）
+        if n is None:                    # No torque to release while waiting for bus
             self._relax_at = None
             return
         if el >= 0:
@@ -453,14 +418,14 @@ class FakeRobotd:
             self._relax_at = None
 
     def stand_up(self):
-        """模拟别人用手柄让它站起来（重新上力）。"""
+        """Simulate external gamepad stand-up."""
         self._relax_at = None
         self.set_posture("holding")
 
     def restart(self, down_s=0.5):
-        """模拟 robotd 重启：现有连接全部断开，down_s 秒内拒绝新连接。"""
+        """Simulate robotd restart with down_s outage."""
         self.down = True
-        self.comm_boot(down_s)                   # 标定模式：起来以后又先回启动报告，读成功才回快照
+        self.comm_boot(down_s)                   # Reset commissioning boot report
         for w in list(self._writers):
             try:
                 w.close()
@@ -469,8 +434,7 @@ class FakeRobotd:
         asyncio.get_running_loop().call_later(down_s, setattr, self, "down", False)
 
     def _commit_calibration(self, cfg):
-        """假小助手写完以后的样子：ok = 切运动模式、phase control、回新的标定；
-        reject = 标定不合格（waiting_for_bus + 标定错误）；servo_power = 舵机没上电（waiting_for_bus + 总线错误）。"""
+        """Apply simulated calibration commit outcome."""
         outcome = cfg.get("outcome") or "ok"
         cal = cfg.get("calibration")
         source = cfg.get("imu_source") or (self.calib or {}).get("imu_source") or "bus"
@@ -487,7 +451,7 @@ class FakeRobotd:
             return
         self.servo_power = True
         if outcome == "reject":
-            # 标定本身可能写对了，但主程序的运动校验不过（这里演「正在用的 IMU 没 verified」）
+            # Simulate unverified IMU rejection
             cal_obj = self.calib.get("calibration") if isinstance(self.calib, dict) else None
             if isinstance(cal_obj, dict):
                 cal_obj["imu_mount_verified"] = False
@@ -501,8 +465,7 @@ class FakeRobotd:
         self.set_posture("holding")
 
     async def _verify_imu(self, params):
-        """照 fork feetech_commissioning.rs 的 verify-imu 规则模拟：先摆正 ≤5°，20 秒内低头 12–30°，
-        方向错了什么都不存。开发用 imu_verify_plan 可以立刻演成功 / 三种失败。"""
+        """Simulate verify-imu: upright <=5 deg, then nose-down 12-30 deg within 20s."""
         if self.mode != "commissioning":
             return None, {"code": -32603, "message": "verify-imu is only accepted in commissioning mode"}
         if (params or {}).get("confirmed") is not True:
@@ -532,7 +495,7 @@ class FakeRobotd:
             await asyncio.sleep(0.15)
             self.imu_pose = "nose_down"
         else:
-            # manual：当前是 upright 才开始；之后由 fake.set 改成 nose_down。
+            # Manual mode waits for fake.set nose_down
             if self.imu_pose != "upright":
                 return None, {"code": -32603, "message":
                               "under this mount the trunk reads 20.0° from upright (limit 5°); stand the robot upright, "
@@ -579,14 +542,14 @@ class FakeRobotd:
                 return None, {"code": -32603, "message": "robotd is in commissioning mode"}
             return dict(self.policies or {}, sitting=self.sitting), None
         if method == "robot.busCommand" and (params or {}).get("action") == "calibration-status":
-            # 卡在等总线：标定只在开总线成功后才存（fork main.rs:1535），这时回错
+            # Refuse when bus is unavailable
             if self.mode != "commissioning" and self._shaped_bus().get("phase") == "waiting_for_bus":
                 return None, NO_CALIB
             return self.calib, None
         if method == "robot.busCommand" and (params or {}).get("action") == "verify-imu":
             return await self._verify_imu(params)
         if method == "robot.busCommand" and (params or {}).get("action") == "hold-home":
-            # fork 10-21：标定模式 15 颗一起转到 HOME 锁住；回话在站住以后（这里不等爬升）
+            # Commissioning hold-home
             if self.mode != "commissioning":
                 return None, {"code": -32603, "message": "raw bus commands require the running robotd commissioning mode"}
             dirs = (params or {}).get("directions") or []
@@ -624,7 +587,7 @@ class FakeRobotd:
             return {"removed": bool(ssid)}, None
         if method == "pad.bindings":
             return {"bindings": self.bindings}, None
-        if method == "fake.set":                       # 测试用：换姿势、假装实体手柄连着
+        if method == "fake.set":                       # Test control method
             if type(params.get("posture_delay_s")) in (int, float):
                 self.posture_delay_s = max(.1, min(30., float(params["posture_delay_s"])))
             if params.get("mode") in ("commissioning", "motion"):
@@ -647,7 +610,7 @@ class FakeRobotd:
             if isinstance(params.get("imu_verify_timeout"), (int, float)):
                 self.imu_verify_timeout = max(0.2, min(30.0, float(params["imu_verify_timeout"])))
             if params.get("posture"):
-                self._relax_at = None                  # 卸力还没「落地」的也算了：直接换成要的姿势
+                self._relax_at = None                  # Cancel pending relax
                 self.set_posture(params["posture"])
             if "pad_connected" in params:
                 self.pad = {"driver": "active", "pads": [{"mac": "78:86:2E:BB:13:28", "name": "Xbox Wireless Controller",
@@ -658,7 +621,7 @@ class FakeRobotd:
             if params.get("calib"):
                 self.set_calib(params["calib"])
             if "imu_verified" in params and isinstance(self.bus.get("native"), dict):
-                # busStatus 的 native.imu_mount_verified（上手清单 IMU 那行「主程序没确认方向，不让跳过」）
+                # Update IMU mount_verified
                 self.bus["native"]["imu_mount_verified"] = bool(params["imu_verified"])
             if isinstance(params.get("cpu"), dict):
                 c = params["cpu"]
@@ -678,18 +641,18 @@ class FakeRobotd:
                 self.roller_models = bool(params["roller_models"])
             if "battery" in params:
                 self.set_battery(params["battery"] if isinstance(params["battery"], dict) else None)
-            fake_tune.fake_set(self, params)           # 调参卡用的键（startup、servo_parameters、walk_profile……）
+            fake_tune.fake_set(self, params)           # Apply tuning overrides
             if params.get("restart"):
-                # 模拟 robotd 重启（Studio 会重新 hello、重读标定）：先回话再断，别把这条控制连接也掐了
+                # Schedule restart after reply
                 asyncio.get_running_loop().call_later(0.05, self.restart, float(params["restart"]))
             return {"posture": self.posture, "pad": self.pad, "calib": self.calib_mode}, None
         if method == "robot.rebootMotors":
-            # fork（handover 版）main.rs:6050-6056 从不拒；主循环先全身卸力再重启，之后软着（main.rs:2731-2758）。这里当卸力演
+            # Simulate soft reboot
             if self._relax_at is None and not (self.posture == "limp" or self.bus.get("torque_state") == "off"):
                 self._relax_at = time.monotonic() + self.relax_delay
             return {"accepted": True}, None
         if method == "robot.setMode":
-            # fork（handover 版）main.rs:5700-5736：不认识的、没策略的、没装轮滑模型的拒；已经是那个模式算接受（带原因）
+            # Simulate mode switch
             want = (params or {}).get("mode")
             if want not in ("walk", "roller", "roller_crouch", "roller_spin"):
                 return {"accepted": False, "reason": "mode must be walk, roller, roller_crouch or roller_spin"}, None
@@ -722,14 +685,13 @@ class FakeRobotd:
         return None, {"code": -32601, "message": f"method not found: {method}"}
 
     async def _net_connect(self, params):
-        """假 configd 的 net.connect：wrongpass → bad_key，Ghost → not_found，企业认证 / 没填密码 → unsupported，
-        其余 3 秒后成功。成功以后 net.status 也跟着变成连着这个 WiFi。"""
+        """Simulate configd net.connect."""
         ssid = (params or {}).get("ssid")
         psk = (params or {}).get("psk") or ""
         net = next((n for n in NETWORKS if n["ssid"] == ssid), None)
         if ssid == "Ghost" or net is None:
             await asyncio.sleep(0.2)
-            return {"outcome": "failed", "reason": "not_found", "detail": f"没有看到 {ssid}"}
+            return {"outcome": "failed", "reason": "not_found", "detail": f"Network not found: {ssid}"}
         if psk == "wrongpass":
             await asyncio.sleep(0.2)
             return {"outcome": "failed", "reason": "bad_key", "detail": "802.1X authentication failed"}
@@ -766,7 +728,7 @@ class FakeRobotd:
                     break
                 result, err = await self.dispatch(method, params)
                 if notify:
-                    continue                           # 通知不回话（JSON-RPC；robotd 也不回）
+                    continue                           # Notifications have no reply
                 while self.inject:
                     writer.write(self.inject.pop(0))
                 reply = {"jsonrpc": "2.0", "id": rid}
@@ -826,14 +788,14 @@ async def main():
     ap.add_argument("--configd-port", type=int, default=17002)
     ap.add_argument("--posture", default="holding", choices=POSTURES)
     ap.add_argument("--mode", default="motion", choices=["commissioning", "motion"],
-                    help="busStatus 的 mode 只看这个（fork main.rs:1300-1315）")
+                    help="robotd busStatus mode")
     ap.add_argument("--calib", default="ok", choices=["ok", "committed", "factory", "seed", "uncal", "unavailable"])
     ap.add_argument("--commissioning-stuck-status", action="store_true",
-                    help="模拟旧 fork：标定模式的启动报告（configuring_bus）永远不清，Studio 一直看到「启动中」")
-    ap.add_argument("--record", help="把收到的每一条记进这个文件（一行一个 JSON）")
+                    help="Simulate legacy commissioning boot report stuck")
+    ap.add_argument("--record", help="Log all received RPCs to JSONL file")
     ap.add_argument("--net-mode", choices=["hotspot", "wifi", "none"],
-                    help="配网假数据：写一份假 net.json（给 Studio 的 --net-state 用）")
-    ap.add_argument("--net-state-file", default="state-dev/net.json", help="假 net.json 写到哪")
+                    help="Fake network mode for --net-state")
+    ap.add_argument("--net-state-file", default="state-dev/net.json", help="Path for fake net.json")
     a = ap.parse_args()
     fake = FakeRobotd(a.fixture, a.posture, a.record, net_mode=a.net_mode or "none", mode=a.mode)
     fake.comm_stuck = bool(a.commissioning_stuck_status)
@@ -844,10 +806,10 @@ async def main():
         fake.set_posture(a.posture)
     s1, p1 = await fake.serve_tcp(port=a.robotd_port)
     s2, p2 = await fake.serve_tcp(port=a.configd_port)
-    extra = f"，配网 {a.net_mode}（{a.net_state_file}）" if a.net_mode else ""
+    extra = f", net={a.net_mode} ({a.net_state_file})" if a.net_mode else ""
     if fake.comm_stuck:
-        extra += "，标定模式的启动报告永远不清（旧 fork）"
-    print(f"假 robotd 在 tcp:127.0.0.1:{p1}，假 configd 在 tcp:127.0.0.1:{p2}，模式 {a.mode}，姿势 {a.posture}{extra}。Ctrl+C 退出。", flush=True)
+        extra += ", commissioning boot stuck"
+    print(f"Fake robotd on tcp:127.0.0.1:{p1}, configd on tcp:127.0.0.1:{p2}, mode={a.mode}, posture={a.posture}{extra}. Ctrl+C to quit.", flush=True)
     async with s1, s2:
         await asyncio.gather(s1.serve_forever(), s2.serve_forever())
 

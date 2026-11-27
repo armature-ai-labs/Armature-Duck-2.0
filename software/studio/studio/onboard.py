@@ -830,10 +830,9 @@ class Onboarding:
             return False, "Calibration file not yet received from robotd; wait a few seconds"
         if (calib or {}).get("uncalibrated_joints"):
             return False, "robotd reports uncalibrated joints; calibrate on Servo page first"
-        off = [j for j in js if type(j.get("zero_raw")) is not int or not 0 <= j["zero_raw"] <= 4095
-               or j.get("calibrated") is not True]
+        off = [j for j in js if j.get("zero_raw") != 2048 or j.get("calibrated") is not True]
         if off:
-            return False, f"{len(off)} servos have invalid or uncalibrated zero_raw; check on Servo page"
+            return False, f"{len(off)} servo(s) are not calibrated to 2048; calibrate on Servo page first"
         if len(js) != len(SERVO_IDS) or {j.get("id") for j in js} != set(SERVO_IDS):
             return False, "Servo IDs in robotd calibration do not match the 15 official joints"
         fp = joints_fp(calib)

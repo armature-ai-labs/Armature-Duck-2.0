@@ -50,8 +50,8 @@ class AiSettingsBrowser(unittest.TestCase):
                 else:
                     text = next((m['content'] for m in reversed(messages) if m.get('role') == 'user'), '')
                     answer = ('fixture-ai-key-A' if model == 'echo-key' else
-                              '长' * 2501 if model == 'long-answer' and text == '长回答' else
-                              f'模拟回复[{model}]：{text}')
+                              'item' * 2501 if model == 'long-answer' and text == 'item' else
+                              f'item[{model}]: {text}')
                     status, response = 200, {'choices': [{'message': {'role': 'assistant', 'content': answer}}]}
                 data = json.dumps(response, ensure_ascii=False).encode()
                 self.send_response(status)

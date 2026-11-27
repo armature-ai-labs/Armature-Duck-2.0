@@ -34,10 +34,10 @@ export function createMotionHeartbeat({ send, isActive, isConnected, onError = (
       const result = await send({ op: 'motion', action: 'heartbeat', session_id: current });
       if (disposed || mine !== generation) return;
       if (!result?.ok) {
-        stop(); onError(result?.reason || result?.error || '动作会话已停止，请重新开始');
+        stop(); onError(result?.reason || result?.error || 'Motion session stopped; please restart');
       }
     } catch (error) {
-      if (!disposed && mine === generation) { stop(); onError(error?.message || '动作会话连接中断'); }
+      if (!disposed && mine === generation) { stop(); onError(error?.message || 'Motion session connection lost'); }
     } finally {
       if (mine === generation) pending = false;
     }

@@ -880,7 +880,7 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
                 accepted, reason = False, f"Studio error: {type(e).__name__}"
             try:
                 await send({"t": "result", "id": cid, "ok": accepted, "reason": reason})
-            # Client disconnected; E-Stop already ran
+            except Exception:  # Client disconnected; E-Stop already ran
                 pass
 
         async def run_servo(name, cid, args=None):
@@ -1088,7 +1088,7 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
             what = {"confirm_servo": "confirm servo", "done": "mark done", "skip": "skip", "unskip": "unskip",
                     "undone": "unmark done"}.get(op)
             if what is None:
-                return {"t": "result", "id": cid, "ok": False, "reason": f"Unknown command: {op}"})
+                return {"t": "result", "id": cid, "ok": False, "reason": f"Unknown command: {op}"}
             step = str(args.get("step") or "")
             confirmed = args.get("confirmed") is True
             if op == "confirm_servo":
@@ -1778,7 +1778,9 @@ def build_app(*, auth, robotd, log, web_dir, duck, names=(), state_dir=None, dev
         Route("/api/models/op", api_model_op, methods=["POST"]),
         Route("/api/models/import", api_model_import, methods=["POST"]),
         Route("/model/meshes.bin", meshes),
-        Route("/m", lambda request: RedirectResponse("/m.html", status_code=307)),
+        Route("/m", lambda request: WebFileResponse(web_dir / "m.html", media_type="text/html")),
+        Route("/m/", lambda request: WebFileResponse(web_dir / "m.html", media_type="text/html")),
+        Route("/m.html", lambda request: WebFileResponse(web_dir / "m.html", media_type="text/html")),
         # Mobile HTTPS helpers
         Route("/ca.crt", api_ca),
         Route("/api/asr", api_asr, methods=["POST"]),

@@ -49,10 +49,10 @@ test('ToF rejects malformed and stale frames and clears absent data', () => {
 
 test('source labels never promote configuration or a test image to hardware proof', () => {
   assert.equal(typeof ui.cameraSource, 'function');
-  assert.match(ui.cameraSource({ source: 'test' }, {}).label, /测试/);
-  assert.match(ui.cameraSource({ source: 'camera' }, {}).label, /配置/);
-  assert.match(ui.cameraSource({ source: 'camera' }, { simulated: 'true' }).label, /模拟/);
-  assert.match(ui.cameraSource({ source: 'unknown' }, {}).label, /未知/);
+  assert.match(ui.cameraSource({ source: 'test' }, {}).label, /Test/i);
+  assert.match(ui.cameraSource({ source: 'camera' }, {}).label, /Config: Camera/i);
+  assert.match(ui.cameraSource({ source: 'camera' }, { simulated: 'true' }).label, /Simulated/i);
+  assert.match(ui.cameraSource({ source: 'unknown' }, {}).label, /Unknown/i);
   assert.equal(ui.cameraSource({ source: 'camera' }, {}).verified, false);
 });
 
@@ -71,13 +71,14 @@ test('status cards distinguish hardware data, simulation and camera service evid
   assert.equal(typeof ui.cameraBandStatus, 'function');
   assert.equal(typeof ui.tofBandStatus, 'function');
   assert.equal(ui.cameraBandStatus({ source: 'camera' }).state, 'unknown');
-  assert.equal(ui.cameraBandStatus({ source: 'camera', service_state: 'online' }).word, '服务在线');
-  assert.equal(ui.cameraBandStatus({ source: 'test', service_state: 'online' }).word, '测试画面');
+  assert.equal(ui.cameraBandStatus({ source: 'camera', service_state: 'online' }).word, 'Online');
+  assert.equal(ui.cameraBandStatus({ source: 'test', service_state: 'online' }).word, 'Test Pattern');
   assert.equal(ui.cameraBandStatus({ source: 'test', service_state: 'offline' }).state, 'offline');
-  assert.equal(ui.tofBandStatus(frame()).word, '在线');
-  assert.equal(ui.tofBandStatus({ ...frame(), simulated: true }).word, '模拟数据');
-  assert.equal(ui.tofBandStatus({ ...frame(), state: 'unavailable', connected: true }).state, 'offline');
-  assert.equal(ui.tofBandStatus({ state: 'waiting', connected: true }).word, '等待数据');
+  assert.equal(ui.tofBandStatus(frame()).word, '500 mm');
+  assert.equal(ui.tofBandStatus({ ...frame(), simulated: true }).word, 'Simulated');
+  assert.equal(ui.tofBandStatus({ ...frame(), state: 'unavailable', connected: true }).state, 'waiting');
+  assert.equal(ui.tofBandStatus({ ...frame(), state: 'unavailable', connected: false }).state, 'offline');
+  assert.equal(ui.tofBandStatus({ state: 'waiting', connected: true }).word, 'Waiting');
   assert.equal(ui.tofBandStatus({ ...frame(), age_ms: 5000 }).state, 'unknown');
   assert.equal(ui.tofBandStatus({ ...frame(), status: [5] }).state, 'error');
 });
@@ -91,8 +92,8 @@ test('band reader checks once per ten seconds and cancels both independent reque
   } });
   reader.start(); await tick();
   assert.equal(calls.length, 2);
-  assert.equal(values.at(-1).camera.word, '测试画面');
-  assert.equal(values.at(-1).tof.word, '在线');
+  assert.equal(values.at(-1).camera.word, 'Test Pattern');
+  assert.equal(values.at(-1).tof.word, '500 mm');
   c.advance(9999); await tick(); assert.equal(calls.length, 2);
   c.advance(1); await tick(); assert.equal(calls.length, 4);
   reader.stop(); assert.equal(c.count, 0);
@@ -148,7 +149,7 @@ test('poll failure and a hanging refresh immediately expire old readings', async
   assert.equal(states.at(-1).state, 'stale');
   assert.deepEqual(states.at(-1).zones, []);
   reader.stop();
-  const failed = ui.createTofReader({ ...c, onValue: s => states.push(s), request: async () => { throw Error('断开'); } });
+  const failed = ui.createTofReader({ ...c, onValue: s => states.push(s), request: async () => { throw Error('item'); } });
   failed.start(); await tick(); assert.equal(states.at(-1).state, 'error');
   assert.deepEqual(states.at(-1).zones, []); failed.stop();
 });
@@ -283,7 +284,7 @@ test('no producer, signaling error and receive timeout are failures rather than 
   assert.equal(ws.closed, true); h.link.start(8443); h.sockets.at(-1).onerror();
   assert.equal(h.states.at(-1).state, 'error');
   await h.session(); h.c.advance(11000); await tick(); assert.equal(h.states.at(-1).state, 'error');
-  assert.match(h.states.at(-1).error, /画面|超时/); h.link.stop();
+  assert.match(h.states.at(-1).error, /Timed out|timeout/i); h.link.stop();
 });
 
 test('oversized signaling and ambiguous LAN producers are rejected', async () => {
@@ -300,7 +301,7 @@ test('a frozen decoded frame counter expires even while the video clock advances
   pc.ontrack({ track: h.track, streams: [h.stream] }); await tick();
   h.video.currentTime = 1; h.c.advance(1000); assert.equal(h.states.at(-1).state, 'playing');
   for (let i = 2; i < 13; i++) { h.video.currentTime = i; h.c.advance(1000); }
-  assert.equal(h.states.at(-1).state, 'error'); assert.match(h.states.at(-1).error, /超时/);
+  assert.equal(h.states.at(-1).state, 'error'); assert.match(h.states.at(-1).error, /timeout/i);
   h.link.stop();
 });
 

@@ -1,13 +1,11 @@
-// 共用的数字步进控件：「−」输入框「+」一行。舵机页、设置 › 电池、设置 › 模型的重量都用它。
-// 只依赖页面已有的 CSS 变量，跟随亮/暗主题；纯计算部分单独导出，tests/stepper.test.mjs 可以直接测。
+// Shared numeric stepper control ("-" input "+") with hold-repeat.
 import { html, useEffect, useRef, useCallback } from './vendor/preact-htm.module.js';
 
-export const HOLD_DELAY_MS = 400;      // 按住后先等这么久
-export const HOLD_INTERVAL_MS = 80;    // 之后每这么久加一格
+export const HOLD_DELAY_MS = 400;
+export const HOLD_INTERVAL_MS = 80;
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 
-// step 的小数位数（0.5 → 1，0.01 → 2）
 export function stepperDecimals(step) {
   const s = String(step == null ? 1 : step);
   const m = /^[-+]?(\d+)(?:\.(\d+))?(?:[eE]([-+]?\d+))?$/.exec(s);
@@ -17,7 +15,6 @@ export function stepperDecimals(step) {
   return Math.max(0, frac - exp);
 }
 
-// 把输入框里的字符串变成数字；空字符串和不是数的都返回 null
 export function stepperNumber(raw) {
   if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
   if (typeof raw !== 'string') return null;
@@ -34,7 +31,6 @@ export function stepperClamp(v, min, max) {
   return n;
 }
 
-// value 为空时从 min（没有 min 就从 0）开始；只按 step 的小数位四舍五入，避免 0.30000000000000004
 export function stepperStep(value, delta, { min, max, step = 1 } = {}) {
   const st = finite(step) && step > 0 ? step : 1;
   const base = finite(value) ? value : finite(min) ? min : 0;
@@ -48,8 +44,6 @@ export function stepperText(v) {
   return n === null ? '' : String(n);
 }
 
-// 按住连加/连减：start() 后停 delay，再每 every 毫秒调一次 fire；stop() 随时停。
-// timers 可以换成假时钟，测试用。
 export function createHoldRepeater(fire, { delay = HOLD_DELAY_MS, every = HOLD_INTERVAL_MS, timers = globalThis } = {}) {
   let timeoutId = null;
   let intervalId = null;
@@ -72,29 +66,25 @@ const CSS = `
 .md-stepper { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; font-size: 15px; color: var(--text); }
 .md-stepper .md-stepper-btn {
   width: 32px; height: 32px; min-width: 32px; flex: none; padding: 0;
-  border: 1px solid var(--line, #D1D1D6);
-  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
-  border-radius: 8px;
-  background: var(--board, #FFF);
-  background: color-mix(in srgb, var(--text) 7%, var(--board, #FFF));
+  border: 1px solid var(--hair-strong);
+  border-radius: var(--radius);
+  background: var(--panel-2);
   color: var(--text); font: inherit; font-size: 19px; line-height: 1;
   display: inline-flex; align-items: center; justify-content: center;
   user-select: none; -webkit-user-select: none; touch-action: none; cursor: pointer;
 }
-.md-stepper .md-stepper-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 13%, var(--board, #FFF)); }
-.md-stepper .md-stepper-btn:active:not(:disabled) { background: color-mix(in srgb, var(--text) 19%, var(--board, #FFF)); }
+.md-stepper .md-stepper-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.md-stepper .md-stepper-btn:active:not(:disabled) { background: var(--panel-elevated); }
 .md-stepper .md-stepper-btn:disabled { opacity: .32; cursor: default; }
 .md-stepper input.md-stepper-input[type=text] {
   width: 92px; min-width: 92px; height: 32px; padding: 0 8px;
-  border: 1.5px solid var(--line, #D1D1D6);
-  border: 1.5px solid color-mix(in srgb, var(--text) 28%, transparent);
-  border-radius: 8px; background: var(--board, #FFF); color: var(--text);
-  font: inherit; font-size: 15px; font-variant-numeric: tabular-nums; text-align: center;
+  border: 1px solid var(--hair-strong);
+  border-radius: var(--radius); background: var(--panel); color: var(--text);
+  font: inherit; font-family: var(--font-mono); font-size: 14px; font-variant-numeric: tabular-nums; text-align: center;
   outline: none; -moz-appearance: textfield; appearance: textfield;
 }
 .md-stepper input.md-stepper-input[type=text]:focus {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 20%, transparent);
+  border-color: var(--accent);
 }
 .md-stepper input.md-stepper-input::-webkit-outer-spin-button,
 .md-stepper input.md-stepper-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
@@ -192,7 +182,7 @@ export function Stepper({ value, min, max, step = 1, onChange, disabled = false,
   };
 
   const stepOnce = (dir) => (e) => {
-    if (e.detail !== 0) return;        // 鼠标/触摸已经由 pointerdown 处理；这里只接键盘和辅助技术
+    if (e.detail !== 0) return;
     if (editingRef.current && inputRef.current) inputRef.current.blur();
     nudgeRef.current(dir);
   };
@@ -202,7 +192,7 @@ export function Stepper({ value, min, max, step = 1, onChange, disabled = false,
   const atMax = disabled || (finite(max) && finite(val) && val >= max);
 
   return html`<span class=${'md-stepper ' + className}>
-    <button type="button" class="md-stepper-btn" disabled=${atMin} aria-label=${(ariaLabel || '数值') + ' 减'}
+    <button type="button" class="md-stepper-btn" disabled=${atMin} aria-label=${'Decrease ' + (ariaLabel || 'value')}
       onPointerDown=${startHold(-1)} onPointerUp=${stopHold} onPointerLeave=${stopHold} onPointerCancel=${stopHold}
       onBlur=${stopHold} onClick=${stepOnce(-1)}>−</button>
     <input ref=${inputRef} class="md-stepper-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false"
@@ -214,7 +204,7 @@ export function Stepper({ value, min, max, step = 1, onChange, disabled = false,
         if (e.key === 'Enter') { e.preventDefault(); if (editingRef.current) { editingRef.current = false; commitInput(true); } e.currentTarget.blur(); }
         else if (e.key === 'Escape') { e.preventDefault(); if (inputRef.current) inputRef.current.value = stepperText(valueRef.current); e.currentTarget.blur(); }
       }} />
-    <button type="button" class="md-stepper-btn" disabled=${atMax} aria-label=${(ariaLabel || '数值') + ' 加'}
+    <button type="button" class="md-stepper-btn" disabled=${atMax} aria-label=${'Increase ' + (ariaLabel || 'value')}
       onPointerDown=${startHold(1)} onPointerUp=${stopHold} onPointerLeave=${stopHold} onPointerCancel=${stopHold}
       onBlur=${stopHold} onClick=${stepOnce(1)}>+</button>
     ${unit ? html`<span class="md-stepper-unit">${unit}</span>` : null}

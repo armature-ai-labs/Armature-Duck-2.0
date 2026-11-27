@@ -6,7 +6,7 @@ from studio.pad_mapping import MappingError, PadMapping
 
 
 def device():
-    return {'id':'bt-controller-1','name':'测试手柄','bus':5,'vendor':1,'product':2,
+    return {'id':'bt-controller-1','name':'item','bus':5,'vendor':1,'product':2,
             'buttons':[{'code':code,'name':f'BTN_{code}','pressed':False} for code in range(304,320)],
             'axes':[{'code':code,'name':f'ABS_{code}','min':-100,'max':100,'value':0,'flat':0,'fuzz':0}
                     for code in (0,1,3,4)] + [{'code':2,'name':'ABS_Z','min':0,'max':255,'value':0}]
@@ -57,7 +57,7 @@ class MappingTest(unittest.TestCase):
     def test_duplicate_binding_is_rejected_without_replacing_first(self):
         self.learn_key('south',305); self.learn_key('east',305)
         view=self.mapping.snapshot('page-a')
-        self.assertNotIn('east',view['draft']); self.assertIn('已用于',view['error'])
+        self.assertNotIn('east',view['draft']); self.assertIn('already bound',view['error'])
     def test_axis_sweep_requires_both_ends_and_return_to_center(self):
         self.mapping.handle({'action':'learn','role':'lx'},'page-a')
         self.native.event(3,0,90); self.mapping.poll(force=True)
@@ -79,9 +79,9 @@ class MappingTest(unittest.TestCase):
         self.mapping.handle({'action':'learn','role':'south'},'page-a')
         self.native.status['device']=None; self.mapping.poll(force=True)
         self.assertIsNone(self.mapping.snapshot('page-a')['capture'])
-        self.assertIn('断开',self.mapping.snapshot('page-a')['error'])
+        self.assertIn('disconnected',self.mapping.snapshot('page-a')['error'])
     def test_save_incomplete_does_not_write(self):
-        with self.assertRaises(MappingError): self.mapping.handle({'action':'save','name':'我的手柄'},'page-a')
+        with self.assertRaises(MappingError): self.mapping.handle({'action':'save','name':'item'},'page-a')
         self.assertFalse(any(c['op']=='save' for c in self.native.calls))
     def test_snapshot_is_memory_only_and_heartbeat_is_explicit(self):
         count=len(self.native.calls)
@@ -92,7 +92,7 @@ class MappingTest(unittest.TestCase):
         self.assertEqual(self.native.calls[-1]['op'],'renew')
     def test_begin_guard_refusal_never_sends_native_begin(self):
         n=Native()
-        def guard(): raise MappingError('请先停下')
+        def guard(): raise MappingError('itemStop')
         manager=PadMapping(n,guard=guard)
         with self.assertRaises(MappingError): manager.handle({'action':'begin'},'a')
         self.assertFalse(any(c['op']=='begin' for c in n.calls))

@@ -1,13 +1,18 @@
 # Armature Duck 2.0 (Indie Duck)
 
+[![Resume Setup](https://img.shields.io/badge/Resume-Setup%20Guide-orange)](RESUME_GUIDE.md)
 [![Getting Started](https://img.shields.io/badge/Guide-Getting%20Started-blue)](GETTING_STARTED.md)
+[![Hardware Wiring](https://img.shields.io/badge/Hardware-Wiring%20Guide-purple)](docs/HARDWARE_WIRING_GUIDE.md)
 [![Hardware BOM](https://img.shields.io/badge/Hardware-Electronics%20BOM-brightgreen)](BOM/Microduck_Replica_Electronics_BOM.xlsx)
 
 **English** · [简体中文](README.zh-CN.md)
 
 An open-source autonomous bipedal robot duck replica project based on [Pollen Robotics' Microduck](https://pollen-robotics.com/microduck/), featuring a complete bill of materials, printable CAD assemblies, real-time control, and an English-localized web management console (**Microduck Studio**).
 
-> 🚀 **New to the project? Read the [Getting Started Guide (GETTING_STARTED.md)](GETTING_STARTED.md) to build or resume your own Indie Duck!**
+> 🚀 **Resuming this project on a new computer? Read the [Resumption Guide (RESUME_GUIDE.md)](RESUME_GUIDE.md) to pick up exactly where we left off!**
+> 
+> 📖 **First-time builder? Read the [Getting Started Guide (GETTING_STARTED.md)](GETTING_STARTED.md) and [Hardware Wiring Guide](docs/HARDWARE_WIRING_GUIDE.md).**
+
 
 
 ## Download the image for your board

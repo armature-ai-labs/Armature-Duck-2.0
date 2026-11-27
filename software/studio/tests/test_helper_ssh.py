@@ -1,8 +1,8 @@
-"""root 小助手的 SSH 两个动词：ssh-status（只读）、ssh-password（打开 / 关掉密码登录）。
+"""root item SSH item: ssh-status (item), ssh-password (item / item).
 
-用户 10-21：公开镜像出厂只认钥匙、不带任何人的钥匙；出了问题要能自己 SSH 进去修、不用重烧卡 →
-Studio「更多」页让用户自己定一个密码再打开。要核对的：密码只走 chpasswd 的 stdin、不进命令行 / 日志 / 结果文件；
-配置检查不过、或者 sshd -T 读回来密码登录没真打开，都要删掉开关文件退回去。
+item 10-21: item, item SSH item, item →
+Studio'item'item.item: item chpasswd item stdin, item / item / item
+item, item sshd -T item, item.
 
     py -3.13 -I -m unittest tests.test_helper_ssh
 """
@@ -17,13 +17,13 @@ PW = "duck-secret-42"
 
 
 class SshWorld(World):
-    """在 World 上加 chpasswd / sshd / ssh 服务。"""
+    """item World item chpasswd / sshd / ssh item."""
 
     def __init__(self, root):
         super().__init__(root)
         self.chpasswd_rc = 0
         self.sshd_t_rc = 0
-        self.effective = None          # None：按开关文件在不在算；True / False：sshd -T 强制回这个
+        self.effective = None          # None: itemTrue / False: sshd -T item
         self.reload_rc = 0
         self.ssh_unit = "active"
         self.inputs = []
@@ -74,7 +74,7 @@ class Base(unittest.TestCase):
         return self.w.path(H.SSH_PASSWORD_CONF)
 
     def everything_written(self, lines):
-        """stdout、last-result、oplog、logger 调用、命令行：拼起来查有没有密码。"""
+        """stdout, last-result, oplog, logger item, item: item."""
         parts = [json.dumps(lines, ensure_ascii=False), json.dumps(self.w.calls, ensure_ascii=False)]
         for rel in (H.LAST, H.OPLOG):
             p = self.w.path(rel)
@@ -87,12 +87,12 @@ class StatusTest(Base):
     def test_reports_off_and_counts_keys(self):
         keys = self.w.path(H.SSH_KEYS)
         keys.parent.mkdir(parents=True)
-        keys.write_text("# 注释\nssh-ed25519 AAAA one\n\nssh-ed25519 BBBB two\n", encoding="utf-8")
+        keys.write_text("# item\nssh-ed25519 AAAA one\n\nssh-ed25519 BBBB two\n", encoding="utf-8")
         code, lines = self.call("ssh-status", {})
         self.assertEqual(code, H.EXIT_OK)
         d = lines[-1]["detail"]
         self.assertEqual((d["password_login"], d["ssh_active"], d["keys"], d["user"]), (False, True, 2, "radxa"))
-        self.assertFalse(self.w.path(H.LAST).exists(), "只读查询不能覆盖 last-result")
+        self.assertFalse(self.w.path(H.LAST).exists(), "item last-result")
 
     def test_unknown_key_refused(self):
         code, _ = self.call("ssh-status", {"by": "x", "password": "y"})
@@ -101,14 +101,14 @@ class StatusTest(Base):
 
 class PasswordOnTest(Base):
     def test_on_sets_password_via_stdin_writes_conf_and_reloads(self):
-        code, lines = self.call("ssh-password", {"by": "电脑 192.168.0.9", "on": True, "password": PW})
+        code, lines = self.call("ssh-password", {"by": "PC 192.168.0.9", "on": True, "password": PW})
         self.assertEqual(code, H.EXIT_OK, lines[-1])
         self.assertEqual(lines[-1]["detail"]["result"], "ssh_password_on")
         chp = [i for a, i in self.w.inputs if a == ["chpasswd"]]
         self.assertEqual(chp, [f"radxa:{PW}\n".encode()])
         text = self.conf().read_text(encoding="utf-8")
         self.assertIn("PasswordAuthentication yes", text)
-        self.assertTrue(H.SSH_PASSWORD_CONF.endswith("/05-microduck-ssh-password.conf"))   # 排在 10-microduck.conf 前面
+        self.assertTrue(H.SSH_PASSWORD_CONF.endswith("/05-microduck-ssh-password.conf"))   # item 10-microduck.conf item
         order = [c[:2] for c in self.w.calls if c[0] in ("chpasswd", "sshd", "systemctl") and c[1:2] != ["is-active"]]
         self.assertEqual(order, [["chpasswd"], ["sshd", "-t"], ["sshd", "-T"], ["systemctl", "reload-or-restart"]])
         self.assertNotIn(PW, self.everything_written(lines))
@@ -129,7 +129,7 @@ class PasswordOnTest(Base):
         self.assertEqual([c for c in self.w.calls if c[:2] == ["systemctl", "reload-or-restart"]], [])
 
     def test_not_effective_rolls_back(self):
-        self.w.effective = False          # 比如主配置在 Include 之前就写了 PasswordAuthentication no
+        self.w.effective = False          # item Include item PasswordAuthentication no
         code, lines = self.call("ssh-password", {"by": "t", "on": True, "password": PW})
         self.assertEqual(code, H.EXIT_FAIL)
         self.assertEqual(lines[-1]["detail"]["result"], "not_effective")
@@ -168,7 +168,7 @@ class PasswordOffTest(Base):
     def test_off_when_already_off(self):
         code, lines = self.call("ssh-password", {"by": "t", "on": False})
         self.assertEqual(code, H.EXIT_OK)
-        self.assertIn("本来就是关着的", lines[-1]["msg"])
+        self.assertIn("already disabled", lines[-1]["msg"])
 
     def test_off_with_password_refused(self):
         code, _ = self.call("ssh-password", {"by": "t", "on": False, "password": PW})

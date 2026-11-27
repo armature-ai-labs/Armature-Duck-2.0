@@ -1,23 +1,10 @@
-"""手柄页的后端：手柄状态、可视化配对、实时按键、测急停；「让鸭子动」的部分在 pad_drive.py（PadOps 继承它）。
+"""Gamepad page backend: status, pairing wizard, live input, E-Stop test; driving logic lives in pad_drive.py.
 
-跟系统打交道的四样东西都从构造函数传进来，都能换成假的（tests/test_pad.py 全用假的，电脑上没蓝牙也能跑）：
-
-| 端口      | 真的                                   | 干什么 |
-|-----------|----------------------------------------|--------|
-| configd   | ConfigdPort（unix:/run/configd.sock）   | pad.status 读状态；pad.pair / pad.forget 配对、忘掉（改动类，configd 只认 root 和 --allow-user，main.rs:112-131） |
-| bluetooth | BluetoothCtl（bluetoothctl 会话）       | 搜索列表（官方没有这个接口）；configd 不让配时的后备配对 |
-| tap       | PaddTap（unix:/run/padd/pad.sock）      | padd 旁路 pad.input：原始 evdev 按键；只在有人看手柄页时订阅（订阅了 padd 才打开设备） |
-| robot     | RobotPort（unix:/run/robotd.sock）      | robot.move / head / mouth（通知）；init / enable / do / sound / stop / busStatus（请求）；pad.bindings |
-
-robotd 的回读（扭矩、姿势、卸力按了几次）：由 app.py 在事件循环里用 robot_view(robotd) 取好，经 feed_robot() 交进来
-（lifespan 里一个 10 Hz 的小任务，不管有没有页面在看：审查 13），本模块不跨线程去读 robotd 的对象。
-测急停另外自己问 robot.busStatus（新开连接，自己记「什么时候问的」：审查 1）。
-
-线程（照 servo_ops）：handle() 在 asyncio.to_thread 里跑。搜索、配对很慢，放进后台任务线程，handle 立刻返回，
-进度放在 snapshot() 里（页面 10 Hz 拿）。看守线程：有人看手柄页、有任务、在测急停时才活着，负责轮询 pad.status、
-开关旁路；都没有了就自己退出。测急停、动作各有自己的线程，做完就退出。
-
-官方事实（文件:行号）都在 scratchpad console/pad-page-plan.md 里，这里只在关键处标一下。
+All 4 system ports are injected for testability (tests/test_pad.py runs with fakes without Bluetooth):
+- configd   : ConfigdPort (unix:/run/configd.sock)  - pad.status, pad.pair, pad.forget
+- bluetooth : BluetoothCtl (bluetoothctl session) - device discovery & fallback pairing
+- tap       : PaddTap (unix:/run/padd/pad.sock)     - raw evdev input stream while page is viewed
+- robot     : RobotPort (unix:/run/robotd.sock)     - robot.move/head/mouth, init/enable/do/sound/stop/busStatus, pad.bindings
 """
 import codecs
 import concurrent.futures
@@ -38,37 +25,37 @@ from .estop import STARTING_PHASES, relaxed, torque_off
 from .pad_combo import Refused
 from .motion_studio import MotionStudio, _digest
 from .pad_mapping import MappingClient, MappingError, PadMapping
-from .pad_drive import (DRIVING, FAST_WORKERS, MAX_V, MAX_W, RELAX_CLEAR_DELAY_S, RELAX_GUARD_S,  # noqa: F401 —— MAX_V / MAX_W 给别处 import
+from .pad_drive import (DRIVING, FAST_WORKERS, MAX_V, MAX_W, RELAX_CLEAR_DELAY_S, RELAX_GUARD_S,  # noqa: F401  # MAX_V / MAX_W re-exported
                         DriveMixin, parse_speed_limits)
 from .rpc import LINE_LIMIT, RpcError, Timeout, Unreachable, parse_addr
 from .state import MAX_AGE
 from .state import posture as _posture
 
 SCAN_S, SCAN_MAX_S = 12, 30
-PAIR_WINDOW_S = 20        # 给 configd 的 timeout_seconds：带 MAC 时一看到就停（bluez.rs:593-628）
-PAIR_CALL_MARGIN_S = 110  # configd 最坏：窗口 + 30 + 5 + 30 + 30 秒（bluez.rs:212-223）
+PAIR_WINDOW_S = 20        # configd timeout_seconds
+PAIR_CALL_MARGIN_S = 110  # configd worst-case call margin
 CONNECT_WAIT_S = 10
-PADD_WAIT_S = 30          # 真机上内核出输入设备大约在配好以后 15 秒，留一倍余量
-PAD_PAIR_TIMEOUT_S = 60   # 小助手跑官方 robotctl pad pair 的 timeout（10–120）
-WATCH_LEASE_S = 6.0       # 页面每 2 秒说一次「我在看」，6 秒没说就当没人看
-KEYS_NEED = 4             # 按键测试：按过 4 个不同的键、两个摇杆都推过，就算完成
+PADD_WAIT_S = 30          # Wait for kernel input device & padd attach
+PAD_PAIR_TIMEOUT_S = 60   # Helper robotctl pad pair timeout (10-120s)
+WATCH_LEASE_S = 6.0       # Page heartbeat lease
+KEYS_NEED = 4             # Key test requires 4 distinct keys + both sticks
 TEST_TORQUE_WAIT_S = 60
 TEST_PRESS_WAIT_S = 90
 TEST_READBACK_S = 6.0
-SELECT_LONG_S = 1.5       # 按住 1.5 秒先警告
-SHUTDOWN_HOLD_S = 2.0     # padd：Select 按住 2 秒是坐下、卸力、关机（robot.shutdown），不是急停（padd main.rs:192-193、725-739）
-TEST_PROBE_S = 0.25       # 测急停时自己问 busStatus 的间隔
+SELECT_LONG_S = 1.5       # Warn if Select held >= 1.5s
+SHUTDOWN_HOLD_S = 2.0     # padd triggers sit-and-shutdown if Select held >= 2s
+TEST_PROBE_S = 0.25       # busStatus poll interval during E-Stop test
 BUS_FRESH_S = 3.0
 STICK_ACTIVE = 0.15
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
-WEIRD_BLE = "/var/lib/robot/weird-ble"     # 有这个标记的板，官方 robotctl 配对前会停 btd、重启适配器（robotctl main.rs:2799-2945）
-ROBOTD_TOML = "/etc/robot/robotd.toml"      # padd 读 [netpad] 的地方（robotd-params DEFAULT_PATH）
+WEIRD_BLE = "/var/lib/robot/weird-ble"     # Marker file for boards needing btd restart before pairing
+ROBOTD_TOML = "/etc/robot/robotd.toml"      # padd [netpad] config path
 FINAL = ("idle", "passed", "failed")
-_HELPER_OLD = object()      # 旧版小助手回 bad_verb：退到后备路
+_HELPER_OLD = object()      # Sentinel for legacy helper without pad-pair
 
 
 class BtError(Exception):
-    """蓝牙那边出错：code 是 FAILS 里的键，raw 是原文。"""
+    """Bluetooth error with FAILS key and raw output."""
 
     def __init__(self, code, raw=""):
         super().__init__(raw or code)
@@ -76,56 +63,54 @@ class BtError(Exception):
 
 
 class NoPermission(Unreachable):
-    """socket 在，但 Studio 的用户没权限连（不是「服务不在」：审查 17）。"""
+    """Socket exists but Studio user lacks permission."""
 
 
-# ---------------- 人话：失败原因 → 说明 + 怎么办 ----------------
+# ---------------- Human-readable failure messages ----------------
 
-NO_RESTART_BT = "不要 restart bluetooth：这块板会把蓝牙弄丢，要重启才回来（官方 pair-a-gamepad.md:142）"
-ROBOT_GROUP = "把 Studio 的用户加进 robot 组：sudo usermod -aG robot <用户>，然后重启 Studio"
+NO_RESTART_BT = "Do not run systemctl restart bluetooth: this board loses BT until reboot"
+ROBOT_GROUP = "Add the Studio user to the robot group: sudo usermod -aG robot <user>, then restart Studio"
 FAILS = {
-    "no_adapter": ("鸭子的蓝牙还没准备好（找不到 hci0）",
-                   f"刚开机 70 多秒内是正常的（这块板 hci0 大约开机 73 秒才出来），等一分钟再点「重试」。一直这样就重启鸭子。{NO_RESTART_BT}"),
-    "rfkill": ("蓝牙被系统关掉了（rfkill）", "在鸭子上运行 sudo rfkill unblock bluetooth，再点「重试」"),
-    "powered_off": ("鸭子的蓝牙关着", "点「重试」会再开一次；还不行就重启鸭子"),
-    "bluez_down": ("鸭子上的蓝牙服务 bluetoothd 没在跑", f"重启鸭子。{NO_RESTART_BT}"),
-    "configd_down": ("鸭子上的配置服务 configd 没在跑", "第一台鸭子平时关着它：在鸭子上运行 sudo systemctl start configd，再点「重试」"),
-    "socket_perm": ("Studio 没权限连 configd（/run/configd.sock）", ROBOT_GROUP),
-    "configd_busy": ("configd 上一次配对还没做完", "它停不了，最多一两分钟会自己结束：等页面上这句话消失再点"),
-    "driving": ("鸭子在走 / 策略在跑", "搜索、配对会占蓝牙，正在用的手柄可能卡住不松、鸭子照旧走。先停下（点「停下（站好）」或手柄 Start），再搜索"),
-    "no_btctl": ("鸭子上没有 bluetoothctl，列不出附近的设备", "点「直接配（自动挑）」，交给 configd 自己找"),
-    "permission": ("Studio 没有配对的权限", "configd 只让 root 配手柄。现在先用 SSH 在鸭子上运行 sudo robotctl pad pair；以后装了「小助手」就能在网页上点"),
-    "bt_permission": ("Studio 没有权限用蓝牙", "把 Studio 的用户加进 bluetooth 组，或者先用 SSH 在鸭子上运行 sudo robotctl pad pair"),
-    "scan_failed": ("蓝牙搜索没启动", "可能别的程序正在搜索或配对；等几秒再点「重试」"),
-    "not_found": ("没找到在配对状态的手柄", "手柄的灯要「快闪」（慢闪、常亮都不是配对状态）。照上面的方法进配对状态，进了以后马上点开始"),
-    "not_found_pad": ("附近有蓝牙设备，但没有一个像手柄", "手柄的灯在快闪吗？如果列表里某一个就是你的手柄，点它旁边的「配这个」"),
-    "ambiguous": ("同时有好几个手柄在配对状态", "只留一个在快闪；或者点「开始搜索」，在列表里点你要的那个"),
-    "timeout": ("找到了手柄，但配对没做完", "手柄可能退出了配对状态：再按一下配对键，灯快闪时马上点「重试」"),
-    "rejected": ("蓝牙拒绝了配对",
-                 "多半是手柄已经退出配对状态：再按配对键、灯快闪时重试。每次都这样：看 /etc/bluetooth/main.conf 的 Privacy，"
-                 "官方建议 Privacy = device（改完要重启鸭子）"),
-    "auth_failed": ("手柄拒绝了配对（认证失败）",
-                    "常见原因是手柄已经配给了别的设备：Xbox 手柄只记一个主机，先在电脑或手机上配一次再删掉；G50 这类只记最后配的那台。"
-                    "然后让手柄重新进配对状态"),
-    "pin": ("这个手柄要输 PIN 码，鸭子没法输", "把手柄切到 Switch 或 X-input 模式再试，或者换一个手柄"),
-    "key_missing": ("两边存的钥匙对不上（PIN or Key Missing）",
-                    "在「鸭子记着的手柄」里点「忘掉」，手柄重新进配对状态再配。还不行：官方说 Privacy = device 在有的板上会这样，先改回去、只暂停 btd 试"),
-    "le_abort": ("连接被鸭子自己放弃了（le-connection-abort-by-local）", "官方说这通常是 /etc/bluetooth/main.conf 的 Privacy 不对，应为 Privacy = device，改完重启鸭子"),
-    "dhkey": ("配对校验失败（DHKey check failed）", "官方说这是 Privacy 的另一种情况：试 Privacy = off，改完重启鸭子"),
-    "not_bondable": ("鸭子的蓝牙「不可绑定」，钥匙存不下", "要 root：在鸭子上运行 sudo btmgmt bondable on，再点「重试」"),
-    "agent": ("蓝牙配对代理没注册上", "多半是别的程序（配置服务、另一个 bluetoothctl）正占着。等一会儿再试；一直这样就重启鸭子"),
-    "busy": ("另一个配对正在进行", "等它做完（最多一两分钟）再试"),
-    "not_trusted": ("配上了，但没设成「信任」", "现在能用，重启鸭子以后不会自己回连：在「鸭子记着的手柄」里点「修复」"),
-    "not_connected": ("配上了，但没连上", "按一下手柄的 Home / Xbox 键把它打开，它会自己连上"),
-    "padd_down": ("手柄连上了，但 padd 没在跑", "padd 只在主程序 robotd 跑着时才起。先让主程序跑起来；还不行看日志里 padd 那几行"),
-    "no_input": ("连上了，但 padd 没认到这个手柄（读不到按键）",
-                 "先按 Home / Xbox 键唤醒手柄，网页会尝试恢复连接。仍读不到按键时检查手柄模式和日志；提示钥匙不匹配时再忘掉重配"),
-    "wrong_input": ("padd 打开的是另一只手柄", "先断开另一只手柄，再唤醒这次选择的手柄；不会替你切断另一只正在用的手柄"),
-    "no_robotctl": ("鸭子上没有官方 robotctl（/usr/local/bin/robotctl）",
-                    "重装官方固件 / robotctl，确认它装着；或者在鸭子上运行 sudo robotctl pad pair。新版小助手靠它停 btd、重开蓝牙"),
-    "weird_ble": ("这块板配新手柄前要先暂停 btd、重启一下蓝牙", "新版小助手会调官方 robotctl pad pair 做这件事。没有新版小助手就重装它，或者在鸭子上运行 sudo robotctl pad pair"),
-    "cancelled": ("停下了", "要配的话点「从头来」"),
-    "other": ("配对没成功", "看下面的原文；可以导出诊断包发群里"),
+    "no_adapter": ("Duck Bluetooth is not ready (hci0 not found)",
+                   f"Normal during the first ~75s after boot; wait a minute and retry, or reboot the duck. {NO_RESTART_BT}"),
+    "rfkill": ("Bluetooth is soft-blocked (rfkill)", "Run sudo rfkill unblock bluetooth on the duck, then retry"),
+    "powered_off": ("Duck Bluetooth is powered off", "Click Retry to power on; reboot the duck if it persists"),
+    "bluez_down": ("bluetoothd service is not running", f"Reboot the duck. {NO_RESTART_BT}"),
+    "configd_down": ("configd service is not running", "Run sudo systemctl start configd on the duck, then retry"),
+    "socket_perm": ("Studio lacks permission for /run/configd.sock", ROBOT_GROUP),
+    "configd_busy": ("configd is still finishing a previous pairing", "Wait 1-2 minutes for it to finish, then try again"),
+    "driving": ("Duck is walking / policy active", "Bluetooth scan/pair can freeze an active gamepad. Click Stop (Stand) or press Start first"),
+    "no_btctl": ("bluetoothctl not found on duck", "Use Auto-Pair to let configd discover the controller"),
+    "permission": ("Studio lacks pairing permission", "Install the root helper or run sudo robotctl pad pair over SSH"),
+    "bt_permission": ("Studio lacks Bluetooth permission", "Add Studio user to bluetooth group, or run sudo robotctl pad pair over SSH"),
+    "scan_failed": ("Bluetooth scan failed to start", "Another process may be scanning/pairing; wait a few seconds and retry"),
+    "not_found": ("No controller found in pairing mode", "Ensure the controller LED is flashing rapidly (pairing mode) and try again"),
+    "not_found_pad": ("Nearby Bluetooth devices found, but none look like a gamepad", "Check pairing mode LED or pick your device manually from the list"),
+    "ambiguous": ("Multiple controllers in pairing mode", "Keep only one in pairing mode, or run Scan and pick the right one"),
+    "timeout": ("Controller found, but pairing timed out", "Press the pairing button again and retry while LED flashes rapidly"),
+    "rejected": ("Bluetooth pairing rejected",
+             "Controller may have exited pairing mode. If persistent, set Privacy = device in /etc/bluetooth/main.conf and reboot"),
+    "auth_failed": ("Controller rejected pairing (auth failed)",
+                "Clear existing host pairings on the controller, re-enter pairing mode, and retry"),
+    "pin": ("Controller requested a PIN", "Switch controller to Switch Pro or X-input mode and retry"),
+    "key_missing": ("Bonding key mismatch (PIN or Key Missing)",
+                "Click Forget on the paired controller, re-enter pairing mode, and pair again"),
+    "le_abort": ("Connection aborted locally (le-connection-abort-by-local)", "Set Privacy = device in /etc/bluetooth/main.conf and reboot the duck"),
+    "dhkey": ("DHKey check failed", "Try setting Privacy = off in /etc/bluetooth/main.conf and reboot the duck"),
+    "not_bondable": ("Bluetooth adapter is not bondable", "Run sudo btmgmt bondable on on the duck and retry"),
+    "agent": ("Failed to register Bluetooth pairing agent", "Another tool may hold the agent; wait a moment or reboot the duck"),
+    "busy": ("Another pairing operation is in progress", "Wait 1-2 minutes and retry"),
+    "not_trusted": ("Paired, but not marked Trusted", "Click Fix on the controller so it auto-reconnects after reboot"),
+    "not_connected": ("Paired, but not connected", "Press the Home / Xbox button on the controller to wake it"),
+    "padd_down": ("Controller connected, but padd is not running", "padd runs alongside robotd; start robotd and check padd logs"),
+    "no_input": ("Connected, but padd sees no input device",
+             "Wake the controller with Home/Xbox, check its mode, or Forget and re-pair"),
+    "wrong_input": ("padd attached a different controller", "Disconnect the other controller first, then wake this one"),
+    "no_robotctl": ("/usr/local/bin/robotctl not found",
+                "Reinstall official firmware/robotctl or run sudo robotctl pad pair on the duck"),
+    "weird_ble": ("This board requires btd pause/restart before pairing", "Install the updated helper or run sudo robotctl pad pair on the duck"),
+    "cancelled": ("Stopped", "Click Start Over to pair again"),
+    "other": ("Pairing failed", "Check raw details below or export diagnostics bundle"),
 }
 
 _CLASSIFY = [
@@ -142,14 +127,14 @@ _CLASSIFY = [
     (r"Authentication ?Failed|Authentication ?Rejected|Authentication ?Canceled", "auth_failed"),
     (r"AuthenticationTimeout|Page Timeout|page-timeout|ConnectionAttemptFailed|Host is down|did not finish pairing|timed out|Timeout", "timeout"),
     (r"No Bonding|not bondable", "not_bondable"),
-    (r"Permission denied", "not_bondable"),     # 10-15：没绑定就连 HID，BlueZ 回 Permission denied (13)（踩坑记录.md:272）
+    (r"Permission denied", "not_bondable"),     # BlueZ returns Permission denied (13) if unbonded
     (r"Failed to register agent|Agent is already registered|already registered", "agent"),
     (r"Failed to start discovery", "scan_failed"),
 ]
 
 
 def classify(raw):
-    """BlueZ / bluetoothctl / configd 的原文 → FAILS 的键。认不出来就是 other。"""
+    """Map BlueZ / bluetoothctl / configd error text to a FAILS key."""
     text = str(raw or "")
     for pat, code in _CLASSIFY:
         if re.search(pat, text, re.I):
@@ -162,10 +147,10 @@ def explain(code, raw=None):
     return {"code": code, "msg": msg, "fix": fix, "raw": (str(raw)[-600:] if raw else None)}
 
 
-# ---------------- 认手柄：跟 configd 同一套规则（configd/src/pad.rs:121-163） ----------------
+# ---------------- Gamepad detection (matches configd/src/pad.rs) ----------------
 
 def gamepad_evidence(name, icon=None, cls=None, appearance=None):
-    """"classified"（图标 / 设备类别 / 外观说是手柄）、"name"（只有名字像）、None（不像）。"""
+    """Returns "classified", "name", or None."""
     if icon == "input-gaming":
         return "classified"
     if isinstance(cls, int):
@@ -180,13 +165,13 @@ def gamepad_evidence(name, icon=None, cls=None, appearance=None):
 
 
 def same_pad(a, b):
-    """两个地址后三字节一样 = 同一个手柄的两张脸（Switch 克隆同时有 LE 和经典，pad.rs:165-194）。"""
+    """Same last 3 MAC bytes indicate dual-mode (LE + Classic) of the same controller."""
     ta, tb = (a or "").upper().split(":")[-3:], (b or "").upper().split(":")[-3:]
     return len(ta) == 3 and ta == tb
 
 
 def pad_kind(name, vendor=None):
-    """xbox / ps / switch / generic：决定页面画哪种外形、键名写什么。"""
+    """Return controller family: xbox / ps / switch / generic."""
     n = (name or "").lower()
     if vendor == 0x045E or "xbox" in n:
         return "xbox"
@@ -197,19 +182,17 @@ def pad_kind(name, vendor=None):
     return "generic"
 
 
-KIND_LABEL = {"xbox": "Xbox", "ps": "PlayStation", "switch": "Switch Pro 类", "generic": ""}
-ICON_CN = {"audio-headset": "耳机", "audio-headphones": "耳机", "audio-card": "音箱", "phone": "手机", "computer": "电脑",
-           "input-keyboard": "键盘", "input-mouse": "鼠标", "input-tablet": "手写板", "video-display": "电视"}
+KIND_LABEL = {"xbox": "Xbox", "ps": "PlayStation", "switch": "Switch Pro", "generic": ""}
+ICON_CN = {"audio-headset": "Headset", "audio-headphones": "Headphones", "audio-card": "Speaker", "phone": "Phone", "computer": "Computer",
+           "input-keyboard": "Keyboard", "input-mouse": "Mouse", "input-tablet": "Tablet", "video-display": "Display"}
 
 
-# ---------------- 实时按键（padd 旁路给的是原始 evdev，lib.rs:4205-4451） ----------------
+# ---------------- Live evdev input state ----------------
 
 BTN_ROLE = {0x130: "south", 0x131: "east", 0x133: "north", 0x134: "west", 0x136: "lb", 0x137: "rb",
             0x138: "lt", 0x139: "rt", 0x13A: "select", 0x13B: "start", 0x13C: "home", 0x13D: "l3", 0x13E: "r3",
             0x220: "du", 0x221: "dd", 0x222: "dl", 0x223: "dr", 158: "select", 172: "home"}
-# Xbox（BLE 的 hid-generic、USB 的 xpad、GameSir 桥虚拟的 360）：印 X 的键报 BTN_X(0x133)、印 Y 的报 BTN_Y(0x134)，
-# 跟「北 / 西」的位置定义是反的；PS（hid-playstation）、Switch（hid-nintendo）按位置报。
-# **推测，没上鸭子核（E9）**：页面上对 Xbox 写明「X / Y 位置待核」
+# Xbox reports printed X/Y labels; PS/Switch report positional North/West
 XBOX_SWAP = {0x133: "west", 0x134: "north"}
 XBOX_SWAP_VERIFIED = False
 ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ, ABS_GAS, ABS_BRAKE, ABS_HAT0X, ABS_HAT0Y = 0, 1, 2, 3, 4, 5, 9, 10, 16, 17
@@ -217,8 +200,7 @@ EV_KEY, EV_ABS = 1, 3
 
 
 class LiveInput:
-    """按 attached 的设备描述把逐个事件累积成「现在按着什么、摇杆在哪」。手柄静止时 padd 什么都不发，
-    所以初值要用 attached 里给的。"""
+    """Accumulate evdev events from padd tap into current button/axis state."""
 
     def __init__(self):
         self.reset()
@@ -227,11 +209,11 @@ class LiveInput:
         self.device = None
         self.kind = None
         self.buttons = {}            # role -> bool
-        self.other = {}              # 表里没有的键：name -> bool
-        self.axes = {}               # role -> 值（摇杆 -1..1，下 / 右为正；扳机 0..1）
-        self.amap = {}               # evdev 轴号 -> (role, min, max)
+        self.other = {}              # Unmapped keys: name -> bool
+        self.axes = {}               # role -> normalized value (-1..1 or 0..1)
+        self.amap = {}               # evdev axis code -> (role, min, max)
         self.last_at = None
-        self.activity_at = None      # 最近一次真有人在动（键变化、摇杆离开中间）
+        self.activity_at = None      # Last real input activity timestamp
         self.seen = set()
 
     def _role(self, code):
@@ -245,13 +227,13 @@ class LiveInput:
         self.kind = pad_kind(self.device.get("name"), self.device.get("vendor"))
         axes = {a.get("code"): a for a in self.device.get("axes") or [] if isinstance(a, dict)}
         amap = {ABS_X: "lx", ABS_Y: "ly", ABS_HAT0X: "hatx", ABS_HAT0Y: "haty"}
-        if ABS_RX in axes:                     # xpad / hid-playstation / hid-nintendo：右摇杆是 RX/RY
+        if ABS_RX in axes:                     # xpad / hid-playstation / hid-nintendo: right stick is RX/RY
             amap.update({ABS_RX: "rx", ABS_RY: "ry"})
             if ABS_BRAKE in axes or ABS_GAS in axes:
                 amap.update({ABS_BRAKE: "lt", ABS_GAS: "rt"})
             else:
                 amap.update({ABS_Z: "lt", ABS_RZ: "rt"})
-        else:                                  # Xbox 走 BLE 的 hid-generic：右摇杆是 Z/RZ，扳机是 BRAKE/GAS
+        else:                                  # BLE hid-generic Xbox: right stick Z/RZ, triggers BRAKE/GAS
             amap.update({ABS_Z: "rx", ABS_RZ: "ry", ABS_BRAKE: "lt", ABS_GAS: "rt"})
         for code, role in amap.items():
             a = axes.get(code)
@@ -289,17 +271,17 @@ class LiveInput:
             if down and track:
                 self.seen.add(role)
         else:
-            self.other[name or f"键 0x{code or 0:03x}"] = down
+            self.other[name or f"Key 0x{code or 0:03x}"] = down
 
     def frame(self, frame, now):
-        """返回这一帧里 Select 的变化：True 按下、False 松开、None 没变。"""
+        """Return Select edge in this frame: True pressed, False released, None unchanged."""
         select = None
         for ev in (frame or {}).get("events") or []:
             if not isinstance(ev, dict):
                 continue
             kind, code, value = ev.get("kind"), ev.get("code"), ev.get("value", 0)
             if kind == EV_KEY:
-                if value == 2:               # 自动重复：不是松开
+                if value == 2:               # Key repeat: not released
                     continue
                 was = self.buttons.get(self._role(code)) if self._role(code) else None
                 self._set_key(code, ev.get("name"), value != 0)
@@ -329,7 +311,7 @@ class LiveInput:
     def view(self, now):
         d = self.device or {}
         return {"device": {"name": d.get("name"), "node": d.get("node"), "unique": d.get("unique"), "kind": self.kind,
-                           "bus": "蓝牙" if d.get("bus") == 5 else "USB" if d.get("bus") == 3 else None,
+                           "bus": "Bluetooth" if d.get("bus") == 5 else "USB" if d.get("bus") == 3 else None,
                            "keys_unverified": self.kind == "xbox" and not XBOX_SWAP_VERIFIED} if self.device else None,
                 "buttons": {k: True for k, v in self.buttons.items() if v},
                 "axes": {k: round(v, 2) for k, v in self.axes.items()},
@@ -337,11 +319,11 @@ class LiveInput:
                 "last_ms": None if self.last_at is None else int((now - self.last_at) * 1000)}
 
 
-# ---------------- 主体 ----------------
+# ---------------- Main PadOps ----------------
 
-PAIR_STEPS = [("pair", "配对"), ("trust", "信任：以后开机自己回连"), ("connect", "连接"),
-              ("padd", "padd 认到手柄"), ("keys", "按键测试：每个键按一下、摇杆推一圈")]
-SCAN_STEPS = [("ready", "鸭子的蓝牙准备好"), ("scan", "搜索附近的手柄（灯要快闪）"), ("pick", "选一个手柄")]
+PAIR_STEPS = [("pair", "Pair"), ("trust", "Trust (auto-reconnect)"), ("connect", "Connect"),
+              ("padd", "padd attach"), ("keys", "Key test: press buttons & move sticks")]
+SCAN_STEPS = [("ready", "Bluetooth ready"), ("scan", "Scan nearby gamepads (pairing LED)"), ("pick", "Select gamepad")]
 
 
 def _idle_wizard():
@@ -351,7 +333,7 @@ def _idle_wizard():
 
 
 def _torque_on(bus):
-    """busStatus 说扭矩确认开着吗（运动模式看 native.torque_state_confirmed，调试模式看 torque_state）。"""
+    """Check whether busStatus confirms torque is ON."""
     if not isinstance(bus, dict):
         return False
     if bus.get("mode") == "commissioning":
@@ -368,7 +350,7 @@ class PadOps(DriveMixin):
         self.configd, self.bt, self.tap, self.robot = configd, bt, tap, robot
         self.audio = audio
         self.helper = helper_api if helper is None else helper
-        self._helper_pad_ok = None       # None 没试过；True 新版小助手认 pad-pair；False 旧版 / 没小助手
+        self._helper_pad_ok = None       # Helper pad-pair support cache
         self.clock = clock
         self.exists = exists
         self.read_text = read_text or _read_text
@@ -387,15 +369,15 @@ class PadOps(DriveMixin):
         self._closing = False
         self._worker = None
         self._watch_until = 0.0
-        self._status = None              # configd pad.status 最近一次的结果
+        self._status = None              # Latest configd pad.status result
         self._status_at = None
         self._status_error = None
         self._status_due = 0.0
-        self._robot = {}                 # app 交进来的 robotd 回读
+        self._robot = {}                 # Latest robotd view fed from app.py
         self._robot_at = None
         self._netpad = None
         self._netpad_why = None
-        self._worker_error = None        # 看守线程出过异常：认不出有没有实体手柄（审查二 一般 3）
+        self._worker_error = None        # Watchdog thread error
         self._snap_errors = set()
         self.live = LiveInput()
         self.tap_state, self.tap_why = "off", None
@@ -409,27 +391,27 @@ class PadOps(DriveMixin):
         self._job = None                 # (id, thread)
         self._job_id = 0
         self._cancel = threading.Event()
-        self._configd_thread = None      # configd 的 pad.pair 停不了：线程还活着时不放行新的配对（审查 10）
+        self._configd_thread = None      # Active configd pad.pair thread
         self._configd_until = 0.0
         self.test = {"state": "idle"}
         self._test_evt = threading.Event()
-        self.on_estop_passed = None          # 测急停过了交给谁（app 接上 onboard.Onboarding.note_estop）
-        self.battery_shutdown = None         # robotd 的 [safety] battery_empty_shutdown：手柄页低电文案照它说（任务 1 附）
-        self._attach_said = None             # 旁路 attached 只在换了设备时记一行（审查 O16：滚出去 6 秒再滚回来就是一行）
-        self._pad_config = robotd_toml       # padd 读 [netpad]、[pad_imu_head_control] 的文件：padd.service 的 --config（_refresh_files）
+        self.on_estop_passed = None          # Callback when E-Stop test passes
+        self.battery_shutdown = None         # robotd [safety] battery_empty_shutdown
+        self._attach_said = None             # Deduplicate tap attach log per device
+        self._pad_config = robotd_toml       # Active config file used by padd.service
         self._drive_init(state_dir)
         self.motion_studio = MotionStudio(self)
         self.mapping = PadMapping(mapping_client, guard=self._mapping_guard, clock=clock)
-        # move / sticks / keys / stop 走自己的小线程池，不跟 configd、蓝牙、一次性请求这些慢调用挤（审查二 一般 4）；
-        # 第三轮多了摇杆、按键、模式的心跳，开到 4 条，「停」和回正不用排队（三 V13）
+        # Dedicated fast thread pool for real-time drive/head/stop commands
+        # 4 workers so Stop and recenter never queue behind sticks/keys
         self._fast_pool = concurrent.futures.ThreadPoolExecutor(max_workers=FAST_WORKERS, thread_name_prefix="pad-fast")
-        # robotd.toml、padd.service 在后台线程里读，snapshot 只拿缓存（snapshot 在事件循环里调：审查二 一般 9）
+        # Files read in background thread; snapshot() only reads cached values
         self._files_stop = threading.Event()
         self._refresh_files()
         threading.Thread(target=self._files_loop, name="pad-files", daemon=True).start()
         self._drive_start()
 
-    # ================= 对外 =================
+    # ================= Public API =================
 
     def _mapping_guard(self):
         with self._lk:
@@ -447,13 +429,13 @@ class PadOps(DriveMixin):
                 and bus.get('homed') is True and (guard is None or isinstance(guard,dict) and guard.get('ready') is True))
             if (bus.get('phase')!='control' or bus.get('policy_enabled') is not False
                     or bus.get('home_recovery') is not False or bus.get('torque_off_pending') is not False or not stable):
-                raise MappingError('请先点“停下（站好）”，等策略停止并站稳，再开始映射')
+                raise MappingError('Click Stop (Stand) and wait until standing before mapping')
             if self._cmd_busy or self._job_alive() or self.motion_studio.session is not None or self.test.get('state') not in FINAL:
-                raise MappingError('请先结束配对、动作、录制回放和急停测试，再重新映射')
+                raise MappingError('Finish pairing, motion, recording/playback, and E-Stop test before mapping')
             if (self._lease_holder(self.clock()) is not None or self._action is not None
                     or self._modes or any(not item.get('end') and item.get('held') for item in self._keys.values())
                     or any(self._latch.values())):
-                raise MappingError('网页遥控会话还在，请先松开按键并退出遥控，等头和身体回中后再重新映射')
+                raise MappingError('Release web drive controls and exit drive session before mapping')
             extra=getattr(self,'mapping_guard',None)
             if extra:extra()
 
@@ -464,16 +446,15 @@ class PadOps(DriveMixin):
     def handle(self, args, by=None, conn=None):
         from .updates import safe_during_update
         if self._update_blocked() and not safe_during_update('pad.op',args):
-            raise Refused('软件 / 主程序更新保护仍在，急停和关闭语音仍可使用')
+            raise Refused('Update guard active; only E-Stop and Audio Off are allowed')
         with self.motion_studio.request():
             return self._handle_request(args, by=by, conn=conn)
 
     def _handle_request(self, args, by=None, conn=None):
-        """页面的指令（在线程里跑）。返回给页面的 dict；不能做就抛 Refused（原因给页面看）。
-        by：「电脑 192.168.1.5」这种给人看的；conn：哪一个页面连接（同一台电脑开两个标签页也分得开）。"""
+        """Handle UI command (runs in thread). Raises Refused on invalid state/args."""
         op = args.get("op")
         if conn is not None and conn in self._gone and op not in ("watch", "stop", "action_stop", "drive"):
-            raise Refused("这个页面已经断开了")      # 线程池里晚到的指令（审查二 S1）
+            raise Refused("Client disconnected")      # Late queued command
         if op == 'mapping':
             try:
                 result = self.mapping.handle(args, conn)
@@ -486,27 +467,27 @@ class PadOps(DriveMixin):
             safe = op in ('watch','refresh','stop','action_stop') or (op=='drive' and args.get('open') is False)
             safe = safe or (op=='keys' and not args.get('held')) or (op=='audio' and args.get('listening') is False)
             if not safe:
-                raise Refused('手柄映射／回中确认中，动作输出已暂停；请先保存或取消并松开手柄，网页卸力仍可使用')
+                raise Refused('Gamepad mapping/recentering active; save or cancel first (E-Stop still works)')
         if op == "motion":
             return self.motion_studio.handle(args, conn, by)
         if op == "audio":
             values = {key:value for key,value in args.items() if key != "op"}
             if not values or set(values)-{"listening","music"} or any(type(value) is not bool for value in values.values()):
-                raise Refused("语音只支持监听和音乐两个开关")
+                raise Refused("Audio only supports listen and music toggles")
             if conn is None or conn in self._gone or conn in self._closed:
-                raise Refused("请先回到手柄遥控区操作语音")
+                raise Refused("Return to the Gamepad Drive tab to control audio")
             if self.audio is None:
-                raise Refused("语音服务尚未配置，请检查 duck-echo")
+                raise Refused("Audio service not configured; check duck-echo")
             if values.get("listening") is False or values.get("music") is False:
                 with self._lk:
                     if (self.motion_studio.session or {}).get("idle_kind") == "music":
-                        self.motion_studio.invalidate("监听或音乐模式已关闭")
+                        self.motion_studio.invalidate("Listen or music mode disabled")
             try:
                 return {"audio":self.audio.set(**values)}
             except (OSError,ValueError,TypeError):
-                raise Refused("连接不到语音服务，请检查 duck-echo") from None
+                raise Refused("Cannot reach audio service; check duck-echo") from None
         if self.motion_studio.before(args, conn, by) is False:
-            return {"dropped": "动作会话已经改变，旧请求已丢弃"}
+            return {"dropped": "Motion session changed; stale request dropped"}
         if op == "watch":
             self._watch()
             return {}
@@ -519,33 +500,33 @@ class PadOps(DriveMixin):
             try:
                 secs = max(self.w["scan_min"], min(SCAN_MAX_S, float(secs)))
             except (TypeError, ValueError):
-                raise Refused("搜索时间要是数字（秒）") from None
+                raise Refused("Scan duration must be a number (seconds)") from None
             if not math.isfinite(secs):
-                raise Refused("搜索时间要是数字（秒）")
+                raise Refused("Scan duration must be a number (seconds)")
             return self._start_job("scan", self._job_scan, secs)
         if op == "pair":
             mac = args.get("mac")
             if mac is not None and not MAC_RE.match(str(mac)):
-                raise Refused("MAC 地址格式不对：要像 AA:BB:CC:DD:EE:FF")
+                raise Refused("Invalid MAC format: expected AA:BB:CC:DD:EE:FF")
             return self._start_job("pair", self._job_pair, (mac.upper() if mac else None, by))
         if op == "cancel":
             return self._cancel_job()
         if op == "forget":
             mac = str(args.get("mac") or "")
             if not MAC_RE.match(mac):
-                raise Refused("MAC 地址格式不对：要像 AA:BB:CC:DD:EE:FF")
+                raise Refused("Invalid MAC format: expected AA:BB:CC:DD:EE:FF")
             return self._forget(mac.upper(), by)
         if op == "keys_done":
             return self._keys_done(manual=True)
         if op == "wizard_reset":
             with self._lk:
                 if self._job_alive():
-                    raise Refused("正在搜索 / 配对：先点「停下」")
+                    raise Refused("Scan/pairing in progress: click Stop first")
                 self.wiz = _idle_wizard()
             return {}
         if op == "estop_test":
             return self._estop_test(args.get("action"))
-        # ---- 让鸭子动（pad_drive.py） ----
+        # ---- Drive commands (pad_drive.py) ----
         if op == "drive":
             return self._drive(args, conn, by)
         if op == "move":
@@ -573,20 +554,20 @@ class PadOps(DriveMixin):
         if op == "action_hold":
             return self._action_hold(conn, args.get("press"))
         if op == "action_stop":
-            return self._action_stop(conn, "页面点了停 / 松开了")
+            return self._action_stop(conn, "UI stop / release")
         if op == "combo_save":
             return self._combo_save(args)
         if op == "combo_delete":
             return self._combo_delete(args)
-        raise Refused(f"不认识的指令：{op}")
+        raise Refused(f"Unknown command: {op}")
 
     def watched(self):
-        """有人在看手柄页 / 在配对 / 在测急停：app 这时 10 Hz 推 snapshot，平时 1 Hz 就够。"""
+        """True when Gamepad page is viewed, pairing, or testing E-Stop (10 Hz push)."""
         with self._lk:
             return self._busy_reason(self.clock())
 
     def feed_robot(self, view):
-        """robotd 的回读（app 在事件循环里用 robot_view() 取好交进来）。卸力按了几次也从这里看（审查 1）。"""
+        """Ingest latest robotd view from app.py event loop."""
         if not isinstance(view, dict):
             return
         relax_new = False
@@ -595,16 +576,16 @@ class PadOps(DriveMixin):
             self._robot_at = self.clock()
             st = view.get("pad_status")
             at = view.get("pad_status_at")
-            # robotd.py 本来就 5 秒问一次 pad.status：没人看手柄页时直接用它，不再自己问
+            # Reuse robotd 5s pad.status poll when nobody is viewing Gamepad page
             if isinstance(st, dict) and at is not None and (self._status_at is None or at > self._status_at):
                 self._status, self._status_at, self._status_error = st, at, None
             elif view.get("pad_status_error") and self._status_at is None:
                 self._status_error = view.get("pad_status_error")
             relax_new = self._relax_seen(view, self.clock())
-            self._drive_feed(view)          # 第一次看到主程序、姿势离开「准备好走」（只改内存）
+            self._drive_feed(view)          # Track posture changes
         if relax_new:
-            self._action_stop(None, "卸力了")
-            self._request_clear(None, "卸力了（回读看到的）", RELAX_CLEAR_DELAY_S)   # 三 V1 第 5 条：只置标志
+            self._action_stop(None, "Torque released")
+            self._request_clear(None, "Torque released (readback)", RELAX_CLEAR_DELAY_S)   # Flag only
             self._test_evt.set()
 
     def snapshot(self, robot=None, conn=None):
@@ -642,7 +623,7 @@ class PadOps(DriveMixin):
                        "pad_unknown": pad_why if attached is None else None, "limits": self._speed_limits(),
                        "driver": None if d is None else {"by": d["by"], "mine": d["conn"] == conn,
                                                          "for_s": int(now - d["since"])},
-                       # 第三轮：这个页面在后端记着的模式（页面以它为准）、后端替它退出模式的原因、按住的键
+                       # Per-connection mode, exit reason, and held keys
                        "mode": self._mode_of(conn), "mode_exit": None if ex is None or now - ex["at"] > 10 else
                        {"why": ex["why"], "age_s": round(now - ex["at"], 1)},
                        "keys": [] if ks is None or ks.get("end") else sorted(ks["held"]),
@@ -651,27 +632,26 @@ class PadOps(DriveMixin):
             return {"t": "pad", "status": status, "estop": self._estop_checks(now, status), "live": live,
                     "wizard": wiz, "estop_test": test, "virtual": virtual, "motion": self._motion_view(now),
                     "motion_studio": self.motion_studio.snapshot(conn, now),
-                    "audio": self.audio.snapshot() if self.audio is not None else {"available":False,"why":"语音服务尚未配置"},
+                    "audio": self.audio.snapshot() if self.audio is not None else {"available":False,"why":"Audio service not configured"},
                     "bindings": self.bindings, "mapping": mapping}
 
     def safe_snapshot(self, conn=None):
-        """app 的发送循环用：出错只记一次日志（同一种错只记一次）、返回 None 跳过这一帧，
-        不能让发送循环退出（那样顶上的卸力按钮也跟着变灰：审查二 I3）。"""
+        """Safe snapshot for app push loop: logs unique errors once and returns None on failure."""
         try:
             return self.snapshot(conn=conn)
         except Exception as e:  # noqa: BLE001
             key = f"{type(e).__name__}: {e}"[:200]
             if key not in self._snap_errors:
                 self._snap_errors.add(key)
-                self.log.error("手柄页的状态算出错，跳过这一帧", cat="手柄", raw=key, exc=True,
-                               hint="这是 Studio 的问题，导出诊断包发出来；同一种错只记这一次")
+                self.log.error("Gamepad snapshot error, skipping frame", cat="Gamepad", raw=key, exc=True,
+                               hint="Internal Studio error; export diagnostics bundle")
             return None
 
     def diag(self):
-        """诊断包用：snapshot，但附近的蓝牙设备只留数量和不完整的名字 / MAC（审查二 一般 8：诊断包会发到群里）。"""
+        """Redacted snapshot for diagnostics bundle (masks nearby BT names/MACs)."""
         snap = self.safe_snapshot()
         if snap is None:
-            return {"error": "snapshot 出错，见日志"}
+            return {"error": "snapshot error, see logs"}
         wiz = snap.get("wizard") or {}
         devs = wiz.get("devices") or []
         wiz["devices"] = {"count": len(devs), "pads": sum(1 for d in devs if d.get("pad")),
@@ -689,14 +669,13 @@ class PadOps(DriveMixin):
         return snap
 
     def estop_ok(self):
-        """只要「急停有效」这一个结论（总览 state.py 将来调它，不用每帧算完整 snapshot：审查 23）。"""
+        """Return only the E-Stop readiness summary."""
         now = self.clock()
         with self._lk:
             return self._estop_checks(now, self._status_view(now))["ok"]
 
     def onboard_view(self):
-        """总览上手清单第 3、4 步要的（onboard.py 每 0.5 秒调）：跟手柄快照同一份 status / estop（总览重排审查 O7），
-        再加旁路看到的设备（configd 读不到时当「有手柄连着」的证据：审查 O5）。不碰网络，只拿锁读内存。"""
+        """Fast in-memory summary for onboarding steps 3-4."""
         now = self.clock()
         with self._lk:
             status = self._status_view(now)
@@ -708,8 +687,7 @@ class PadOps(DriveMixin):
                 "estop": {"state": es["state"], "checks": es["checks"]}}
 
     def _estop_passed_record(self):
-        """测急停过了：把「是哪只手柄、哪个版本的主程序测的」交给上手清单（审查 O6：换了手柄、主程序升级都要再测）。
-        测急停线程里、不拿锁时调；钩子出错只记日志。"""
+        """Notify onboarding hook when E-Stop test passes."""
         hook = getattr(self, "on_estop_passed", None)
         if hook is None:
             return
@@ -725,8 +703,8 @@ class PadOps(DriveMixin):
         try:
             hook(rec)
         except Exception as e:  # noqa: BLE001
-            self.log.error("记「测急停过了」时出错", cat="安全", raw=f"{type(e).__name__}: {e}", exc=True,
-                           hint="这是 Studio 的问题；急停本身测过了，只是总览清单上没记下")
+            self.log.error("Failed to record E-Stop pass", cat="Safety", raw=f"{type(e).__name__}: {e}", exc=True,
+                           hint="E-Stop passed, but onboarding state failed to save")
 
     def close(self):
         self._closing = True
@@ -734,8 +712,8 @@ class PadOps(DriveMixin):
         self._cancel.set()
         self._wake.set()
         self._test_evt.set()
-        self._action_stop(None, "Studio 关了")
-        self._drive_close()                 # 头 / 身体回正、按住的键松开（三 V1 第 9 条，尽力发）
+        self._action_stop(None, "Studio closing")
+        self._drive_close()                 # Best-effort recenter and key release
         if self.audio is not None:
             self.audio.close()
         self._files_stop.set()
@@ -754,7 +732,7 @@ class PadOps(DriveMixin):
             except Exception:  # noqa: BLE001
                 pass
 
-    # ================= 状态 =================
+    # ================= Status =================
 
     def _status_view(self, now):
         st = self._status if isinstance(self._status, dict) else None
@@ -773,23 +751,18 @@ class PadOps(DriveMixin):
                 "netpad": self._netpad_value(now), "netpad_why": self._netpad_why}
 
     def _netpad_value(self, now=None):
-        """/etc/robot/robotd.toml 的 [netpad] enabled（缓存；文件在 _refresh_files 里读）。读不出来 None：Studio 读不了
-        不代表 padd 读不了（审查 7），所以「急停有效」那边当作「没核对」，不当作「没开」。
-        注意 padd 只在启动时读一次：改了文件没重启 padd，这里跟实际的不一样。"""
+        """Cached [netpad] enabled from robotd.toml (None if unreadable)."""
         return self._netpad
 
     def _refresh_files(self):
-        """读 padd 的单元文件（满杆速度、头 / 嘴幅度、它读哪个配置文件），再读那个配置文件的 [netpad] 和
-        [pad_imu_head_control]，放进缓存。在后台线程里跑（构造时先同步读一次）。
-        padd 读配置的地方是它的 --config（没写是 /etc/robot/robotd.toml；fork 的 drop-in 写的是
-        /etc/robot/feetech-ft5/robotd.toml：fork packaging/gamepad.py:94），[netpad] 和 [pad_imu_head_control] 都从那里读
-        （fork padd main.rs:692、776）。"""
+        """Read padd.service unit and active robotd.toml ([netpad], [pad_imu_head_control]) into cache.
+         (fork padd main.rs:692, 776)."""
         try:
             texts = self._read_padd_texts()
             limits = parse_speed_limits(texts)
             inputs, cfg = self._read_inputs(texts)
-        except Exception as e:  # noqa: BLE001 —— 解析本身不抛；万一别处出错，用官方默认
-            limits = dict(self._limits, src=f"官方默认（读 padd 配置出错：{type(e).__name__}）")
+        except Exception as e:  # noqa: BLE001  # Fallback to defaults
+            limits = dict(self._limits, src=f"Default (padd config error: {type(e).__name__})")
             inputs, cfg = self._inputs, None
         path = cfg or self.robotd_toml
         imu_head, imu_why = None, None
@@ -801,15 +774,15 @@ class PadOps(DriveMixin):
             ih = data.get("pad_imu_head_control") or {}
             imu_head = bool(ih.get("enabled", False)) if isinstance(ih, dict) else None
         except FileNotFoundError:
-            # 文件不在：robotd 全用默认，[netpad] 默认关（〔UDP〕robotd-params lib.rs:107-121）；
-            # [pad_imu_head_control] 默认关（fork robotd-params lib.rs:140-155）
-            netpad, why = False, f"没有 {path}，按默认（关）"
+            # File missing: [netpad] and [pad_imu_head_control] default to false
+            # Defaults when config file is absent
+            netpad, why = False, f"{path} missing; using default (off)"
             imu_head, imu_why = False, why
         except PermissionError as e:
-            netpad, why = None, f"Studio 没权限读 {path}（{e.strerror or e}）"
+            netpad, why = None, f"Permission denied reading {path} ({e.strerror or e})"
             imu_why = why
-        except Exception as e:  # noqa: BLE001 —— 格式坏了、别的读错
-            netpad, why = None, f"{path} 读不出来（{type(e).__name__}: {e}）"
+        except Exception as e:  # noqa: BLE001  # Parse/read error
+            netpad, why = None, f"Cannot read {path} ({type(e).__name__}: {e})"
             imu_why = why
         with self._lk:
             self._netpad, self._netpad_why, self._limits = netpad, why, limits
@@ -822,65 +795,62 @@ class PadOps(DriveMixin):
             try:
                 self._refresh_files()
             except Exception as e:  # noqa: BLE001
-                self.log.error("后台读配置文件出错", cat="手柄", raw=f"{type(e).__name__}: {e}", exc=True)
+                self.log.error("Background config refresh error", cat="Gamepad", raw=f"{type(e).__name__}: {e}", exc=True)
 
     def _robot_ok(self, now):
         r = self._robot or {}
         bus = r.get("bus") if isinstance(r.get("bus"), dict) else None
         if r.get("paused"):
-            return False, "在调舵机：主程序按计划停着"
+            return False, "Servo tuning active: robotd paused"
         if r.get("present") is False:
-            return False, "主程序 robotd 没在跑"
+            return False, "robotd is not running"
         if self._robot_at is None or now - self._robot_at > BUS_FRESH_S:
-            return None, "Studio 没收到主程序的回读"
+            return None, "No telemetry from robotd yet"
         if bus is None or r.get("bus_at") is None or now - r["bus_at"] > BUS_FRESH_S:
-            return None, "读不到主程序的状态"
+            return None, "robotd status unavailable"
         if bus.get("phase") in STARTING_PHASES:
-            return False, "主程序还在启动"
+            return False, "robotd is still starting"
         if bus.get("mode") == "commissioning":
-            return False, "调试模式：Select 不经过主程序"
+            return False, "Debug mode: Select bypasses robotd"
         if bus.get("mode") != "motion":
-            return None, f"主程序在 {bus.get('mode')} 模式"
+            return None, f"robotd in {bus.get('mode')} mode"
         return True, None
 
     def _estop_checks(self, now, status):
-        """「急停有效」四条（方案 v3.1 §3）：手柄连着、padd 在跑、主程序在跑、没开 netpad。
-        旁路开着时多看一条：padd 真的打开了这个手柄（连着但没输入设备的情况，pair-a-gamepad.md:184-189）。
-        configd 读不到、但旁路看到 attached：用旁路当证据（它比 configd 还直接：审查 16）。
-        state：ok 全 ✓；unknown 没有 × 但有没核对的；bad 有 ×。"""
+        """Evaluate E-Stop readiness checks: controller connected, padd active, robotd running, netpad off."""
         checks = []
         tap_ok = self._tap_on and self.tap_state == "attached"
         dev = (self.live.device or {}).get("name") if tap_ok else None
         if not status["known"]:
             if tap_ok:
-                checks.append({"key": "pad", "label": "手柄连着", "ok": True,
-                               "why": f"{dev or '手柄'}（padd 旁路看到的；configd 读不到）"})
+                checks.append({"key": "pad", "label": "Controller connected", "ok": True,
+                               "why": f"{dev or 'Controller'} (seen via padd tap; configd unavailable)"})
             else:
-                checks.append({"key": "pad", "label": "手柄连着", "ok": None, "why": status["error"] or "读不到 configd 的手柄状态"})
+                checks.append({"key": "pad", "label": "Controller connected", "ok": None, "why": status["error"] or "configd status unavailable"})
         else:
             a = status["active"]
-            checks.append({"key": "pad", "label": "手柄连着", "ok": bool(a),
-                           "why": a["name"] if a else ("配过的手柄都没开" if status["pads"] else "还没配手柄")})
+            checks.append({"key": "pad", "label": "Controller connected", "ok": bool(a),
+                           "why": a["name"] if a else ("Paired controller offline" if status["pads"] else "No paired controller")})
         drv = status["driver"]
         if drv is None and tap_ok:
-            checks.append({"key": "padd", "label": "padd 在跑（它把手柄的键转给主程序）", "ok": True,
-                           "why": "padd 旁路开着、在发按键（configd 读不到）"})
+            checks.append({"key": "padd", "label": "padd running (forwards gamepad to robotd)", "ok": True,
+                           "why": "padd tap active (configd unavailable)"})
         else:
-            checks.append({"key": "padd", "label": "padd 在跑（它把手柄的键转给主程序）",
-                           "ok": None if drv is None else drv == "active", "why": None if drv in (None, "active") else f"padd 现在是 {drv}"})
+            checks.append({"key": "padd", "label": "padd running (forwards gamepad to robotd)",
+                           "ok": None if drv is None else drv == "active", "why": None if drv in (None, "active") else f"padd state: {drv}"})
         ok, why = self._robot_ok(now)
-        checks.append({"key": "robotd", "label": "主程序在跑（运动模式）", "ok": ok, "why": why})
+        checks.append({"key": "robotd", "label": "robotd running (motion mode)", "ok": ok, "why": why})
         np = status["netpad"]
-        checks.append({"key": "netpad", "label": "没开 UDP 手柄（netpad）", "ok": None if np is None else not np,
-                       "why": "开着 [netpad]：padd 只读 UDP，不读蓝牙手柄" if np else
+        checks.append({"key": "netpad", "label": "UDP netpad disabled", "ok": None if np is None else not np,
+                       "why": "[netpad] enabled: padd ignores Bluetooth gamepads" if np else
                        (status.get("netpad_why") if np is False else
-                        f"{status.get('netpad_why') or '读不到 robotd.toml'}：netpad 没核对。开着的话蓝牙手柄和它的急停都不管用")})
+                        f"{status.get('netpad_why') or 'robotd.toml unreadable'}: netpad unverified")})
         if self._tap_on and (status["active"] or tap_ok):
             if self.tap_state == "attached":
-                checks.append({"key": "input", "label": "padd 打开了这个手柄（读得到按键）", "ok": True, "why": None})
+                checks.append({"key": "input", "label": "padd opened input device", "ok": True, "why": None})
             elif self.tap_state == "waiting" and self._attach_wait_since is not None and now - self._attach_wait_since > 3:
-                checks.append({"key": "input", "label": "padd 打开了这个手柄（读得到按键）", "ok": False,
-                               "why": "连着，但 padd 没打开它：多半是没有输入设备。忘掉它、重新进配对状态再配"})
+                checks.append({"key": "input", "label": "padd opened input device", "ok": False,
+                               "why": "Connected, but padd has no input device; Forget and re-pair"})
         vals = [c["ok"] for c in checks]
         good = all(v is True for v in vals)
         state = "ok" if good else ("bad" if any(v is False for v in vals) else "unknown")
@@ -889,28 +859,28 @@ class PadOps(DriveMixin):
     def _poll_status(self):
         if self.configd is None:
             with self._lk:
-                self._status_error = "这只鸭子没配 configd"
+                self._status_error = "configd not configured on this duck"
             return None
         try:
             r = self.configd.call("pad.status", {}, 2.0)
             if not isinstance(r, dict):
-                raise RpcError("pad.status", None, f"回的不是对象（{type(r).__name__}）")
+                raise RpcError("pad.status", None, f"Expected object, got {type(r).__name__}")
         except NoPermission as e:
             with self._lk:
                 if self._status_error is None:
-                    self.log.warn("Studio 没权限读 configd 的手柄状态", cat="手柄", step="pad.status", raw=str(e), hint=ROBOT_GROUP)
+                    self.log.warn("Studio lacks permission for configd pad.status", cat="Gamepad", step="pad.status", raw=str(e), hint=ROBOT_GROUP)
                 self._status_error = str(e)
             return None
         except (Unreachable, Timeout, RpcError) as e:
             with self._lk:
                 if self._status_error is None:
-                    self.log.warn("读不到 configd 的手柄状态", cat="手柄", step="pad.status", raw=str(e),
-                                  hint="有的鸭子关着 configd（sudo systemctl start configd）；不影响站和走")
+                    self.log.warn("Failed to read configd pad.status", cat="Gamepad", step="pad.status", raw=str(e),
+                                  hint="configd may be stopped (sudo systemctl start configd); walking still works")
                 self._status_error = str(e)
             return None
         with self._lk:
             if self._status_error is not None:
-                self.log.info("configd 的手柄状态恢复了", cat="手柄")
+                self.log.info("configd pad.status recovered", cat="Gamepad")
             self._status, self._status_at, self._status_error = r, self.clock(), None
         return r
 
@@ -921,33 +891,32 @@ class PadOps(DriveMixin):
                 return p
         return None
 
-    # ================= 看守线程：有人看、有任务、在测急停才活着 =================
+    # ================= Watchdog Thread =================
 
     def _watch(self):
-        """有人在看手柄页。只续「看」的租约，不续方向盘（只开着页面不算在开：审查二 I1）。"""
+        """Renew page watch lease without extending drive lease."""
         now = self.clock()
         with self._lk:
             first = self._watch_until < now
             self._watch_until = now + self.w["lease"]
             if first:
                 self._status_due = 0.0
-                self._bindings_due = 0.0          # pad.bindings 由看守线程去拉（三 V13：watch 在快线程池里，不能等 2 秒）
+                self._bindings_due = 0.0          # Refresh pad.bindings in watchdog thread
         self._ensure_worker()
 
     def _fetch_bindings(self):
-        """问 robotd 现在五个键各绑了什么（pad.bindings：fork lib.rs:4478-4497；robotd 每次被问都现读配置，
-        padd 每秒重读：padd:806-817）。看守线程每 10 秒一次；按图上的键时太旧了也先拉一次（三 V14）。不抛。"""
+        """Query robotd pad.bindings (cached ~10s, non-throwing)."""
         if self.robot is None:
             return None
         try:
             r = self.robot.call("pad.bindings", {}, 2.0)
         except (Unreachable, Timeout, RpcError) as e:
             with self._lk:
-                self._bindings_at = self.clock()       # 读不到也算问过：10 秒后再试，别每次按键都等 2 秒
+                self._bindings_at = self.clock()       # Back off 10s even on error
                 said = self._bindings_err is not None
                 self._bindings_err = str(e)
             if not said:
-                self.log.info("读不到手柄的按键绑定（用官方默认）", cat="手柄", step="pad.bindings", raw=str(e))
+                self.log.info("pad.bindings unavailable (using defaults)", cat="Gamepad", step="pad.bindings", raw=str(e))
             return None
         rows = r.get("bindings") if isinstance(r, dict) else None
         rows = [b for b in rows if isinstance(b, dict)] if isinstance(rows, list) else None
@@ -955,9 +924,9 @@ class PadOps(DriveMixin):
             changed = rows != self.bindings
             self.bindings, self._bindings_at, self._bindings_err = rows, self.clock(), None
         if changed and rows is not None:
-            text = "、".join(f"{b.get('button')}={b.get('skill') or '（关）'}" + (f"（{b['error']}）" if b.get("error") else "")
+            text = ", ".join(f"{b.get('button')}={b.get('skill') or '(off)'}" + (f" ({b['error']})" if b.get("error") else "")
                             for b in rows)
-            self.log.info(f"手柄按键绑定：{text}", cat="手柄", step="pad.bindings")
+            self.log.info(f"Gamepad bindings: {text}", cat="Gamepad", step="pad.bindings")
         return rows
 
     def _ensure_worker(self):
@@ -996,16 +965,16 @@ class PadOps(DriveMixin):
                 self._keys_tick()
                 self._wake.wait(self.w["poll"])
                 self._wake.clear()
-        except Exception as e:  # noqa: BLE001 —— 看守线程不能悄悄死掉
-            self.log.error("手柄页的看守线程出错", cat="手柄", raw=f"{type(e).__name__}: {e}", exc=True,
-                           hint="这是 Studio 的问题，导出诊断包发出来；刷新手柄页会重新起一个")
+        except Exception as e:  # noqa: BLE001  # Watchdog must not die silently
+            self.log.error("Gamepad watchdog error", cat="Gamepad", raw=f"{type(e).__name__}: {e}", exc=True,
+                           hint="Internal Studio error; refresh the Gamepad page")
             with self._lk:
                 self._worker = None
                 self._worker_error = f"{type(e).__name__}: {e}"
         finally:
             self._tap_lease(False)
 
-    # ---- 旁路 ----
+    # ---- Padd Tap ----
 
     def _tap_lease(self, want):
         if self.tap is None:
@@ -1030,12 +999,12 @@ class PadOps(DriveMixin):
             if state == "waiting" and self.tap_state != "waiting":
                 self._attach_wait_since = self.clock()
             if (state, why) != (self.tap_state, self.tap_why) and state in ("absent", "denied", "error"):
-                self.log.warn(f"读不到手柄按键（padd 旁路）：{why}", cat="手柄", step="pad.input",
-                              hint=ROBOT_GROUP if state == "denied" else "padd 只在主程序跑着时才在")
+                self.log.warn(f"Gamepad input tap error: {why}", cat="Gamepad", step="pad.input",
+                              hint=ROBOT_GROUP if state == "denied" else "padd runs alongside robotd")
             self.tap_state, self.tap_why = state, why
 
     def _on_tap_report(self, rep):
-        """旁路线程调来：attached / frame / detached（imu 那几种不用）。出错只记日志、不往外抛（审查 15）。"""
+        """Handle padd tap report (attached / frame / detached)."""
         if not isinstance(rep, dict):
             return
         try:
@@ -1043,8 +1012,8 @@ class PadOps(DriveMixin):
         except Exception as e:  # noqa: BLE001
             if not self._tap_err_said:
                 self._tap_err_said = True
-                self.log.error("处理手柄按键时 Studio 出错", cat="手柄", raw=f"{type(e).__name__}: {e}  ·  {json.dumps(rep)[:300]}",
-                               exc=True, hint="这是 Studio 的问题，导出诊断包发出来")
+                self.log.error("Error handling gamepad input event", cat="Gamepad", raw=f"{type(e).__name__}: {e}  ·  {json.dumps(rep)[:300]}",
+                               exc=True, hint="Internal Studio error; export diagnostics bundle")
 
     def _tap_report(self, rep):
         now = self.clock()
@@ -1057,7 +1026,7 @@ class PadOps(DriveMixin):
                 key = (d.get("name"), d.get("unique"), d.get("node"))
                 if key != self._attach_said:
                     self._attach_said = key
-                    self.log.info(f"padd 打开了手柄：{d.get('name')}（{d.get('node')}）", cat="手柄", dedup=False)
+                    self.log.info(f"padd attached gamepad: {d.get('name')} ({d.get('node')})", cat="Gamepad", dedup=False)
             elif kind == "frame":
                 sel = self.live.frame(rep, now)
                 mapping = self.mapping.snapshot()
@@ -1077,20 +1046,20 @@ class PadOps(DriveMixin):
                 self.live.reset()
                 self.tap_state, self.tap_why = "waiting", rep.get("why")
                 self._attach_wait_since = now
-                self.log.info(f"手柄从 padd 那边断开了：{rep.get('why')}", cat="手柄")
+                self.log.info(f"Gamepad detached from padd: {rep.get('why')}", cat="Gamepad")
         if kind == "attached":
-            self._action_stop(None, "实体手柄连上了")
-            self._request_clear(None, "实体手柄连上了")     # 三 V1 第 6 条：网页置过的头 / 身体镜像时也清
+            self._action_stop(None, "Physical gamepad attached")
+            self._request_clear(None, "Physical gamepad attached")
             with self._lk:
                 error = self.wiz.get("error") or {}
                 if (self.wiz.get("state") == "failed" and error.get("code") in ("no_input", "not_connected")
                         and self._pair_input_matches(self.wiz.get("mac")) and self._mine(self._job_id)):
                     self._pair_keys_ready(self._job_id, self.wiz.get("mac"))
 
-    # ================= 配对向导 =================
+    # ================= Pairing Wizard =================
 
     def _job_alive(self):
-        # 只看「还在跑」：线程报完失败 / 等人选的那一刻还没退出，这时点「重试」不能被当成正忙
+        # Allow retry once wizard finishes or waits for selection
         return self._job is not None and self._job[1].is_alive() and self.wiz.get("state") == "running"
 
     def _configd_busy_left(self, now):
@@ -1103,17 +1072,17 @@ class PadOps(DriveMixin):
         now = self.clock()
         with self._lk:
             if self._job_alive():
-                raise Refused("正在搜索 / 配对：等它做完，或者先点「停下」")
+                raise Refused("Scan/pairing in progress: wait or click Stop")
             if self.test.get("state") not in FINAL:
-                raise Refused("正在测急停：先测完或者点「不测了」")
+                raise Refused("E-Stop test in progress: finish or cancel first")
             left = self._configd_busy_left(now)
             if left is not None:
-                raise Refused(f"configd 那边上一次配对还没做完（它停不了），大约还要 {left} 秒：等一下再点")
-            # 审查 8：搜索、配对占射频，正在用的手柄可能卡住不断，padd 照发最后的摇杆值，deadman 不触发
+                raise Refused(f"configd still finishing previous pairing (~{left}s left); please wait")
+            # Refusing scan/pair while driving
             bus = (self._robot or {}).get("bus")
             if self._posture() in DRIVING or (isinstance(bus, dict) and bus.get("policy_enabled") is True):
                 msg, fix = FAILS["driving"]
-                raise Refused(f"{msg}：{fix}")
+                raise Refused(f"{msg}: {fix}")
             self._job_id += 1
             jid = self._job_id
             self._cancel = threading.Event()
@@ -1131,10 +1100,10 @@ class PadOps(DriveMixin):
     def _run_job(self, jid, fn, arg):
         try:
             fn(jid, arg)
-        except Exception as e:  # noqa: BLE001 —— 不该发生；发生了也要让页面看到原因
-            self.log.error("配对向导出错", cat="手柄", raw=f"{type(e).__name__}: {e}", exc=True,
-                           hint="这是 Studio 自己的 bug，导出诊断包发出来")
-            self._fail(jid, None, "other", f"Studio 出错：{type(e).__name__}: {e}")
+        except Exception as e:  # noqa: BLE001  # Unexpected error; report to UI
+            self.log.error("Pairing wizard error", cat="Gamepad", raw=f"{type(e).__name__}: {e}", exc=True,
+                           hint="Internal Studio error; export diagnostics bundle")
+            self._fail(jid, None, "other", f"Studio error: {type(e).__name__}: {e}")
         finally:
             with self._lk:
                 if self.wiz.get("state") == "running" and jid == self._job_id:
@@ -1151,7 +1120,7 @@ class PadOps(DriveMixin):
             for s in self.wiz["steps"]:
                 if s["key"] == key:
                     if s["state"] == "ok" and state == "doing":
-                        return               # 已经打勾的不退回
+                        return               # Do not revert already-completed steps
                     s["state"] = state
                     if note is not None:
                         s["note"] = note
@@ -1161,7 +1130,7 @@ class PadOps(DriveMixin):
         with self._lk:
             for s in self.wiz["steps"]:
                 if jid == self._job_id and s["key"] == key:
-                    s["note"] = "；".join(x for x in (s.get("note"), extra) if x)
+                    s["note"] = "; ".join(x for x in (s.get("note"), extra) if x)
 
     def _fail(self, jid, key, code, raw=None, retry=None):
         with self._lk:
@@ -1174,7 +1143,7 @@ class PadOps(DriveMixin):
             if self.wiz.get("started") is not None:
                 self.wiz["elapsed_s"] = self.clock() - self.wiz["started"]
         lvl = "info" if code == "cancelled" else "warn"
-        self.log.write(f"手柄配对没成功：{err['msg']}", cat="手柄", level=lvl, step=key, raw=raw, hint=err["fix"])
+        self.log.write(f"Gamepad pairing failed: {err['msg']}", cat="Gamepad", level=lvl, step=key, raw=raw, hint=err["fix"])
 
     def _set_steps(self, jid, defs, keep=False):
         with self._lk:
@@ -1188,18 +1157,18 @@ class PadOps(DriveMixin):
                     self.wiz["steps"].append({"key": k, "label": label, "state": "todo", "note": None})
 
     def _sleep(self, s):
-        """可被「停下」打断的睡眠。被打断返回 True。"""
+        """Interruptible sleep; returns True if cancelled."""
         return self._cancel.wait(s)
 
-    # ---- 搜索 ----
+    # ---- Scan ----
 
     def _job_scan(self, jid, seconds):
         self._set_steps(jid, SCAN_STEPS)
         if not self._prepare_adapter(jid, via_helper=self._helper_pad_ok):
             return
         bt = self.bt
-        self._step(jid, "scan", "doing", f"最多 {seconds:g} 秒")
-        self.log.info(f"开始搜索手柄（{seconds:g} 秒）", cat="手柄")
+        self._step(jid, "scan", "doing", f"Up to {seconds:g}s")
+        self.log.info(f"Starting gamepad scan ({seconds:g}s)", cat="Gamepad")
         devices = []
         try:
             try:
@@ -1215,7 +1184,7 @@ class PadOps(DriveMixin):
                         if jid == self._job_id:
                             self.wiz["devices"] = devices
                             n = sum(1 for d in devices if d["pad"])
-                            self._step(jid, "scan", "doing", f"还剩 {max(0, seconds - (self.clock() - started)):.0f} 秒 · 看到 {len(devices)} 个设备，{n} 个像手柄")
+                            self._step(jid, "scan", "doing", f"{max(0, seconds - (self.clock() - started)):.0f}s left · {len(devices)} devices, {n} gamepads")
                     if self._sleep(self.w["scan_tick"]):
                         break
                 devices = self._device_list(bt.devices(), started)
@@ -1223,9 +1192,9 @@ class PadOps(DriveMixin):
                 try:
                     bt.scan_stop()
                 except BtError as e:
-                    self.log.info("停止蓝牙搜索时出错（不影响）", cat="手柄", raw=e.raw)
+                    self.log.info("Error stopping Bluetooth scan (non-fatal)", cat="Gamepad", raw=e.raw)
         finally:
-            # 审查 5：搜索用完就关掉 bluetoothctl 会话，别让它一直挂着（配对时另开一个、只在配对窗口里注册代理）
+            # Close bluetoothctl session after scan
             try:
                 bt.close()
             except Exception:  # noqa: BLE001
@@ -1234,13 +1203,13 @@ class PadOps(DriveMixin):
             self._fail(jid, "scan", "cancelled")
             return
         pads = [d for d in devices if d["pad"]]
-        self.log.info(f"搜索完：看到 {len(devices)} 个蓝牙设备，{len(pads)} 个像手柄", cat="手柄",
+        self.log.info(f"Scan complete: {len(devices)} Bluetooth devices, {len(pads)} gamepads", cat="Gamepad",
                       raw=", ".join(f"{d['name'] or '?'} {d['mac']}" for d in pads[:6]) or None)
         with self._lk:
             if jid != self._job_id:
                 return
             self.wiz["devices"] = devices
-            self._step(jid, "scan", "ok", f"看到 {len(devices)} 个蓝牙设备，{len(pads)} 个像手柄")
+            self._step(jid, "scan", "ok", f"Found {len(devices)} devices, {len(pads)} gamepads")
             fresh = [d for d in pads if not d["paired"]]
             self.wiz["picked"] = fresh[0]["mac"] if len(fresh) == 1 else None
             self.wiz["phase"] = "pick"
@@ -1248,14 +1217,14 @@ class PadOps(DriveMixin):
             for s in self.wiz["steps"]:
                 if s["key"] == "pick":
                     s["state"] = "doing"
-                    s["note"] = ("就是它吗？点「配这个」" if len(fresh) == 1 else
-                                 "好几个在配对状态：点你要的那个" if len(fresh) > 1 else None)
+                    s["note"] = ("Is this it? Click Pair This" if len(fresh) == 1 else
+                                 "Multiple devices in pairing mode: select yours" if len(fresh) > 1 else None)
             if not pads:
                 self.wiz["error"] = explain("not_found_pad" if devices else "not_found")
                 self.wiz["retry"] = {"op": "scan", "seconds": seconds}
 
     def _device_list(self, raw_devices, since):
-        """bluetoothctl 的设备 → 页面的列表：只要这次搜索真看到的（有信号），手柄在前，同一个手柄的两张脸合并。"""
+        """Convert bluetoothctl devices to UI list (RSSI-present only, gamepads first, merge dual-mode)."""
         out = []
         for d in raw_devices or []:
             seen = d.get("seen_at")
@@ -1267,21 +1236,20 @@ class PadOps(DriveMixin):
             out.append({"mac": d.get("mac"), "name": name, "rssi": d.get("rssi"), "pad": ev is not None, "evidence": ev,
                         "classic": isinstance(d.get("cls"), int), "kind": kind if ev else None,
                         "kind_label": KIND_LABEL.get(kind) if ev else None,
-                        "why_not": None if ev else (f"像是{ICON_CN[d.get('icon')]}" if d.get("icon") in ICON_CN else "不像手柄"),
+                        "why_not": None if ev else (f"Looks like {ICON_CN[d.get('icon')]}" if d.get("icon") in ICON_CN else "Not a gamepad"),
                         "paired": bool(d.get("paired")), "connected": bool(d.get("connected"))})
         pads = [x for x in out if x["pad"]]
         drop = set()
         for a in pads:
             for b in pads:
                 if a is not b and same_pad(a["mac"], b["mac"]) and a["classic"] and not b["classic"]:
-                    drop.add(b["mac"])          # 留经典那张脸：HID 走它（pad.rs:173-177）
+                    drop.add(b["mac"])          # Keep Classic face for HID
         out = [x for x in out if x["mac"] not in drop]
         out.sort(key=lambda x: (not x["pad"], x["evidence"] != "classified", -(x["rssi"] if isinstance(x["rssi"], int) else -999)))
         return out
 
     def _prepare_adapter(self, jid, via_helper=None):
-        """ready 这一步：适配器在、没被 rfkill、开着。搜索不需要「可绑定」，只提醒；配对时才临时打开（_ensure_pairable）。
-        via_helper=None 还不知道走哪条；True 走新版小助手；False 没新版小助手（后备路）。"""
+        """Check adapter presence, rfkill, and power state."""
         self._step(jid, "ready", "doing")
         bt = self.bt
         if bt is None:
@@ -1304,26 +1272,26 @@ class PadOps(DriveMixin):
         if not a.get("powered"):
             try:
                 bt.power_on()
-                notes.append("刚把蓝牙打开")
+                notes.append("Powered Bluetooth on")
             except BtError as e:
                 self._fail(jid, "ready", e.code if e.code != "other" else "powered_off", e.raw, retry={"op": "scan"})
                 return False
         if a.get("pairable") is False:
-            notes.append("现在「不可绑定」：配对时会临时打开，配完改回去")
+            notes.append("Adapter currently non-bondable: will enable temporarily during pairing")
         if self.exists(self.weird_ble_path):
             if via_helper is True:
-                notes.append("这块板配新手柄要先停 btd：新版小助手会停 btd、重开蓝牙，配完再起回来")
+                notes.append("This board requires btd pause/restart; helper will handle it automatically")
             elif via_helper is False:
-                notes.append("这块板配新手柄要先停 btd，Studio 没有新版小助手做不了，可能配不上。"
-                             "重装小助手，或者在鸭子上运行 sudo robotctl pad pair")
+                notes.append("This board requires btd pause/restart, which needs the updated helper. "
+                             "Reinstall helper or run sudo robotctl pad pair on the duck")
             else:
-                notes.append("这块板配新手柄要先停 btd：新版小助手会做；没有新版小助手时可能配不上，"
-                             "重装小助手，或者在鸭子上运行 sudo robotctl pad pair")
-        self._step(jid, "ready", "ok", "；".join(notes) or None)
+                notes.append("This board requires btd pause/restart (handled by updated helper). "
+                             "If it fails, reinstall helper or run sudo robotctl pad pair")
+        self._step(jid, "ready", "ok", "; ".join(notes) or None)
         return True
 
     def _ensure_pairable(self, jid):
-        """配对前：不可绑定就临时打开（不然配上了钥匙也存不下：No Bonding）。返回 True = 是我们打开的，配完要改回去（审查 5）。"""
+        """Temporarily enable bondable mode before pairing; returns True if changed."""
         bt = self.bt
         if bt is None:
             return False
@@ -1336,52 +1304,52 @@ class PadOps(DriveMixin):
         try:
             bt.pairable_on()
         except BtError as e:
-            self._note(jid, "ready", "没能打开「可绑定」（要 root），配上了也可能存不下钥匙")
-            self.log.warn("没能打开蓝牙的「可绑定」", cat="手柄", step="pairable on", raw=e.raw, hint="sudo btmgmt bondable on")
+            self._note(jid, "ready", "Could not enable bondable (needs root); keys may not persist")
+            self.log.warn("Failed to enable bondable", cat="Gamepad", step="pairable on", raw=e.raw, hint="sudo btmgmt bondable on")
             return False
-        self._note(jid, "ready", "临时打开了「可绑定」")
-        self.log.info("临时打开蓝牙的「可绑定」（配完改回去）", cat="手柄")
+        self._note(jid, "ready", "Temporarily enabled bondable")
+        self.log.info("Temporarily enabled Bluetooth bondable", cat="Gamepad")
         return True
 
-    # ---- 配对 ----
+    # ---- Pair ----
 
     def _job_pair(self, jid, arg):
         mac, by = arg if isinstance(arg, tuple) else (arg, None)
         from_pick = self.wiz.get("phase") == "pick"
         try:
             available = bool(self.helper.available())
-        except Exception:  # noqa: BLE001 —— 小助手探测失败就当没有
+        except Exception:  # noqa: BLE001  # Helper probe failed; treat as absent
             available = False
         use_helper = self._helper_pad_ok is not False and available
         if not available:
-            self._helper_pad_ok = False       # 没小助手：向导里直接显示后备路提示
+            self._helper_pad_ok = False       # No helper: show fallback hint
         if from_pick:
             self._set_steps(jid, SCAN_STEPS + PAIR_STEPS, keep=True)
             self._step(jid, "pick", "ok", mac)
         else:
             self._set_steps(jid, SCAN_STEPS + PAIR_STEPS)
             if use_helper:
-                self._step(jid, "ready", "skip", "交给小助手：官方 robotctl 会先停 btd、重开蓝牙")
+                self._step(jid, "ready", "skip", "Delegated to helper (robotctl handles btd & BT reset)")
             elif self.bt is not None:
                 if not self._prepare_adapter(jid, via_helper=False):
                     return
             else:
-                self._step(jid, "ready", "skip", "没有 bluetoothctl，跳过检查")
-            note = ("交给小助手（官方 robotctl）自己找正在配对状态的手柄" if use_helper
-                    else "交给 configd 自己找正在配对状态的手柄") if mac is None else mac
+                self._step(jid, "ready", "skip", "bluetoothctl absent; skipping check")
+            note = ("Helper (robotctl) auto-discovering controller in pairing mode" if use_helper
+                    else "configd auto-discovering controller in pairing mode") if mac is None else mac
             self._step(jid, "scan", "skip", note)
             self._step(jid, "pick", "skip" if mac is None else "ok", None if mac is None else mac)
         if self.bt is not None:
             try:
-                self.bt.close()       # 小助手会让 robotctl 重开蓝牙；我们的会话先关掉（configd 后备也一样）
+                self.bt.close()       # Close bluetoothctl before helper/configd resets BT
             except Exception:  # noqa: BLE001
                 pass
         restore = False
         try:
             with self._lk:
                 self.wiz.update(mac=mac, phase="pair", retry={"op": "pair", "mac": mac} if mac else {"op": "pair"})
-            self._step(jid, "pair", "doing", "手柄的灯要一直快闪；可能要等十几秒")
-            self.log.info(f"开始配对手柄 {mac or '（自动挑）'}", cat="手柄", dedup=False)
+            self._step(jid, "pair", "doing", "Keep controller LED flashing rapidly; may take 10-20s")
+            self.log.info(f"Starting gamepad pairing {mac or '(auto)'}", cat="Gamepad", dedup=False)
             pad = None
             if use_helper:
                 got = self._pair_via_helper(jid, mac, by)
@@ -1391,11 +1359,11 @@ class PadOps(DriveMixin):
                         if not self._prepare_adapter(jid, via_helper=False):
                             return
                     else:
-                        self._step(jid, "ready", "skip", "没有 bluetoothctl，跳过检查")
+                        self._step(jid, "ready", "skip", "bluetoothctl absent; skipping check")
                 else:
                     pad = got
             if not use_helper:
-                restore = self._ensure_pairable(jid)      # 只有后备路才临时开「可绑定」
+                restore = self._ensure_pairable(jid)      # Fallback path only
                 pad = self._pair_via_configd(jid, mac)
             if pad is None:
                 return
@@ -1406,17 +1374,16 @@ class PadOps(DriveMixin):
             if restore:
                 try:
                     self.bt.pairable_off()
-                    self.log.info("把蓝牙的「可绑定」改回原样（关）", cat="手柄")
+                    self.log.info("Restored Bluetooth bondable to off", cat="Gamepad")
                 except Exception as e:  # noqa: BLE001
-                    self.log.warn("没能把「可绑定」改回去", cat="手柄", step="pairable off", raw=str(e),
-                                  hint="不要紧：只是别的设备也能来配对。重启鸭子会回到原样")
+                    self.log.warn("Failed to restore bondable off", cat="Gamepad", step="pairable off", raw=str(e),
+                                  hint="Harmless; resets on reboot")
         self._after_pair(jid, pad)
 
     def _pair_via_helper(self, jid, mac, by):
-        """主路：root 小助手跑官方 robotctl pad pair。它会按板上标记先停 btd、重开蓝牙。
-        robotctl 停不了，所以另开线程等它，同时用 _tick_from_device 打勾（跟 configd 那条一样）。"""
+        """Primary pairing path via root helper (robotctl pad pair)."""
         with self._lk:
-            self.wiz["via"] = "小助手（官方 robotctl pad pair：会先停 btd、重开蓝牙）"
+            self.wiz["via"] = "Helper (robotctl pad pair)"
         box = {}
 
         def call():
@@ -1430,8 +1397,8 @@ class PadOps(DriveMixin):
         while t.is_alive():
             t.join(self.w["status_job"])
             if self._cancel.is_set():
-                self.log.info("页面点了停下；小助手那边的 robotctl 配对会自己做完（最多一两分钟），做完之前不能再配",
-                              cat="手柄")
+                self.log.info("Cancelled by UI; helper robotctl pairing will finish in background (up to 1-2m)",
+                              cat="Gamepad")
                 self._fail(jid, "pair", "cancelled")
                 return None
             if mac:
@@ -1442,14 +1409,14 @@ class PadOps(DriveMixin):
             return None
         r = box.get("r")
         if not isinstance(r, tuple) or len(r) != 3:
-            self._fail(jid, "pair", "other", f"小助手回的不是 (ok, result, detail)：{r!r}",
+            self._fail(jid, "pair", "other", f"Unexpected helper response: {r!r}",
                        retry=self.wiz.get("retry"))
             return None
         ok, result, detail = r
         detail = detail if isinstance(detail, dict) else {}
         if result == "bad_verb":
-            self.log.info("小助手是旧版，不认 pad-pair：改走后备配对", cat="手柄", raw=detail.get("msg"),
-                          hint="重装新版小助手以后就能走官方 robotctl pad pair")
+            self.log.info("Legacy helper lacks pad-pair; using fallback pairing", cat="Gamepad", raw=detail.get("msg"),
+                          hint="Reinstall helper to enable robotctl pad pair")
             self._helper_pad_ok = False
             with self._lk:
                 self.wiz["via"] = None
@@ -1458,7 +1425,7 @@ class PadOps(DriveMixin):
         pair = detail.get("pair") if isinstance(detail.get("pair"), dict) else {}
         if ok and result == "paired" and pair.get("outcome") == "paired":
             pad = pair.get("pad") if isinstance(pair.get("pad"), dict) else {}
-            self.log.info(f"小助手配好了：{pad.get('name')} {pad.get('mac')}", cat="手柄", dedup=False)
+            self.log.info(f"Helper paired: {pad.get('name')} {pad.get('mac')}", cat="Gamepad", dedup=False)
             return pad
         reason = detail.get("reason") or pair.get("reason") or "other"
         code = {"not_found": "not_found", "ambiguous": "ambiguous", "timeout": "timeout",
@@ -1477,12 +1444,11 @@ class PadOps(DriveMixin):
         return None
 
     def _pair_via_configd(self, jid, mac):
-        """官方 pad.pair 一次做完：搜索、代理、配对、信任（bluez.rs:853-1052）。阻塞、没有进度，
-        所以另开线程等它，同时看 configd 的 pad.status 和 bluetoothctl 的 info，看到哪一步成了就打勾。"""
+        """Pair via configd pad.pair while polling progress."""
         if self.configd is None:
-            return self._pair_via_bt(jid, mac, "configd_down", "这只鸭子没配 configd")
+            return self._pair_via_bt(jid, mac, "configd_down", "configd not configured")
         with self._lk:
-            self.wiz["via"] = "configd（官方 pad.pair）"
+            self.wiz["via"] = "configd (pad.pair)"
         params = {"timeout_seconds": int(self.w["pair_window"])}
         if mac:
             params["mac"] = mac
@@ -1502,7 +1468,7 @@ class PadOps(DriveMixin):
         while t.is_alive():
             t.join(self.w["status_job"])
             if self._cancel.is_set():
-                self.log.info("页面点了停下；configd 那边的配对会自己做完（最多一两分钟），做完之前不能再配", cat="手柄")
+                self.log.info("Cancelled by UI; configd pairing will finish in background (up to 1-2m)", cat="Gamepad")
                 self._fail(jid, "pair", "cancelled")
                 return None
             if mac:
@@ -1510,10 +1476,10 @@ class PadOps(DriveMixin):
         if "e" in box:
             e = box["e"]
             if isinstance(e, RpcError) and e.code == 14:
-                self.log.info("configd 不让 Studio 配对（只认 root），改用 bluetoothctl", cat="手柄", raw=str(e))
+                self.log.info("configd denied Studio pairing (root-only); falling back to bluetoothctl", cat="Gamepad", raw=str(e))
                 return self._pair_via_bt(jid, mac, "permission", str(e))
             if isinstance(e, NoPermission):
-                self.log.warn("Studio 没权限连 configd，改用 bluetoothctl", cat="手柄", raw=str(e), hint=ROBOT_GROUP)
+                self.log.warn("Studio lacks configd permission; falling back to bluetoothctl", cat="Gamepad", raw=str(e), hint=ROBOT_GROUP)
                 return self._pair_via_bt(jid, mac, "socket_perm", str(e))
             if isinstance(e, Unreachable):
                 return self._pair_via_bt(jid, mac, "configd_down", str(e))
@@ -1525,35 +1491,34 @@ class PadOps(DriveMixin):
             return None
         r = box.get("r")
         if not isinstance(r, dict):
-            self._fail(jid, "pair", "other", f"configd 回的不是对象：{r!r}")
+            self._fail(jid, "pair", "other", f"configd returned non-object: {r!r}")
             return None
         if r.get("outcome") == "paired":
             pad = r.get("pad") if isinstance(r.get("pad"), dict) else {}
-            self.log.info(f"configd 配好了：{pad.get('name')} {pad.get('mac')}", cat="手柄", dedup=False)
+            self.log.info(f"configd paired: {pad.get('name')} {pad.get('mac')}", cat="Gamepad", dedup=False)
             return pad
         reason, detail = r.get("reason"), r.get("detail")
         code = {"not_found": "not_found", "ambiguous": "ambiguous", "timeout": "timeout", "no_adapter": "no_adapter",
                 "rejected": "rejected"}.get(reason, "other")
         if reason == "rejected":
-            sub = classify(detail)          # 拒绝的原文里常有更具体的原因（认证失败、钥匙丢了……）
+            sub = classify(detail)          # Extract specific failure cause from raw detail
             if sub in ("auth_failed", "key_missing", "le_abort", "dhkey", "pin", "not_bondable"):
                 code = sub
         if reason == "not_found" and detail and "in range" in str(detail):
             code = "not_found_pad"
-        self._fail(jid, "pair", code, f"{reason}：{detail}" if detail else reason, retry=self.wiz.get("retry"))
+        self._fail(jid, "pair", code, f"{reason}: {detail}" if detail else reason, retry=self.wiz.get("retry"))
         return None
 
     def _pair_via_bt(self, jid, mac, why_code, why_raw):
-        """configd 不让配（不是 root）或者不在：自己用 bluetoothctl 一个会话做完（10-15 的经验：
-        分开几条命令敲会被拒，同一个会话一口气做完才成，踩坑记录.md:272）。"""
+        """Fallback pairing using a single bluetoothctl session."""
         bt = self.bt
         if bt is None or not mac:
-            # 没 MAC 没法自己配（不知道配谁）：把 configd 的原因报出来
+            # Cannot auto-pair via bluetoothctl without a target MAC
             self._fail(jid, "pair", why_code, why_raw, retry={"op": "scan", "seconds": SCAN_S} if not mac else self.wiz.get("retry"))
             return None
         with self._lk:
-            self.wiz["via"] = "bluetoothctl（Studio 自己配：" + {"permission": "configd 不让 Studio 配",
-                                                               "socket_perm": "Studio 连不上 configd（没权限）"}.get(why_code, "configd 不在") + "）"
+            self.wiz["via"] = "bluetoothctl (Studio fallback: " + {"permission": "configd denied",
+                                                               "socket_perm": "configd socket denied"}.get(why_code, "configd unavailable") + ")"
         classic = next((d["classic"] for d in self.wiz.get("devices") or [] if d.get("mac") == mac), None)
         if classic is None:
             classic = isinstance(bt.info(mac).get("cls"), int)
@@ -1566,11 +1531,11 @@ class PadOps(DriveMixin):
             try:
                 bt.pair_device(mac, classic, self._cancel, step)
             except BtError as e:
-                # 10-19 二号鸭：点了「忘掉」马上重配，bluetoothctl 5.82 回 Failed to register agent object。
-                # 关掉这个会话、开一个新的再试一次（只重试一次）。
+                # bluetoothctl 5.82 may return Failed to register agent object right after Forget;
+                # reopen session and retry once.
                 if "Failed to register agent object" not in (e.raw or "") or self._cancel.is_set():
                     raise
-                self.log.warn("bluetoothctl 注册代理失败：关掉会话，换一个新的再试一次", cat="手柄",
+                self.log.warn("bluetoothctl agent registration failed: reopening session to retry", cat="Gamepad",
                               step="agent", raw=e.raw)
                 try:
                     bt.close()
@@ -1594,7 +1559,7 @@ class PadOps(DriveMixin):
                 "trusted": info.get("trusted", True), "connected": info.get("connected", True)}
 
     def _tick_from_device(self, jid, mac):
-        """configd 在配的时候，看 bluetoothctl info / pad.status 里 Paired、Trusted、Connected 变了没有。"""
+        """Poll bluetoothctl info / pad.status for Paired, Trusted, Connected state."""
         info = {}
         if self.bt is not None:
             try:
@@ -1616,10 +1581,10 @@ class PadOps(DriveMixin):
             self.wiz.update(mac=mac or self.wiz.get("mac"), result_name=name)
         self._step(jid, "pair", "ok", name)
         if pad.get("trusted") is False:
-            self._step(jid, "trust", "fail", FAILS["not_trusted"][0] + "：" + FAILS["not_trusted"][1])
+            self._step(jid, "trust", "fail", FAILS["not_trusted"][0] + ": " + FAILS["not_trusted"][1])
         else:
             self._step(jid, "trust", "ok")
-        # helper/configd 会把已绑定但 Connect 还忙的设备返回；补连有次数和时间上限，不删钥匙、不重开蓝牙。
+        # Retry connect with cap if bonded but connection still in progress
         tries, retry_at = 0, self.clock() + self.w["reconnect_after"]
 
         def reconnect(end):
@@ -1633,7 +1598,7 @@ class PadOps(DriveMixin):
                     return False
                 drv = (self._status or {}).get("driver") if isinstance(self._status, dict) else None
                 if drv is not None and drv != "active":
-                    self._fail(jid, "padd", "padd_down", f"padd 是 {drv}")
+                    self._fail(jid, "padd", "padd_down", f"padd state: {drv}")
                     return False
                 bus = (self._robot or {}).get("bus")
                 if self._posture() in DRIVING or (isinstance(bus, dict) and bus.get("policy_enabled") is True):
@@ -1645,16 +1610,16 @@ class PadOps(DriveMixin):
                     return True
                 tries += 1
                 stage = self.wiz.get("phase")
-            self._step(jid, stage, "doing", f"等待按键设备，尝试恢复连接（{tries}/2）…")
+            self._step(jid, stage, "doing", f"Waiting for input device, reconnecting ({tries}/2)...")
             try:
                 self.bt.reconnect(mac, timeout=min(self.w["reconnect_timeout"], end - now))
             except BtError as e:
-                self.log.info("手柄补连还未完成，继续等实际按键设备", cat="手柄", raw=e.raw)
+                self.log.info("Gamepad reconnect pending; waiting for input device", cat="Gamepad", raw=e.raw)
             retry_at = self.clock() + self.w["reconnect_interval"]
             return True
 
-        # 连接：configd 回 paired 时可能还没连上（「bonded; it will connect on its own」，robotctl main.rs:4238-4247）
-        self._step(jid, "connect", "doing", "等它连上…")
+        # Wait for connection after bonding
+        self._step(jid, "connect", "doing", "Connecting...")
         with self._lk:
             connected = bool(pad.get("connected")) or self._pair_input_matches(mac)
         end = self.clock() + self.w["connect"]
@@ -1673,12 +1638,12 @@ class PadOps(DriveMixin):
                 self._fail(jid, "connect", "cancelled")
                 return
         if not connected:
-            self._fail(jid, "connect", "not_connected", f"{name} {mac}：pad.status 里 {self.w['connect']:g} 秒都没连上",
+            self._fail(jid, "connect", "not_connected", f"{name} {mac}: not connected after {self.w['connect']:g}s in pad.status",
                        retry={"op": "pair", "mac": mac} if mac else None)
             return
         self._step(jid, "connect", "ok")
-        # padd：configd 说 padd active，旁路也看到它打开了一个手柄，才算认到
-        self._step(jid, "padd", "doing", "等 padd 打开它…")
+        # Verify padd is active and attached
+        self._step(jid, "padd", "doing", "Waiting for padd attach...")
         with self._lk:
             self.wiz["phase"] = "padd"
         self._ensure_worker()
@@ -1691,7 +1656,7 @@ class PadOps(DriveMixin):
                 matching = self._pair_input_matches(mac)
                 tap_dead = self.tap is None or self.tap_state in ("absent", "denied", "error")
             if drv is not None and drv != "active":
-                self._fail(jid, "padd", "padd_down", f"padd 是 {drv}")
+                self._fail(jid, "padd", "padd_down", f"padd state: {drv}")
                 return
             if attached:
                 if not matching:
@@ -1699,7 +1664,7 @@ class PadOps(DriveMixin):
                     return
                 break
             if tap_dead and drv == "active":
-                self._step(jid, "padd", "ok", "padd 在跑；按键读不到（旁路没开），没法再核对")
+                self._step(jid, "padd", "ok", "padd active (input tap unavailable)")
                 break
             if not reconnect(end):
                 return
@@ -1707,7 +1672,7 @@ class PadOps(DriveMixin):
                 self._fail(jid, "padd", "cancelled")
                 return
         else:
-            # 最后一轮 connect / sleep 期间收到的真实 attached 也有效，不能被稍晚的计时器覆盖。
+            # Accept attach event received during final connect sleep
             with self._lk:
                 matching = self._pair_input_matches(mac)
             if not matching:
@@ -1716,14 +1681,14 @@ class PadOps(DriveMixin):
                     code = "cancelled"
                 else:
                     code = "not_connected" if actual.get("connected") is False else "no_input"
-                self._fail(jid, "padd", code, f"{self.w['padd']:g} 秒里 padd 旁路没出现 attached（{self.tap_state}：{self.tap_why}）",
+                self._fail(jid, "padd", code, f"padd tap did not see attached within {self.w['padd']:g}s ({self.tap_state}: {self.tap_why})",
                            retry={"op": "pair", "mac": mac} if mac else None)
                 return
             tap_dead = False
         self._pair_keys_ready(jid, mac, unverified=tap_dead)
 
     def _pair_input_matches(self, mac):
-        """只用本次手柄的旁路确认成功，另一只已连接手柄不算。调用方持有 _lk。"""
+        """Verify attached event belongs to the newly paired controller (call under _lk)."""
         unique = str((self.live.device or {}).get("unique") or "").upper()
         return self.tap_state == "attached" and bool(mac) and unique == mac.upper()
 
@@ -1750,7 +1715,7 @@ class PadOps(DriveMixin):
             self.live.seen = set()
             self.wiz.update(phase="keys", state="waiting", error=None, retry=None)
         self._step(jid, "keys", "doing")
-        self.log.info(f"手柄配好、进入按键测试：{dev or mac}", cat="手柄", dedup=False)
+        self.log.info(f"Gamepad paired, entering key test: {dev or mac}", cat="Gamepad", dedup=False)
 
     def _keys_tick(self):
         with self._lk:
@@ -1765,16 +1730,16 @@ class PadOps(DriveMixin):
     def _keys_done(self, manual):
         with self._lk:
             if self.wiz.get("phase") != "keys":
-                raise Refused("现在不在按键测试这一步")
+                raise Refused("Not currently in key test step")
             n = len(self.live.seen)
             for s in self.wiz["steps"]:
                 if s["key"] == "keys":
                     s["state"] = "ok"
-                    s["note"] = f"按过 {n} 个" + ("（你点了完成）" if manual else "")
+                    s["note"] = f"{n} keys pressed" + (" (manual finish)" if manual else "")
             self.wiz.update(state="done", error=None)
             if self.wiz.get("started") is not None:
                 self.wiz["elapsed_s"] = self.clock() - self.wiz["started"]
-        self.log.info(f"手柄按键测试完成（按过 {n} 个）", cat="手柄")
+        self.log.info(f"Gamepad key test complete ({n} keys)", cat="Gamepad")
         return {}
 
     def _cancel_job(self):
@@ -1791,7 +1756,7 @@ class PadOps(DriveMixin):
         with self._lk:
             p = self._pad_in_status(mac) or {}
             if p.get("connected") and self._posture() in DRIVING:
-                raise Refused("这个手柄正连着、鸭子在走：忘掉它，鸭子会马上停下（我们改过的 padd 还会坐下）。先点「停下（站好）」再忘掉")
+                raise Refused("Controller is active while duck is walking: click Stop (Stand) before forgetting")
         removed, via = None, None
         try:
             available = bool(self.helper.available())
@@ -1804,11 +1769,11 @@ class PadOps(DriveMixin):
             try:
                 ok, result, detail = self.helper.pad_forget(by or "Studio", mac)
             except Exception as e:  # noqa: BLE001
-                raise Refused(f"小助手没跑成：{type(e).__name__}: {e}") from None
+                raise Refused(f"Helper failed: {type(e).__name__}: {e}") from None
             detail = detail if isinstance(detail, dict) else {}
             if result == "bad_verb":
-                self.log.info("小助手是旧版，不认 pad-forget：改走 configd / bluetoothctl", cat="手柄",
-                              raw=detail.get("msg"), hint="重装新版小助手以后就能走官方 robotctl pad forget")
+                self.log.info("Legacy helper lacks pad-forget; using configd / bluetoothctl", cat="Gamepad",
+                              raw=detail.get("msg"), hint="Reinstall helper for robotctl pad forget")
                 self._helper_pad_ok = False
             else:
                 self._helper_pad_ok = True
@@ -1817,14 +1782,14 @@ class PadOps(DriveMixin):
                 removed = detail.get("removed")
                 if removed is None:
                     removed = True
-                via = "小助手（官方 robotctl pad forget）"
+                via = "Helper (robotctl pad forget)"
         if removed is None and self.configd is not None:
             try:
                 r = self.configd.call("pad.forget", {"mac": mac}, 5.0)
                 removed, via = bool((r or {}).get("removed")), "configd"
             except RpcError as e:
                 if e.code != 14:
-                    raise Refused(f"configd 没删掉：{e.message}") from None
+                    raise Refused(f"configd forget failed: {e.message}") from None
             except (Unreachable, Timeout):
                 pass
         if removed is None and self.bt is not None:
@@ -1832,23 +1797,22 @@ class PadOps(DriveMixin):
                 removed, via = self.bt.remove(mac), "bluetoothctl"
             except BtError as e:
                 err = explain(e.code, e.raw)
-                raise Refused(f"{err['msg']}：{err['fix']}") from None
+                raise Refused(f"{err['msg']}: {err['fix']}") from None
         if removed is None:
             err = explain("permission")
-            raise Refused(f"{err['msg']}：{err['fix']}（忘掉：sudo robotctl pad forget {mac}）")
-        self.log.info(f"忘掉手柄 {mac}：{'删了' if removed else '鸭子本来就没记着'}（经 {via}）", cat="手柄", dedup=False,
-                      hint="手柄自己还记着鸭子：要再配，先让手柄重新进配对状态")
+            raise Refused(f"{err['msg']}: {err['fix']} (CLI: sudo robotctl pad forget {mac})")
+        self.log.info(f"Forgot gamepad {mac}: {'removed' if removed else 'not paired'} (via {via})", cat="Gamepad", dedup=False,
+                      hint="Put the controller back in pairing mode before re-pairing")
         self._poll_status()
         return {"removed": removed}
 
-    # ================= 测急停 =================
+    # ================= E-Stop Test =================
     #
-    # 判据（审查 1）：
-    #   ① 开始时记下顶上「卸力」按过几次（robotd.py 的 estop.press_count）；通过时要求没变、也没有正在卸力；
-    #   ② 按下 Select 的那一刻自己问一次 busStatus（自己记「问的时间」），要求它是在「按下之后、松开之前」问的，
-    #      而且扭矩是开着的（证明不是之前就软了：比如顶上的卸力已经确认完、摔倒自动卸力）；
-    #   ③ 按住满 2 秒直接判失败：那是 padd 的「坐下关机」（robot.shutdown），不是急停（padd main.rs:192-193、725-739）；
-    #   ④ 松开之后自己每 0.25 秒问一次 busStatus，只认「松开之后才问的」回读里扭矩确认 OFF（判据同顶上卸力：estop.py:43-61）。
+    # Verification criteria:
+    #   1. Topbar E-Stop press_count unchanged and not releasing.
+    #   2. Direct busStatus probe while Select is held confirms torque is ON.
+    #   3. Holding >= 2s fails (padd triggers sit-and-shutdown instead of E-Stop).
+    #   4. Post-release 0.25s busStatus probes confirm torque transitions to OFF.
 
     def _estop_test(self, action):
         now = self.clock()
@@ -1856,59 +1820,59 @@ class PadOps(DriveMixin):
             with self._lk:
                 if self.test.get("state") not in FINAL:
                     self.test = {"state": "idle"}
-                    self.log.info("不测急停了（页面点了「不测了」）", cat="安全")
+                    self.log.info("E-Stop test cancelled by UI", cat="Safety")
             self._test_evt.set()
             return {}
         if action != "start":
-            raise Refused("测急停的指令只有 start / cancel")
+            raise Refused("E-Stop test action must be start or cancel")
         if self.robot is None:
-            raise Refused("这只鸭子没配主程序的地址")
+            raise Refused("robotd address not configured")
         with self._lk:
             if self._job_alive():
-                raise Refused("正在配对：配完再测")
+                raise Refused("Pairing in progress: finish before testing E-Stop")
             if self.test.get("state") not in FINAL:
-                raise Refused("已经在测了")
+                raise Refused("E-Stop test already running")
             checks = self._estop_checks(now, self._status_view(now))
             bad = next((c for c in checks["checks"] if c["ok"] is not True and c["key"] in ("pad", "padd", "robotd")), None)
             if bad or not checks["ok"]:
                 c = bad or next(c for c in checks["checks"] if c["ok"] is not True)
-                raise Refused(f"现在测不了：{c['label']} 这一条没通过（{c['why'] or '不知道'}）")
+                raise Refused(f"Cannot test E-Stop: {c['label']} failed ({c['why'] or 'unknown'})")
             if self.tap_state != "attached":
-                raise Refused("读不到手柄按键（padd 旁路）：要先在这页看到手柄图跟着你按的键动")
+                raise Refused("Gamepad input tap not active: verify buttons highlight on screen first")
             token = object()
             self.test = {"state": "need_torque", "started": now, "why": None, "fix": None, "ms": None,
                          "held_long": False, "failed_at": None, "_token": token, "_phase_at": now,
                          "_presses0": self._relax_presses, "_noted0": self._relax_noted, "_pressed_at": None, "_released_at": None,
                          "_on_while_pressed": None, "_press_err": None}
             self._test_evt.clear()
-        self.log.info("开始测急停：先确认它上着力，再等你短按 Select", cat="安全", dedup=False,
+        self.log.info("Starting E-Stop test: verifying torque ON, then waiting for short Select press", cat="Safety", dedup=False,
                       ctx={"presses": self._relax_presses})
         threading.Thread(target=self._estop_runner, args=(token,), name="pad-estop-test", daemon=True).start()
         self._ensure_worker()
         return {}
 
     def _on_select(self, down, now):
-        """旁路线程里、拿着锁调来。只改状态、叫醒测急停线程，不在这里问 robotd。"""
+        """Called from tap thread under lock on Select edge; wakes test thread."""
         t = self.test
         st = t.get("state")
         if down and st == "armed":
             t.update(state="pressed", _pressed_at=now, _on_while_pressed=None)
             self._test_evt.set()
         elif down and st == "need_torque":
-            t["why"] = "还在确认它上着力：等第 2 步亮了再按 Select"
+            t["why"] = "Still confirming torque ON: wait for step 2 before pressing Select"
         elif not down and st == "pressed":
             t.update(state="released", _released_at=now)
-            self.log.info(f"看到 Select 松开（按了 {now - t['_pressed_at']:.2f} 秒），等回读卸力", cat="安全")
+            self.log.info(f"Select released ({now - t['_pressed_at']:.2f}s), waiting for torque-off readback", cat="Safety")
             self._test_evt.set()
 
     def _probe_bus(self):
-        """自己问一次 busStatus：(问的时间, 回包或 None, 出错原因或 None, 收到的时间)。"""
+        """Probe busStatus directly: (asked_at, response_or_None, err_or_None, received_at)."""
         asked = self.clock()
         try:
             r = self.robot.call("robot.busStatus", {}, 2.0)
         except (Unreachable, Timeout, RpcError) as e:
             return asked, None, str(e), self.clock()
-        return asked, (r if isinstance(r, dict) else None), (None if isinstance(r, dict) else "回的不是对象"), self.clock()
+        return asked, (r if isinstance(r, dict) else None), (None if isinstance(r, dict) else "Expected object"), self.clock()
 
     def _test_fail(self, token, at, why, fix=None):
         with self._lk:
@@ -1916,10 +1880,10 @@ class PadOps(DriveMixin):
             if t.get("_token") is not token or t.get("state") in FINAL:
                 return
             t.update(state="failed", failed_at=at, why=why, fix=fix)
-        self.log.warn(f"急停测试没通过：{why}", cat="安全", step=at, hint=fix)
+        self.log.warn(f"E-Stop test failed: {why}", cat="Safety", step=at, hint=fix)
 
     def _nap_test(self, s):
-        """等一会儿；Select 按下 / 松开、卸力会把它叫醒。状态以 self.test 为准，事件只管叫醒。"""
+        """Wait with wakeup on Select edge or E-Stop."""
         self._test_evt.wait(s)
         self._test_evt.clear()
 
@@ -1927,9 +1891,9 @@ class PadOps(DriveMixin):
         try:
             self._estop_loop(token)
         except Exception as e:  # noqa: BLE001
-            self.log.error("测急停时 Studio 出错", cat="安全", raw=f"{type(e).__name__}: {e}", exc=True,
-                           hint="这是 Studio 的问题，导出诊断包发出来；先用顶上的卸力或手柄 Select")
-            self._test_fail(token, "studio", f"Studio 出错：{type(e).__name__}: {e}")
+            self.log.error("E-Stop test error", cat="Safety", raw=f"{type(e).__name__}: {e}", exc=True,
+                           hint="Internal Studio error; use topbar E-Stop or physical Select")
+            self._test_fail(token, "studio", f"Studio error: {type(e).__name__}: {e}")
 
     def _estop_loop(self, token):  # noqa: C901
         w = self.w
@@ -1945,12 +1909,12 @@ class PadOps(DriveMixin):
                 if st == "pressed" and now - pressed_at > w["select_long"]:
                     t["held_long"] = True
             if relax_pressed:
-                self._test_fail(token, "relax", "测的时候顶上的「卸力」（或别的页面的卸力）也按了：这次不算数",
-                                "等它确认卸力后，按 Start 站起来，再点「再测一次」")
+                self._test_fail(token, "relax", "Topbar E-Stop was pressed during test; result invalid",
+                                "Wait for torque-off, press Start to stand, and retry")
                 return
             if st == "need_torque":
                 if now - t["started"] > w["torque"]:
-                    self._test_fail(token, "torque", f"{w['torque']:g} 秒没看到它上力", "按手柄 Start 让它站起来，再点「再测一次」")
+                    self._test_fail(token, "torque", f"Torque did not turn ON within {w['torque']:g}s", "Press Start to stand and retry")
                     return
                 asked, bus, err, _ = self._probe_bus()
                 if bus is not None and _torque_on(bus):
@@ -1961,15 +1925,15 @@ class PadOps(DriveMixin):
                 self._nap_test(w["probe"] * 2)
             elif st == "armed":
                 if now - t["_phase_at"] > w["press"]:
-                    self._test_fail(token, "press", f"{w['press']:g} 秒没看到 Select 按下",
-                                    "按的是 Select 吗？Xbox 是「视图」键，Switch 是 −，PS 是 Create。按下时图上那颗键会变红")
+                    self._test_fail(token, "press", f"Select press not seen within {w['press']:g}s",
+                                    "Press Select (View on Xbox, - on Switch, Create on PS)")
                     return
                 asked, bus, err, _ = self._probe_bus()
                 with self._lk:
                     still = self.test is t and t["state"] == "armed"
                 if still and bus is not None and (relaxed(bus) is True or torque_off(bus)):
-                    self._test_fail(token, "early_off", "还没按 Select 扭矩就关了：可能是顶上的卸力、摔倒保护或别的程序",
-                                    "按 Start 让它站起来，再点「再测一次」")
+                    self._test_fail(token, "early_off", "Torque dropped before Select was pressed",
+                                    "Press Start to stand and retry")
                     return
                 self._nap_test(w["probe"] * 2)
             elif st == "pressed":
@@ -1979,33 +1943,33 @@ class PadOps(DriveMixin):
                         rel = t["_released_at"]
                         if asked >= pressed_at and (rel is None or asked <= rel):
                             if bus is None:
-                                t["_press_err"] = err or "没回包"
+                                t["_press_err"] = err or "no reply"
                             else:
                                 t["_on_while_pressed"] = _torque_on(bus)
                     continue
                 if now - pressed_at >= w["shutdown_hold"]:
-                    self._test_fail(token, "long", f"Select 按住满 {w['shutdown_hold']:g} 秒了：padd 发的是「坐下、卸力、关机」（robot.shutdown），"
-                                    "不是急停。这次不算", "鸭子可能正在坐下关机：等它停稳（关机了就重新开机），再测一次，这回短按一下就松开")
+                    self._test_fail(token, "long", f"Select held >= {w['shutdown_hold']:g}s (triggers sit & shutdown, not E-Stop)",
+                                    "Tap Select briefly instead of holding")
                     return
                 self._nap_test(0.05)
             elif st == "released":
                 held = released_at - pressed_at
                 if held >= w["shutdown_hold"]:
-                    self._test_fail(token, "long", f"Select 按了 {held:.1f} 秒（满 {w['shutdown_hold']:g} 秒是「坐下关机」，不是急停）：这次不算",
-                                    "再测一次：短按一下就松开")
+                    self._test_fail(token, "long", f"Select held {held:.1f}s (>= {w['shutdown_hold']:g}s shutdown threshold)",
+                                    "Retry with a quick tap and release")
                     return
                 if t["_on_while_pressed"] is not True:
                     if t["_on_while_pressed"] is False:
-                        self._test_fail(token, "pressed_off", "按着 Select 的时候扭矩已经关了：卸力不是松开 Select 触发的，这次不算",
-                                        "按 Start 让它站起来，再点「再测一次」")
+                        self._test_fail(token, "pressed_off", "Torque was already OFF while Select was held",
+                                        "Press Start to stand and retry")
                     else:
                         self._test_fail(token, "pressed_unknown",
-                                        f"按着 Select 的时候没读到扭矩（{t['_press_err'] or '按得太快，没来得及问'}）：这次不算",
-                                        "再测一次：按下停半秒左右再松（别超过 1.5 秒）")
+                                        f"Could not read torque while Select held ({t['_press_err'] or 'tap too brief'})",
+                                        "Retry: hold Select ~0.5s then release (under 1.5s)")
                     return
                 if now - released_at > w["readback"]:
-                    self._test_fail(token, "readback", f"松开 Select {w['readback']:g} 秒了，回读扭矩还没关",
-                                    "padd 可能没把卸力转给主程序（看日志里 padd 那几行）。先用顶上的「卸力」或者关电源")
+                    self._test_fail(token, "readback", f"Torque still ON {w['readback']:g}s after Select release",
+                                    "Check padd logs; use topbar E-Stop or power off")
                     return
                 asked, bus, err, got = self._probe_bus()
                 if bus is not None and asked >= released_at and relaxed(bus) is True:
@@ -2018,9 +1982,9 @@ class PadOps(DriveMixin):
                             t.update(state="passed", ms=int((got - released_at) * 1000), why=None)
                     if relax_pressed:
                         continue
-                    self.log.info(f"急停测过了：松开 Select 到回读卸力 {t['ms']} ms", cat="安全", dedup=False,
+                    self.log.info(f"E-Stop test passed: torque-off confirmed in {t['ms']} ms", cat="Safety", dedup=False,
                                   ctx={"held_s": round(held, 2), "asked_after_release_ms": int((asked - released_at) * 1000)})
-                    self._estop_passed_record()            # 总览上手清单第 4 步（审查 O6：在置 passed 的那一刻记）
+                    self._estop_passed_record()            # Record onboarding step 4
                     return
                 self._nap_test(w["probe"])
             else:
@@ -2028,8 +1992,7 @@ class PadOps(DriveMixin):
 
 
 def robot_view(rd, posture=None):
-    """在事件循环里取好 robotd 的回读交给 PadOps（不跨线程读正在变的对象）。rd 是 studio.robotd.Robotd。
-    姿势照 state.posture 算（同一套表），过期的 policies / state / health 不用（state.py MAX_AGE）。"""
+    """Extract robotd snapshot for PadOps on the event loop."""
     now = time.monotonic()
 
     def fresh(sample, key):
@@ -2050,7 +2013,7 @@ def robot_view(rd, posture=None):
 
 
 def _mask_mac(mac):
-    """AA:BB:CC:DD:EE:FF → AA:BB:CC:…（诊断包里不留完整地址）。"""
+    """Mask MAC address for diagnostics bundle."""
     m = str(mac or "")
     return (m[:8] + ":…") if len(m) >= 8 else m
 
@@ -2065,17 +2028,17 @@ def _read_text(path):
         return f.read()
 
 
-# ---------------- 真的端口：同步 JSON-RPC（一行一个对象，lib.rs:9-12） ----------------
+# ---------------- Real Ports: Sync JSON-RPC ----------------
 
 def _connect(addr, timeout):
     kind, *rest = parse_addr(addr)
     try:
         if kind == "unix":
             if not hasattr(socket, "AF_UNIX"):
-                raise Unreachable("这台电脑的 Python 不支持 unix socket，地址改用 tcp:")
+                raise Unreachable("Unix sockets unsupported on this Python build; use tcp:")
             path = rest[0]
             if not os.path.exists(path):
-                raise Unreachable(f"{path} 不在")
+                raise Unreachable(f"{path} not found")
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 s.settimeout(timeout)
@@ -2089,13 +2052,13 @@ def _connect(addr, timeout):
     except Unreachable:
         raise
     except PermissionError as e:
-        raise NoPermission(f"没权限连 {addr}（{ROBOT_GROUP}）") from e
+        raise NoPermission(f"Permission denied connecting to {addr} ({ROBOT_GROUP})") from e
     except (ConnectionRefusedError, FileNotFoundError) as e:
-        raise Unreachable(f"连不上 {addr}：拒绝连接") from e
+        raise Unreachable(f"Connection refused: {addr}") from e
     except socket.timeout:
-        raise Timeout(f"{addr} {timeout:g} 秒没连上") from None
+        raise Timeout(f"Connection timed out to {addr} ({timeout:g}s)") from None
     except OSError as e:
-        raise Unreachable(f"连不上 {addr}：{type(e).__name__}: {e}") from e
+        raise Unreachable(f"Failed to connect to {addr}: {type(e).__name__}: {e}") from e
 
 
 class _Lines:
@@ -2103,7 +2066,7 @@ class _Lines:
         self.s, self.buf = sock, b""
 
     def readline(self, deadline):
-        """一行（bytes）；对方关了返回 None；到点抛 socket.timeout。"""
+        """Read one line (bytes); returns None on EOF, raises socket.timeout."""
         while b"\n" not in self.buf:
             left = deadline - time.monotonic()
             if left <= 0:
@@ -2114,13 +2077,13 @@ class _Lines:
                 return None
             self.buf += chunk
             if len(self.buf) > LINE_LIMIT:
-                raise Unreachable(f"对方发来的一行太长（超过 {LINE_LIMIT} 字节）")
+                raise Unreachable(f"Line exceeded {LINE_LIMIT} bytes")
         line, _, self.buf = self.buf.partition(b"\n")
         return line
 
 
 def rpc_call(addr, method, params=None, timeout=3.0):
-    """新开一条连接、问一次、关掉（配对会占住连接一两分钟，不能跟别的请求排队）。"""
+    """One-shot JSON-RPC call over a fresh connection."""
     deadline = time.monotonic() + timeout
     s = _connect(addr, timeout)
     try:
@@ -2130,7 +2093,7 @@ def rpc_call(addr, method, params=None, timeout=3.0):
         while True:
             line = rd.readline(deadline)
             if line is None:
-                raise Unreachable("对方关了连接")
+                raise Unreachable("Peer closed connection")
             try:
                 msg = json.loads(line)
             except ValueError:
@@ -2142,11 +2105,11 @@ def rpc_call(addr, method, params=None, timeout=3.0):
                 raise RpcError(method, err.get("code"), err.get("message", ""), err.get("data"))
             return msg.get("result")
     except socket.timeout:
-        raise Timeout(f"{method} {timeout:g} 秒没回话") from None
+        raise Timeout(f"{method} timed out after {timeout:g}s") from None
     except (Unreachable, RpcError):
         raise
     except OSError as e:
-        raise Unreachable(f"连接断了：{type(e).__name__}: {e}") from e
+        raise Unreachable(f"Connection lost: {type(e).__name__}: {e}") from e
     finally:
         s.close()
 
@@ -2160,8 +2123,7 @@ class ConfigdPort:
 
 
 class RobotPort:
-    """robot.move / head / mouth 是通知（不带 id、不回话，lib.rs:522-529），走一条常驻连接；断了重连一次。
-    要回话的（init、enable、do、sound、busStatus……）每次新开一条（rpc_call）。"""
+    """Persistent notification socket for robot.move / head / mouth; requests use rpc_call."""
 
     def __init__(self, addr="unix:/run/robotd.sock"):
         self.addr = addr
@@ -2196,8 +2158,7 @@ class RobotPort:
 
 
 class PaddTap:
-    """padd 旁路：发一次 pad.input，之后一直读 pad.report（tap.rs:536-599）。断了 2 秒后重连（跟 robotctl monitor 一样）。
-    回调或解析里出了意外：记日志、重连，线程不能悄悄退出（审查 15）。"""
+    """padd input tap subscriber (pad.input -> stream pad.report with 2s reconnect)."""
 
     def __init__(self, addr="unix:/run/padd/pad.sock", reconnect_s=2.0, log=None):
         self.addr, self.reconnect_s, self.log = addr, reconnect_s, log
@@ -2229,10 +2190,10 @@ class PaddTap:
                 self._once(on_report, on_state, stop)
             except Exception as e:  # noqa: BLE001
                 if self.log:
-                    self.log.error("读手柄按键的线程出错，2 秒后重连", cat="手柄", raw=f"{type(e).__name__}: {e}", exc=True,
-                                   hint="这是 Studio 的问题，导出诊断包发出来")
+                    self.log.error("Gamepad tap reader error; reconnecting in 2s", cat="Gamepad", raw=f"{type(e).__name__}: {e}", exc=True,
+                                   hint="Internal Studio error; export diagnostics bundle")
                 try:
-                    on_state("error", f"Studio 出错：{type(e).__name__}: {e}")
+                    on_state("error", f"Studio error: {type(e).__name__}: {e}")
                 except Exception:  # noqa: BLE001
                     pass
             stop.wait(self.reconnect_s)
@@ -2244,7 +2205,7 @@ class PaddTap:
             on_state("denied", str(e))
             return
         except Unreachable:
-            on_state("absent", "连不上 padd 的按键旁路（/run/padd/pad.sock）：padd 可能没在跑，或者这版 padd 没开旁路；网页上看不到实时按键，手柄本身照常能用")
+            on_state("absent", "Cannot connect to /run/padd/pad.sock (padd stopped or tap disabled); live key display unavailable")
             return
         except Timeout as e:
             on_state("error", str(e))
@@ -2260,11 +2221,11 @@ class PaddTap:
                 except socket.timeout:
                     continue
                 if line is None:
-                    on_report({"report": "detached", "why": "padd 关了旁路"})
+                    on_report({"report": "detached", "why": "padd closed tap"})
                     break
-                # 手柄自带的 IMU（G50 Pro 这类）：有人订阅时 padd 每一批 IMU 数据都推过来（fork padd tap.rs:506-528），
-                # 我们用不着。解析之前按字符串先跳过（serde 内部标签 "report":"imu"，lib.rs:4609-4635；imu_attached 不受影响）：
-                # 每秒几十行、每行都 json.loads 再扔掉，白费 CPU（总览重排审查 O12）
+                # Skip high-rate gamepad IMU packets before JSON parsing
+                # ("report":"imu" is unused by Studio; imu_attached is preserved)
+                # Avoid unnecessary json.loads CPU overhead
                 if b'"report":"imu"' in line:
                     continue
                 try:
@@ -2275,13 +2236,13 @@ class PaddTap:
                     continue
                 if msg.get("id") == 1 and "error" in msg:
                     err = msg["error"] if isinstance(msg["error"], dict) else {"message": str(msg["error"])}
-                    on_state("error", f"padd 拒绝了订阅：{err.get('message')}")
+                    on_state("error", f"padd rejected subscription: {err.get('message')}")
                     break
                 if msg.get("method") == "pad.report" and isinstance(msg.get("params"), dict):
                     on_report(msg["params"])
         except (OSError, Unreachable) as e:
             if not stop.is_set():
-                on_state("error", f"旁路断了：{e}")
+                on_state("error", f"Tap disconnected: {e}")
         finally:
             self._s = None
             try:
@@ -2290,7 +2251,7 @@ class PaddTap:
                 pass
 
 
-# ---------------- 真的蓝牙：bluetoothctl ----------------
+# ---------------- Real Bluetooth: bluetoothctl ----------------
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|[\x01\x02]")
 _PROMPT = re.compile(r"^(?:\[[^\]\[]*\][#>]\s*)+")
@@ -2304,7 +2265,7 @@ BT_ENV = {**os.environ, "LC_ALL": "C", "TERM": "dumb"}
 
 
 def clean_line(raw):
-    """去掉颜色、回车、提示符（bluetoothctl 在管道里也会把提示符跟输出挤在一行）。"""
+    """Strip ANSI codes, CR, and bluetoothctl prompts."""
     line = _ANSI.sub("", raw or "").replace("\r", "").strip()
     return _PROMPT.sub("", line).strip()
 
@@ -2328,7 +2289,7 @@ def _num(v):
 
 
 def parse_props(text):
-    """`bluetoothctl info / show` 的「键: 值」行 → dict（键小写）。UUID 收成列表。"""
+    """Parse `bluetoothctl info / show` key: value lines into a dict."""
     out = {"uuids": []}
     for raw in (text or "").splitlines():
         line = clean_line(raw)
@@ -2353,7 +2314,7 @@ def device_from_props(mac, p):
 
 
 def _rfkill_blocked(base):
-    """True：蓝牙被 rfkill 关了；False：有蓝牙 rfkill、没关；None：没找到。"""
+    """Return True if Bluetooth is rfkill-blocked, False if unblocked, None if not found."""
     try:
         names = os.listdir(base)
     except OSError:
@@ -2377,26 +2338,22 @@ def _run(argv, timeout=8.0):
                            env=BT_ENV, stdin=subprocess.DEVNULL)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except FileNotFoundError:
-        return 127, f"没有这个命令：{argv[0]}"
+        return 127, f"Command not found: {argv[0]}"
     except subprocess.TimeoutExpired as e:
         out = e.stdout or b""
         out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
-        return 124, f"{' '.join(argv)} {timeout:g} 秒没结束：{out[-300:]}"
+        return 124, f"{' '.join(argv)} timed out after {timeout:g}s: {out[-300:]}"
 
 
 def _spawn(argv):
-    # 二进制管道、不缓冲：自己按块读、自己切行（代理的提问是没有换行的提示符，按行读会卡住：审查 4）
+    # Unbuffered binary pipe reading to handle agent prompts without trailing newlines
     return subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             bufsize=0, env=BT_ENV)
 
 
 class BtSession:
-    """一个常驻的 bluetoothctl：搜索，或者配对、信任、连接都在同一个客户端里（原版板端工具的做法；
-    10-15 分几条命令敲被拒，踩坑记录.md:272）。
-
-    代理（审查 5）：bluetoothctl 一启动可能就自带注册一个默认代理，所以开会话先 agent off；搜索不需要代理；
-    只在 pair_device 期间注册 NoInputNoOutput、占默认代理、自动答 yes，配完 agent off 交还（configd 也是只在配对窗口里占：
-    configd bluez.rs:995-1013）。"""
+    """Persistent bluetoothctl session for scan, pair, trust, and connect.
+    configd bluez.rs:995-1013)."""
 
     def __init__(self, argv, spawn=None):
         self.p = (spawn or _spawn)(argv)
@@ -2405,9 +2362,9 @@ class BtSession:
         self.seq = 0
         self.devices = {}
         self.closed = False
-        self.discovering = False     # 一打开 bluetoothctl 会先把缓存里的设备都 [NEW] 一遍：搜索开始前的不算「看到」
-        self.answer_yes = False      # 只在配对窗口里才自动答 yes
-        self.asked = []              # 代理问过什么、怎么答的（出错时写进日志）
+        self.discovering = False     # Ignore cached [NEW] devices emitted before scan starts
+        self.answer_yes = False      # Auto-answer yes only during pairing window
+        self.asked = []              # Agent prompt/response log
         self._tail_answered = False
         self._quit = False
         self._t = threading.Thread(target=self._reader, name="bt-session", daemon=True)
@@ -2433,7 +2390,7 @@ class BtSession:
                     return
                 yield dec.decode(b)
         else:
-            for x in out:                         # 测试里的假进程：一块一块的字符串（不一定按行）
+            for x in out:                         # Support chunked output from test fakes
                 yield x.decode("utf-8", "replace") if isinstance(x, bytes) else x
 
     def _reader(self):
@@ -2451,7 +2408,7 @@ class BtSession:
                             self._add(line, prompt_done=answered)
                     tail = clean_line(buf)
                     if tail and not self._tail_answered and (_ASK_YES.search(tail) or _ASK_PIN.search(tail)):
-                        # 提示符后面没有换行：等不到这一行结束，现在就答（审查 4）
+                        # Reply immediately to prompts without trailing newline
                         self._tail_answered = True
                         self._add(tail, prompt_done=False)
                     self.cv.notify_all()
@@ -2500,7 +2457,7 @@ class BtSession:
             elif what == "NEW" and rest and not re.match(r"^[0-9A-Fa-f]{2}[-:]", rest):
                 d.setdefault("name", rest)
             return
-        # 代理的提问：只在配对窗口里同意配对、授权服务；别的时候一律答 no。要 PIN 的由 expect 当失败（pin）
+        # Only confirm agent prompts during active pairing window
         if _ASK_YES.search(line) and any(k in line for k in _ASK_KINDS):
             ans = "yes" if self.answer_yes else "no"
             self.asked.append(f"{line} → {ans}")
@@ -2520,7 +2477,7 @@ class BtSession:
             self.p.stdin.write((cmd + "\n").encode("utf-8"))
             self.p.stdin.flush()
         except (OSError, ValueError, AttributeError) as e:
-            raise BtError("bluez_down", f"bluetoothctl 已经退出：{e}") from None
+            raise BtError("bluez_down", f"bluetoothctl exited: {e}") from None
 
     def expect(self, ok, fail=BT_FAIL, timeout=8.0, since=None, cancel=None):
         since = self.seq if since is None else since
@@ -2537,12 +2494,12 @@ class BtSession:
                     if fail_re and fail_re.search(line):
                         raise BtError(classify(line), line)
                 if self.closed:
-                    raise BtError("bluez_down", "bluetoothctl 退出了")
+                    raise BtError("bluez_down", "bluetoothctl exited")
                 if cancel is not None and cancel.is_set():
-                    raise BtError("cancelled", "页面点了停下")
+                    raise BtError("cancelled", "Cancelled by UI")
                 left = end - time.monotonic()
                 if left <= 0:
-                    raise BtError("timeout", f"{timeout:g} 秒没等到：{ok}")
+                    raise BtError("timeout", f"Timed out after {timeout:g}s waiting for: {ok}")
                 self.cv.wait(min(left, 0.2))
 
     def cmd(self, text, ok, fail=BT_FAIL, timeout=8.0, cancel=None):
@@ -2560,7 +2517,7 @@ class BtSession:
             return True
 
     def close(self):
-        """quit → 关 stdin → 等 2 秒 → terminate（sudo 会把 SIGTERM 转给 bluetoothctl，SIGKILL 不会：审查 6）→ 等 1 秒 → kill → 等。"""
+        """Graceful quit -> close stdin -> terminate -> kill."""
         if self._quit:
             return
         self._quit = True
@@ -2584,13 +2541,12 @@ class BtSession:
 
 
 class BluetoothCtl:
-    """BluetoothPort 的真实现：bluetoothctl（BlueZ 自带）+ /sys/class/rfkill。prefix 可以给 ("sudo", "-n")：
-    这时会话是 sudo -n stdbuf -oL bluetoothctl（stdbuf 放在 sudo 后面：放前面对 setuid 的 sudo 不生效，审查 6）。"""
+    """Real BluetoothPort using bluetoothctl + /sys/class/rfkill."""
 
     def __init__(self, run=_run, spawn=None, prefix=(), rfkill_dir="/sys/class/rfkill", exe="bluetoothctl", stdbuf=None):
         self.run, self.spawn, self.prefix, self.rfkill_dir, self.exe = run, spawn, tuple(prefix), rfkill_dir, exe
         self.stdbuf = bool(shutil.which("stdbuf")) if stdbuf is None else stdbuf
-        self.t = {"pair": 30.0, "connect": 20.0, "trust": 8.0, "find": 15.0, "settle": 8.0}    # 各步最多等多久（测试里改短）
+        self.t = {"pair": 30.0, "connect": 20.0, "trust": 8.0, "find": 15.0, "settle": 8.0}    # Step timeouts
         self._session = None
         self._lk = threading.Lock()
 
@@ -2608,7 +2564,7 @@ class BluetoothCtl:
             return {"present": False, "error": None, "blocked": blocked, "raw": text, "missing": True}
         if re.search(r"AccessDenied|Access denied", text):
             return {"present": None, "error": text, "code": "bt_permission", "blocked": blocked, "raw": text}
-        # bluetoothd 没在跑：bluetoothctl 会一直「Waiting to connect to bluetoothd...」直到超时（审查 17：不是没有适配器）
+        # Detect bluetoothd down before waiting on adapter
         if re.search(r"Waiting to connect to bluetoothd|org\.bluez was not provided|ServiceUnknown", text):
             return {"present": None, "error": text[-400:], "code": "bluez_down", "blocked": blocked, "raw": text[-400:]}
         if "No default controller" in text or "Controller" not in text:
@@ -2640,11 +2596,11 @@ class BluetoothCtl:
         return device_from_props(mac, parse_props(out))
 
     def reconnect(self, mac, timeout=5.0):
-        """只恢复已配对目标的连接；不注册配对代理、不扫描或删除已有绑定。"""
+        """Reconnect already-paired controller without registering agent or scanning."""
         if not isinstance(mac, str) or not MAC_RE.fullmatch(mac):
-            raise BtError("other", "手柄地址不对")
+            raise BtError("other", "Invalid controller MAC address")
         if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
-            raise BtError("timeout", "没有剩余的重连时间")
+            raise BtError("timeout", "No reconnect time remaining")
         return self._simple(rf"Connection successful|AlreadyConnected|Device {re.escape(mac)} Connected: yes",
                             "connect", mac, timeout=min(timeout, self.t["connect"]))
 
@@ -2654,7 +2610,7 @@ class BluetoothCtl:
                 s = BtSession(self._session_argv(), self.spawn)
                 self._session = s
                 try:
-                    # 启动时可能自带注册了一个默认代理：先撤掉（搜索不需要代理）
+                    # Unregister any default agent on startup
                     s.cmd("agent off", r"Agent unregistered|No agent is registered|Agent is not registered|not registered",
                           fail=None, timeout=2.0)
                 except BtError:
@@ -2666,7 +2622,7 @@ class BluetoothCtl:
         try:
             s.cmd("scan on", r"Discovery started|Discovering: yes", timeout=8.0)
         except BtError:
-            self.close()          # 起不来就把这个会话关掉，下次重新开（审查 6）
+            self.close()          # Close failed session so next attempt starts fresh
             raise
 
     def scan_stop(self):
@@ -2678,7 +2634,7 @@ class BluetoothCtl:
                 pass
 
     def devices(self):
-        """会话里看到的设备；名字、类别这些第一次见到时问一次 info。"""
+        """Return discovered devices, querying info on first sight."""
         s = self._session
         if s is None:
             return []
@@ -2697,9 +2653,7 @@ class BluetoothCtl:
         return out
 
     def pair_device(self, mac, classic, cancel, step):
-        """一个会话做完。经典蓝牙（Switch Pro 类）：pair → trust → connect（10-15 G50 成功的顺序）；
-        LE（Xbox）：先 connect（连上会自己绑定，最多等 5 秒）→ 没绑上再 pair → trust → 再 connect（bluez.rs:713-795）。
-        成功的标志都锁在这个 MAC 上（审查 11）：别的设备的 Paired / Connected 不算。"""
+        """Pair, trust, and connect target MAC in one bluetoothctl session."""
         s = self._open()
         m = re.escape(mac)
         try:
@@ -2707,8 +2661,8 @@ class BluetoothCtl:
                 try:
                     s.cmd("agent NoInputNoOutput", r"Agent registered", fail=BT_FAIL + r"|already registered", timeout=5.0)
                 except BtError as e:
-                    # bluetoothctl 5.82 连上 bluetoothd 以后才自带注册默认代理：开会话时那句 agent off 撤早了（回「No agent is
-                    # registered」，随后它自己的代理才注册上），这里就撞上「Agent is already registered」（10-19 二号鸭）。撤掉再注册一次
+                    # bluetoothctl 5.82 may auto-register default agent after connect;
+                    # retry agent off -> agent NoInputNoOutput if already registered
                     if "already registered" not in (e.raw or ""):
                         raise
                     s.cmd("agent off", r"Agent unregistered", timeout=3.0)
@@ -2723,7 +2677,7 @@ class BluetoothCtl:
                     s.expect(rf"Device {m}", fail=None, timeout=self.t["find"], since=0, cancel=cancel)
                 except BtError as e:
                     if e.code == "timeout":
-                        raise BtError("not_found", f"搜了 {self.t['find']:g} 秒没看到 {mac}：手柄退出配对状态了？") from None
+                        raise BtError("not_found", f"Did not see {mac} within {self.t['find']:g}s; still in pairing mode?") from None
                     raise
             try:
                 s.cmd("scan off", r"Discovery stopped|Discovering: no", fail=None, timeout=5.0)
@@ -2731,7 +2685,7 @@ class BluetoothCtl:
                 pass
             ok_pair = rf"Pairing successful|AlreadyExists|Device {m} (Paired|Bonded): yes"
             if not classic:
-                step("connect", "doing", "Xbox 这类先连接，连上会自己配对")
+                step("connect", "doing", "Connecting LE controller (auto-bonds on connect)")
                 try:
                     s.cmd(f"connect {mac}", rf"Connection successful|AlreadyConnected|Device {m} Connected: yes",
                           timeout=self.t["connect"], cancel=cancel)
@@ -2757,11 +2711,11 @@ class BluetoothCtl:
             try:
                 s.cmd(f"connect {mac}", ok_conn, timeout=self.t["connect"], cancel=cancel)
             except BtError as e:
-                # 刚配完，经典蓝牙手柄自己也在往鸭子这边连：BlueZ 回 InProgress（br-connection-busy，10-19 二号鸭 G50 Pro）。
-                # 先等它自己连上；等不到再连一次
+                # Classic controllers may initiate connection right after pairing (InProgress)
+                # Wait briefly before issuing connect
                 if e.code != "busy":
                     raise
-                step("connect", "doing", "手柄自己也在连，等它一下")
+                step("connect", "doing", "Controller connecting, waiting...")
                 try:
                     s.expect(rf"Device {m} Connected: yes", fail=None, timeout=self.t["settle"], since=mark, cancel=cancel)
                 except BtError as e2:
@@ -2793,7 +2747,7 @@ class BluetoothCtl:
 
 def default_pad(log, configd_addr="unix:/run/configd.sock", robotd_addr="unix:/run/robotd.sock",
                 tap_addr="unix:/run/padd/pad.sock", bt_prefix=(), state_dir=None):
-    """鸭子上的默认接法（app.py / __main__.py 用）。没有 bluetoothctl 的机器（电脑）不给蓝牙端口。"""
+    """Default port wiring on the duck (omits BluetoothPort if bluetoothctl is absent)."""
     bt = BluetoothCtl(prefix=bt_prefix) if shutil.which("bluetoothctl") else None
     from .audio_interaction import AudioClient
     return PadOps(log, configd=ConfigdPort(configd_addr), bt=bt, tap=PaddTap(tap_addr, log=log),

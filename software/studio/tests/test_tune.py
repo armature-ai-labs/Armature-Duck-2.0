@@ -1,7 +1,7 @@
-"""「运行和调参」（调参方案 v2 T1–T3，只读）的测试：启动四步跟踪、待办补充、调参卡的三张卡、模型、鸭子档案、页面推送。
+"""'item' (item v2 T1–T3, item)item: item, item, item, item, item, item.
 
-假文件树：dev/duckfs.py（我们自己造的最小 JSON / TOML）；假 robotd：dev/fake_robotd.py + dev/fake_tune.py。
-真机三段夹具（策略开着站着 / 在走 / 坐着）还没录：策略开着时的 active_* 由 fake_tune 按录的数合成。
+item: dev/duckfs.py (item JSON / TOML)item robotd: dev/fake_robotd.py + dev/fake_tune.py.
+item (item / item / item)item: item active_* item fake_tune item.
 """
 import asyncio
 import json
@@ -29,7 +29,7 @@ FIXTURE = HERE / "fixtures" / "now-20261018.jsonl"
 
 
 class StubRd:
-    """不连网的 Robotd：Sample 里直接放假 robotd 那份数据。"""
+    """item Robotd: Sample item robotd item."""
 
     def __init__(self, fake, log, present=True):
         self.log = log
@@ -56,7 +56,7 @@ class StubRd:
 
 def report(*statuses, details=None):
     details = details or {}
-    return {"steps": {str(i + 1): {"status": s, "detail": details.get(i + 1, f"第 {i + 1} 步的话")}
+    return {"steps": {str(i + 1): {"status": s, "detail": details.get(i + 1, f"item {i + 1} item")}
                       for i, s in enumerate(statuses) if s}, "build": "b"}
 
 
@@ -67,10 +67,10 @@ class TrackTest(unittest.TestCase):
         t.update(report("success", "starting"), now=10.0)
         self.assertEqual(t.current()[0], "2")
         self.assertFalse(t.done)
-        t.update(report("success", "starting"), now=11.0)                # 没变：时间不动
+        t.update(report("success", "starting"), now=11.0)                # item: item
         self.assertEqual(t.steps["2"]["at"], 10.0)
-        t.update(report("success", "waiting", details={2: "等反馈"}), now=12.0)
-        self.assertEqual(t.steps["2"]["at"], 12.0)                       # 状态变了：记新时间
+        t.update(report("success", "waiting", details={2: "item"}), now=12.0)
+        self.assertEqual(t.steps["2"]["at"], 12.0)                       # item: item
         self.assertEqual(t.steps["1"]["at"], 10.0)
         t.update(report("success", "success", "success", "success"), now=13.0)
         self.assertTrue(t.done)
@@ -81,15 +81,15 @@ class TrackTest(unittest.TestCase):
 
     def test_failed_step_is_terminal(self):
         t = S.StartupTrack()
-        t.update(report("success", "success", "failed", details={3: "模型坏了"}))
+        t.update(report("success", "success", "failed", details={3: "item"}))
         self.assertTrue(t.done)
         self.assertEqual(t.current()[0], "3")
 
     def test_policy_off_detected_only_on_step3_success(self):
         t = S.StartupTrack()
-        t.update(report("success", "success", "success", "success", details={3: "策略按配置关闭"}))
+        t.update(report("success", "success", "success", "success", details={3: "policy disabled"}))
         self.assertTrue(t.policy_off())
-        t.update(report("success", "success", "starting", details={3: "策略按配置关闭"}))
+        t.update(report("success", "success", "starting", details={3: "policy disabled"}))
         self.assertFalse(t.policy_off())
 
     def test_garbage_ignored(self):
@@ -114,44 +114,44 @@ class TodoTest(unittest.TestCase):
     def test_starting_hint_names_the_step(self):
         rd = self.rd("starting")
         rd.startup.reset(rd.hello.at)
-        rd.startup.update(report("success", "waiting", details={2: "等全部关节的新鲜反馈；没发目标"}))
+        rd.startup.update(report("success", "waiting", details={2: "item"}))
         todo = summarize(rd, {})["todo"]
         it = next(i for i in todo if i["key"] == "starting")
-        self.assertIn("第 2/4 步（舵机总线和 IMU）：等全部关节的新鲜反馈", it["hint"])
-        self.assertIn("原文：torque readback", it["hint"])            # busStatus.error 接在后面
+        self.assertIn("Step 2/4 (Servo Bus & IMU): item", it["hint"])
+        self.assertIn("raw: torque readback", it["hint"])            # busStatus.error item
 
     def test_old_track_from_previous_hello_is_ignored(self):
         rd = self.rd("starting")
-        rd.startup.reset(rd.hello.at - 100)                               # 上一次 hello 的
-        rd.startup.update(report("success", "waiting", details={2: "旧的"}))
+        rd.startup.reset(rd.hello.at - 100)                               # item hello item
+        rd.startup.update(report("success", "waiting", details={2: "item"}))
         it = next(i for i in summarize(rd, {})["todo"] if i["key"] == "starting")
-        self.assertNotIn("旧的", it["hint"])
+        self.assertNotIn("item", it["hint"])
 
     def test_walk_unloaded_todo(self):
         rd = self.rd("walk_unloaded")
         rd.startup.reset(rd.hello.at)
-        rd.startup.update(report("success", "success", "success", "success", details={3: "策略按配置关闭"}))
+        rd.startup.update(report("success", "success", "success", "success", details={3: "disabled by config"}))
         todo = summarize(rd, {})["todo"]
         self.assertEqual(todo[0]["key"], "walk_unloaded")
         self.assertEqual(todo[0]["level"], "error")
-        self.assertIn("策略按配置关闭", todo[0]["hint"])
+        self.assertIn("loaded_models", todo[0]["hint"])
 
     def test_walk_slot_error_named(self):
         f = FakeRobotd(FIXTURE, posture="holding")
         f.policies = json.loads(json.dumps(f.policies))
-        f.policies["slots"][0]["error"] = "执行配置坏了"
+        f.policies["slots"][0]["error"] = "item"
         rd = StubRd(f, self.log)
         todo = summarize(rd, {})["todo"]
-        self.assertIn("走路槽加载失败：执行配置坏了", todo[0]["hint"])
+        self.assertIn("Walk slot failed to load: item", todo[0]["hint"])
 
     def test_no_walk_unloaded_when_fine_paused_or_disabled(self):
         rd = self.rd("holding")
         self.assertFalse(any(i["key"] == "walk_unloaded" for i in summarize(rd, {})["todo"]))
         rd2 = self.rd("walk_unloaded")
-        rd2.paused = "调舵机"
+        rd2.paused = "item"
         self.assertIsNone(S.walk_unloaded(rd2, rd2.policies.value, rd2.bus.value))
         rd3 = self.rd("walk_unloaded")
-        pol = dict(rd3.policies.value, enabled=False)                   # 配置里本来就关了策略：不算坏
+        pol = dict(rd3.policies.value, enabled=False)                   # item: item
         self.assertIsNone(S.walk_unloaded(rd3, pol, rd3.bus.value))
 
 
@@ -168,10 +168,10 @@ class TuneViewTest(unittest.TestCase):
         duckfs.build(self.root, **tree)
         f = FakeRobotd(FIXTURE, posture=posture)
         if fake_set:
-            f.dispatch.__self__  # noqa: B018 —— 只是确认是实例方法
+            f.dispatch.__self__  # noqa: B018 —— item
             asyncio.run(f.dispatch("fake.set", fake_set))
         rd = StubRd(f, self.log)
-        t = T.Tune(rd, self.log, self.tmp.name, root=self.root, duck={"label": "② 二号鸭"})
+        t = T.Tune(rd, self.log, self.tmp.name, root=self.root, duck={"label": "② item"})
         t.io()
         return t, rd, f
 
@@ -180,13 +180,13 @@ class TuneViewTest(unittest.TestCase):
         w = t.view()["feel"]["walk"]
         self.assertTrue(w["joint"])
         self.assertEqual(w["id"], duckfs.WALK)
-        self.assertEqual(w["values"]["action_scale"], {"file": 1.0, "loaded": 1.0})   # 不是 [policy] 的 0.7
+        self.assertEqual(w["values"]["action_scale"], {"file": 1.0, "loaded": 1.0})   # item [policy] item 0.7
         self.assertEqual(w["values"]["legs_lowpass"], {"file": 0.7, "loaded": 0.7})
         self.assertTrue(w["same"])
         self.assertEqual(w["default"], T.BUNDLED_WALK_DEFAULT)
         g = t.view()["feel"]["global"]
         self.assertEqual(g["action_scale"], 0.7)
-        self.assertIn("只有起坐用", g["note"])
+        self.assertIn("lowpass only applies to sit/stand", g["note"])
 
     def test_file_differs_from_what_main_program_uses(self):
         t, _, _ = self.make(exec_walk={"legs_lowpass": 0.6})
@@ -199,17 +199,17 @@ class TuneViewTest(unittest.TestCase):
         w = t.view()["feel"]["walk"]
         self.assertTrue(w["file_error"])
         self.assertFalse(w["file"])
-        self.assertEqual(w["loaded"]["action_scale"], 1.0)              # 主程序在用的照样显示
+        self.assertEqual(w["loaded"]["action_scale"], 1.0)              # item
 
     def test_default_from_orig_only_for_other_models(self):
         old = T.BUNDLED_WALK
         try:
-            T.BUNDLED_WALK = "0" * 32                                    # 假装走路模型不是随包那个
+            T.BUNDLED_WALK = "0" * 32                                    # item
             t, _, _ = self.make(orig=True)
             w = t.view()["feel"]["walk"]
-            self.assertEqual(w["default_src"], "第一次改之前的（.orig）")
+            self.assertEqual(w["default_src"], "Pre-edit backup (.orig)")
             t2, _, _ = self.make(orig=False)
-            self.assertIsNone(t2.view()["feel"]["walk"]["default"])        # 没有 .orig：不给默认（审查 T-R17）
+            self.assertIsNone(t2.view()["feel"]["walk"]["default"])        # item .orig: item (item T-R17)
         finally:
             T.BUNDLED_WALK = old
 
@@ -240,7 +240,7 @@ class TuneViewTest(unittest.TestCase):
         self.assertEqual(s["file"], {"kp": 12, "kd": 4, "torque_limit": 400})
         self.assertIsNone(s["loaded"])
         self.assertFalse(s["file_vs_loaded"])
-        self.assertEqual(s["effective"]["kp"], 5)                          # 主程序还没读到：生效的还是原版
+        self.assertEqual(s["effective"]["kp"], 5)                          # item: item
 
     def test_servo_loaded_and_warnings(self):
         p = {"kp": 12, "kd": 4, "torque_limit": 400}
@@ -248,12 +248,12 @@ class TuneViewTest(unittest.TestCase):
         s = t.view()["feel"]["servo"]
         self.assertTrue(s["file_vs_loaded"])
         self.assertEqual(s["effective"], p)
-        self.assertEqual(s["written_p"]["src"], "参数文件")
-        self.assertEqual(len(s["warn"]), 3)                                # P > 10、限力 < 500、D > 0
+        self.assertEqual(s["written_p"]["src"], "Parameter file")
+        self.assertEqual(len(s["warn"]), 3)                                # P > 10, item < 500, D > 0
 
     def test_servo_bad_file(self):
         t, _, _ = self.make(bad_servo='{"kp": "5", "kd": 0, "torque_limit": 1000}')
-        self.assertIn("格式不对", t.view()["feel"]["servo"]["file_error"])
+        self.assertIn("Invalid format", t.view()["feel"]["servo"]["file_error"])
         t2, _, _ = self.make(bad_servo="not json")
         self.assertTrue(t2.view()["feel"]["servo"]["file_error"])
 
@@ -261,17 +261,17 @@ class TuneViewTest(unittest.TestCase):
         t, _, _ = self.make(fake_set={"servo_parameters": "absent"})
         v = t.view()
         self.assertIs(v["cap"]["fork"], False)
-        self.assertIn("不支持改", v["cap"]["why"])
+        self.assertIn("does not expose", v["cap"]["why"])
         self.assertFalse(v["cap"]["can_edit"])
         t2, _, _ = self.make()
-        self.assertFalse(t2.view()["cap"]["can_edit"])                     # 这一版谁都不能改
-        self.assertIn("只看不改", t2.view()["cap"]["why"])
+        self.assertFalse(t2.view()["cap"]["can_edit"])                     # item
+        self.assertIn("Read-only mode", t2.view()["cap"]["why"])
 
     def test_regs_only_after_arm(self):
         t, _, _ = self.make(fake_set={"regs": None})
         s = t.view()["feel"]["servo"]
         self.assertIsNone(s["regs"])
-        self.assertIn("站起来", s["regs_why"])
+        self.assertIn("standing up", s["regs_why"])
 
     def test_pad_mouth_zero_is_flagged(self):
         t, _, _ = self.make()
@@ -285,7 +285,7 @@ class TuneViewTest(unittest.TestCase):
         self.assertFalse(p2["mouth_warn"])
         self.assertIsNone(p2["live"])
         t3, _, _ = self.make(no_pad_file=True)
-        self.assertEqual(t3.view()["feel"]["pad"]["current"], T.PAD_DEFAULT)   # 没有文件 = 默认 100% / 2.5
+        self.assertEqual(t3.view()["feel"]["pad"]["current"], T.PAD_DEFAULT)   # item = item 100% / 2.5
 
     def test_tomls_differ(self):
         t, _, _ = self.make(saved_differs=True)
@@ -298,10 +298,10 @@ class TuneViewTest(unittest.TestCase):
         m = t.view()["models"]
         rows = {r["slot"]: r for r in m["slots"]}
         self.assertEqual(rows["walk"]["rounds"], 9600)
-        self.assertEqual(rows["sitstand"]["rounds"], 10000)                # 老 manifest：检查点是个文件路径
-        self.assertEqual(rows["sitstand"]["buttons"], ["十字下"])
+        self.assertEqual(rows["sitstand"]["rounds"], 10000)                # item manifest: item
+        self.assertEqual(rows["sitstand"]["buttons"], ["D-Pad Down"])
         self.assertEqual(rows["kick_left"]["buttons"], ["LB"])
-        self.assertEqual(rows["sitstand"]["name"], "坐下 / 站起 10000 轮")   # 没有 model-info：取 management-profile
+        self.assertEqual(rows["sitstand"]["name"], "Sit / Stand 10000")   # item model-info: item management-profile
         self.assertIsNone(rows["stand"]["path"])
         self.assertTrue(rows["walk"]["loaded"])
         self.assertTrue(rows["ground_pick"]["unfiltered"])
@@ -312,20 +312,20 @@ class TuneViewTest(unittest.TestCase):
         self.assertEqual(rl["crouch"]["rounds"], 8000)
 
     def test_slot_error_and_change_error(self):
-        t, _, _ = self.make(fake_set={"slot_error": {"kick_left": "文件不在"}, "change_error": "重载没成"})
+        t, _, _ = self.make(fake_set={"slot_error": {"kick_left": "item"}, "change_error": "item"})
         m = t.view()["models"]
-        self.assertEqual(next(r for r in m["slots"] if r["slot"] == "kick_left")["error"], "文件不在")
-        self.assertEqual(m["change_error"], "重载没成")
+        self.assertEqual(next(r for r in m["slots"] if r["slot"] == "kick_left")["error"], "item")
+        self.assertEqual(m["change_error"], "item")
 
     def test_phase_words(self):
         t, rd, _ = self.make("commissioning")
-        self.assertEqual(t.view()["run"]["phase"]["word"], "调试模式")
+        self.assertEqual(t.view()["run"]["phase"]["word"], "Commissioning")
         t, rd, _ = self.make("starting")
-        self.assertEqual(t.view()["run"]["phase"]["word"], "等待总线设备响应")
+        self.assertEqual(t.view()["run"]["phase"]["word"], "Waiting for servo bus response")
         rd.present = False
-        self.assertEqual(t.view()["run"]["phase"]["word"], "主程序没在跑")
-        rd.present, rd.paused = True, "调舵机"
-        self.assertEqual(t.view()["run"]["phase"]["word"], "在调舵机")
+        self.assertEqual(t.view()["run"]["phase"]["word"], "robotd Not Running")
+        rd.present, rd.paused = True, "item"
+        self.assertEqual(t.view()["run"]["phase"]["word"], "Servo Tuning")
 
     def test_run_card_bits(self):
         t, _, _ = self.make()
@@ -334,7 +334,7 @@ class TuneViewTest(unittest.TestCase):
         self.assertEqual(r["guard"]["joint_tolerance_deg"], 5.0)
         self.assertEqual([w["id"] for w in r["bus"]["worst"]], [11, 10, 13])
         self.assertEqual(r["imu"]["source"], "lsm6dsv16x")
-        self.assertIn("不报", r["infer_note"])
+        self.assertIn("not reported", r["infer_note"])
         t2, _, _ = self.make("walk_unloaded")
         self.assertFalse(t2.view()["run"]["can_walk"])
         self.assertTrue(t2.view()["run"]["walk_unloaded"])
@@ -346,7 +346,7 @@ class TuneViewTest(unittest.TestCase):
         t._missed.clear()
         t._missed.extend([(base - 30, 100, 1000), (base, 130, 2500)])
         self.assertEqual(t._missed_per_min(base), 60.0)
-        rd.health.set(dict(h, control_loop=dict(h["control_loop"], missed=5, ticks=10)))   # 计数变小 = robotd 重启过
+        rd.health.set(dict(h, control_loop=dict(h["control_loop"], missed=5, ticks=10)))   # item = robotd item
         t.io()
         self.assertEqual(len(t._missed), 1)
 
@@ -363,7 +363,7 @@ class TuneViewTest(unittest.TestCase):
         self.assertTrue(c.get(p, T._json)["missing"])
         p.write_text('{"a": 1}', encoding="utf-8")
         self.assertEqual(c.get(p, T._json)["value"], {"a": 1})
-        p.write_text('{"a": 22}', encoding="utf-8")                        # 大小变了：重读
+        p.write_text('{"a": 22}', encoding="utf-8")                        # item: item
         self.assertEqual(c.get(p, T._json)["value"], {"a": 22})
         p.write_text("x" * 50, encoding="utf-8")
         self.assertIn("error", c.get(p, T._json, limit=10))
@@ -387,22 +387,22 @@ class TuneViewTest(unittest.TestCase):
         self.assertEqual(p["servo"]["effective"], {"kp": 5, "kd": 0, "torque_limit": 1000})
         self.assertEqual(p["walk_model"]["rounds"], 9600)
         self.assertEqual(len(p["servo"]["registers_before_arm"]), 15)
-        for bad in ({"total_g": -1}, {"total_g": 99999}, {"total_g": "重"}, {"foot": "x\ny"}, {"foot": "长" * 41}, "x"):
+        for bad in ({"total_g": -1}, {"total_g": 99999}, {"total_g": "item"}, {"foot": "x\ny"}, {"foot": "item" * 41}, "x"):
             with self.subTest(bad=bad):
                 with self.assertRaises(T.Refused):
                     t.save_body(bad)
-        out = t.save_body({"total_g": "806", "trunk_g": 300, "head_g": None, "foot": "硅胶"}, by="电脑 127.0.0.1")
+        out = t.save_body({"total_g": "806", "trunk_g": 300, "head_g": None, "foot": "item"}, by="PC 127.0.0.1")
         self.assertEqual(out["total_g"], 806.0)
-        self.assertEqual(t.profile()["body"]["foot"], "硅胶")
+        self.assertEqual(t.profile()["body"]["foot"], "item")
         saved = json.loads((Path(self.tmp.name) / T.BODY_FILE).read_text(encoding="utf-8"))
         self.assertEqual(saved["trunk_g"], 300.0)
         self.assertIsNone(saved["head_g"])
-        # 只读的 body 指令：给设置页重量表单预填
+        #  body : 
         got = asyncio.run(t.handle({"op": "body"}))
-        self.assertEqual((got["total_g"], got["foot"], got["head_g"]), (806.0, "硅胶", None))
+        self.assertEqual((got["total_g"], got["foot"], got["head_g"]), (806.0, "item", None))
 
     def test_view_without_files(self):
-        """鸭子上读不到任何文件（还没装 / 路径不对）：照样出一份，不抛。"""
+        """item (item / item): item, item."""
         f = FakeRobotd(FIXTURE, posture="holding")
         rd = StubRd(f, self.log)
         t = T.Tune(rd, self.log, self.tmp.name, root=Path(self.tmp.name) / "nothing")
@@ -416,7 +416,7 @@ class TuneViewTest(unittest.TestCase):
 
 
 class StartupLoopTest(unittest.IsolatedAsyncioTestCase):
-    """真 Robotd + 假 robotd：订阅、推进、关连接、老 robotd 不支持、robotd 重启后重来。"""
+    """item Robotd + item robotd: item, item, item, item robotd item, robotd item."""
 
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -441,24 +441,24 @@ class StartupLoopTest(unittest.IsolatedAsyncioTestCase):
         return False
 
     async def test_follows_steps_then_closes(self):
-        await self.fake.dispatch("fake.set", {"startup": report("success", "waiting", details={2: "等反馈"})})
+        await self.fake.dispatch("fake.set", {"startup": report("success", "waiting", details={2: "item"})})
         self.rd.start()
         self.assertTrue(await self.until(lambda: self.rd.startup.current()[0] == "2"))
         self.assertTrue(await self.until(lambda: getattr(self.fake, "startup_subs", 0) == 1))
         self.assertFalse(self.rd.startup.done)
         await self.fake.dispatch("fake.set", {"startup": report("success", "success", "success", "success")})
         self.assertTrue(await self.until(lambda: self.rd.startup.done))
-        self.assertTrue(await self.until(lambda: self.fake.startup_subs == 0))   # 四步都成功：连接关了
+        self.assertTrue(await self.until(lambda: self.fake.startup_subs == 0))   # item: item
         n = sum(1 for _, m in self.fake.calls if m == "hello")
         await asyncio.sleep(1.5)
-        self.assertEqual(self.fake.startup_subs, 0)                             # 同一次 hello 不再订阅
+        self.assertEqual(self.fake.startup_subs, 0)                             # item hello item
         self.assertEqual(sum(1 for _, m in self.fake.calls if m == "hello"), n)
 
     async def test_old_robotd_without_method(self):
         self.fake.errors["robot.startupSubscribe"] = {"code": -32601, "message": "method not found"}
         self.rd.start()
         self.assertTrue(await self.until(lambda: self.rd.startup.unsupported is not None))
-        self.assertIn("不报启动步骤", self.rd.startup.unsupported)
+        self.assertIn("does not report startup steps", self.rd.startup.unsupported)
 
     async def test_restart_starts_over(self):
         self.rd.start()
@@ -471,7 +471,7 @@ class StartupLoopTest(unittest.IsolatedAsyncioTestCase):
 
 
 class TuneHttpTest(unittest.IsolatedAsyncioTestCase):
-    """接进 Studio：总览 / 设置页才推 {t:'tune'}；/api/profile；tune.op save_body；诊断包里有调参快照。"""
+    """item Studio: item / item {t:'tune'}item/api/profileitemtune.op save_bodyitem."""
 
     async def asyncSetUp(self):
         import uvicorn
@@ -485,8 +485,8 @@ class TuneHttpTest(unittest.IsolatedAsyncioTestCase):
         self.s2, p2 = await self.fake.serve_tcp()
         self.rd = Robotd(f"tcp:127.0.0.1:{p1}", f"tcp:127.0.0.1:{p2}", log)
         root = duckfs.build(Path(self.tmp.name) / "duck")
-        self.tune = T.Tune(self.rd, log, str(Path(self.tmp.name) / "state"), root=root, duck={"label": "测试鸭"})
-        app = build_app(auth=self.auth, robotd=self.rd, log=log, web_dir=HERE.parent / "web", duck={"label": "测试鸭"},
+        self.tune = T.Tune(self.rd, log, str(Path(self.tmp.name) / "state"), root=root, duck={"label": "item"})
+        app = build_app(auth=self.auth, robotd=self.rd, log=log, web_dir=HERE.parent / "web", duck={"label": "item"},
                         state_dir=str(Path(self.tmp.name) / "state"), tune=self.tune)
         cfg = uvicorn.Config(app, host="127.0.0.1", port=0, ws="wsproto", http="h11", lifespan="on", log_level="critical")
         self.server = uvicorn.Server(cfg)
@@ -527,15 +527,15 @@ class TuneHttpTest(unittest.IsolatedAsyncioTestCase):
     async def test_profile_and_save_body_and_diag(self):
         from tests.test_http import http_call
         c = await self.ws("/settings")
-        await c.send({"t": "cmd", "id": "b1", "name": "tune.op", "args": {"op": "save_body", "body": {"total_g": 806, "foot": "硅胶"}}})
+        await c.send({"t": "cmd", "id": "b1", "name": "tune.op", "args": {"op": "save_body", "body": {"total_g": 806, "foot": "item"}}})
         await c.send({"t": "cmd", "id": "b2", "name": "tune.op", "args": {"op": "tune_servo"}})
         await c.pump(until=lambda: sum(1 for m in c.msgs if m.get("t") == "result") >= 2, timeout=5)
         res = {m["id"]: m for m in c.msgs if m.get("t") == "result"}
         self.assertTrue(res["b1"]["ok"], res)
         self.assertFalse(res["b2"]["ok"])
-        self.assertIn("只看不改", res["b2"]["reason"])
+        self.assertIn("Read-only mode", res["b2"]["reason"])
         c.close()
-        await asyncio.sleep(2.5)                                       # 等 hello、calibration-status、读完一次文件
+        await asyncio.sleep(2.5)                                       # item hello, calibration-status, item
         st, h, body = await asyncio.to_thread(http_call, self.port, "GET", "/api/profile")
         self.assertEqual(st, 200)
         self.assertIn("attachment", h["content-disposition"])
@@ -547,7 +547,7 @@ class TuneHttpTest(unittest.IsolatedAsyncioTestCase):
         import io
         raw = json.loads(zipfile.ZipFile(io.BytesIO(z)).read("robotd-raw.json"))
         self.assertIn("tune", raw)
-        self.assertEqual(raw["tune"]["files"]["pad_file"], "有")
+        self.assertEqual(raw["tune"]["files"]["pad_file"], "present")
 
 
 if __name__ == "__main__":

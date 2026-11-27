@@ -3,21 +3,21 @@ import { test } from 'node:test';
 import { parseUtterance, runAction } from '../web/m/actions.js';
 
 test('mobile voice rejects negated, quoted, and incomplete commands', () => {
-  for (const text of ['不要前滚翻', '别站起来', '鸭鸭不要点头', '他说鸭鸭坐下', '“前滚翻”',
-    '[unk] 前滚翻', '前滚翻 [unk]', '前滚翻好不好', '它在做前滚翻', '点头鸭鸭摇头',
-    '不要停', '别停下', '他说别走', '鸭鸭']) {
+  for (const text of ['do not roll', 'dont stand up', 'ducky do not nod', 'he said ducky sit', '"roulade"',
+    '[unk] roll', 'roll [unk]', 'should we roll', 'it is doing a roll', 'nod ducky shake',
+    'do not stop', 'dont stop', 'he said dont walk', 'ducky']) {
     assert.equal(parseUtterance(text).cmd, null, text);
   }
 });
 
 test('mobile voice keeps clear commands and intentional stops', () => {
-  for (const [text, cmd] of [['鸭鸭，请站起来。', 'stand'], ['低头捡东西', 'ground_pick'],
-    ['走一小步', 'step'], ['滚翻', 'roulade'], ['打招呼', 'greet'], ['点点头', 'nod'],
-    ['走', 'walk'], ['停下', 'stop'], ['别走', 'stop'], ['不要走', 'stop'], ['不走了', 'stop']]) {
+  for (const [text, cmd] of [['ducky, please stand up.', 'stand'], ['pick up', 'ground_pick'],
+    ['step forward', 'step'], ['roulade', 'roulade'], ['greet', 'greet'], ['nod', 'nod'],
+    ['walk', 'walk'], ['stop', 'stop'], ['halt', 'stop'], ['freeze', 'stop'], ['hold', 'stop']]) {
     assert.equal(parseUtterance(text).cmd, cmd, text);
   }
-  assert.equal(parseUtterance('点头', { requireWake: true }).cmd, null);
-  assert.equal(parseUtterance('鸭鸭点头', { requireWake: true }).cmd, 'nod');
+  assert.equal(parseUtterance('nod', { requireWake: true }).cmd, null);
+  assert.equal(parseUtterance('ducky nod', { requireWake: true }).cmd, 'nod');
 });
 
 function stepFixture(t, getPosture = () => 'policy', respond = () => undefined) {
@@ -55,10 +55,10 @@ test('phone step sends no movement before driving is confirmed', async (t) => {
 
 test('phone step reports dropped input and requests owner-only cleanup', async (t) => {
   const { calls, step } = stepFixture(t, undefined, ({ op }) => (
-    op === 'sticks' ? { ok: true, data: { dropped: '方向盘在别的页面' } } : undefined));
+    op === 'sticks' ? { ok: true, data: { dropped: 'item' } } : undefined));
   const result = await step();
   assert.equal(result.ok, false);
-  assert.match(result.error, /方向盘/);
+  assert.match(result.error, /item/);
   assert.deepEqual(calls.map(({ op }) => op), ['walk', 'sticks', 'stop']);
   assert.equal(calls[2].owned_only, true);
   assert.ok(calls[2].seq > calls[1].seq);
@@ -67,19 +67,19 @@ test('phone step reports dropped input and requests owner-only cleanup', async (
 test('phone step cleans up after a failed send and reports failed stops', async (t) => {
   let failSend = true;
   const { calls, step } = stepFixture(t, undefined, ({ op }) => {
-    if (op === 'sticks' && failSend) throw new Error('连接断开');
-    if (op === 'stop') return { ok: false, reason: '停下没发出去' };
+    if (op === 'sticks' && failSend) throw new Error('Connection lost');
+    if (op === 'stop') return { ok: false, reason: 'Stopitem' };
   });
   const first = await step();
   assert.equal(first.ok, false);
-  assert.match(first.error, /连接断开/);
+  assert.match(first.error, /Connection lost/);
   assert.deepEqual(calls.map(({ op }) => op), ['walk', 'sticks', 'stop']);
   const firstStopSeq = calls.at(-1).seq;
   failSend = false;
   calls.length = 0;
   const second = await step();
   assert.equal(second.ok, false);
-  assert.match(second.error, /停下没发出去/);
+  assert.match(second.error, /Stopitem/);
   assert.ok(calls[1].seq > firstStopSeq);
   assert.equal(calls.at(-1).op, 'stop');
 });
@@ -143,7 +143,7 @@ test('leaving the page during policy setup cancels before another motion request
   });
   const moving = step();
   posture = null;
-  setup.resolve({ ok: false, reason: '现在坐着' });
+  setup.resolve({ ok: false, reason: 'item' });
   assert.equal((await moving).ok, false);
   assert.deepEqual(calls.map(({ op }) => op), ['walk']);
 });

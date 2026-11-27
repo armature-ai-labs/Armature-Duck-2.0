@@ -55,10 +55,10 @@ def read_config(path):
     with os.fdopen(fd, "rb") as stream:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 1024 * 1024:
-            raise ValueError("配置文件的类型或大小不符合要求：" + path.name)
+            raise ValueError("Invalid config file type or size: " + path.name)
         data = stream.read(1024 * 1024 + 1)
         if len(data) > 1024 * 1024:
-            raise ValueError("配置文件过大")
+            raise ValueError("Config file too large")
         return data, st
 
 
@@ -74,10 +74,10 @@ def rpc(method):
         with s.makefile("rb") as reply:
             line = reply.readline(4 * 1024 * 1024 + 1)
         if len(line) > 4 * 1024 * 1024 or not line.endswith(b"\n"):
-            raise ValueError("主程序状态回复不完整")
+            raise ValueError("Incomplete robotd status reply")
         r = json.loads(line)
         if "error" in r:
-            raise ValueError("主程序未接受操作：" + str(r["error"].get("message", ""))[:200])
+            raise ValueError("robotd rejected operation: " + str(r["error"].get("message", ""))[:200])
         return r["result"]
 
 
@@ -103,18 +103,18 @@ def atomic(p, data, mode=0o600, owner=None):
 
 def parse_config(name, data):
     if len(data) > 1024 * 1024:
-        raise ValueError("单份配置过大")
+        raise ValueError("Single config entry too large")
     if name == CAMERA:
         if len(data) < 40 or data[:4] != b"\xd0\x0d\xfe\xed":
-            raise ValueError("相机设备树格式不正确")
+            raise ValueError("Invalid camera device tree format")
         return
     if name == TOF:
         if data.decode().replace("\r\n", "\n") != TOF_TEXT:
-            raise ValueError("ToF 启动配置不是受支持的硬件参数")
+            raise ValueError("Unsupported ToF startup hardware parameters")
         return
     v = tomllib.loads(data.decode()) if name.endswith(".toml") else json.loads(data)
     if not isinstance(v, (dict, list)):
-        raise ValueError("配置格式不正确")
+        raise ValueError("Invalid config format")
     return v
 
 
@@ -138,7 +138,7 @@ def export():
                 if len(d) < 2 * 1024 * 1024:
                     files["source/" + str(rel).replace("\\", "/")] = d
     if sum(map(len, files.values())) > MAX:
-        raise ValueError("备份超过大小限制")
+        raise ValueError("Backup exceeds size limit")
     manifest = {
         "format": "microduck-backup/v1",
         "created": datetime.datetime.now().astimezone().isoformat(),
@@ -155,28 +155,28 @@ def export():
 
 
 def keys_subset(new, old, path=""):
-    # 恢复的 robotd.toml 只能是当前文件的子集：不允许备份凭空带进当前版本没有的配置项
+    # Restored robotd.toml must be a subset of current schema keys
     if isinstance(new, dict):
         if not isinstance(old, dict):
-            raise ValueError("备份里的配置结构与当前不一致：" + path)
+            raise ValueError("Backup config structure mismatch: " + path)
         for k, v in new.items():
             if k not in old:
-                raise ValueError("备份含有当前版本没有的配置项：" + path + k)
+                raise ValueError("Backup contains unknown config key: " + path + k)
             keys_subset(v, old[k], path + k + ".")
     elif isinstance(new, list):
         if not isinstance(old, list):
-            raise ValueError("备份配置的数组结构与当前不一致：" + path)
+            raise ValueError("Backup config array structure mismatch: " + path)
         if any(isinstance(v, (dict, list)) for v in new):
             if len(new) != len(old):
-                raise ValueError("备份配置的结构化数组与当前不一致：" + path)
+                raise ValueError("Backup config structured array mismatch: " + path)
             for i, v in enumerate(new):
                 keys_subset(v, old[i], path + str(i) + ".")
     elif isinstance(old, (dict, list)):
-        raise ValueError("备份配置的结构与当前不一致：" + path)
+        raise ValueError("Backup config structure mismatch: " + path)
 
 
 def prune_imports(keep=2):
-    # 每次恢复前的旧配置里有 API Key：只留最近几份，其余删掉
+    # Keep only recent pre-restore backups containing API keys
     root = pathlib.Path("/var/backups")
     old = sorted(root.glob("microduck-import-*"), key=lambda p: p.name)[:-keep] if keep else []
     for p in old:
@@ -185,15 +185,15 @@ def prune_imports(keep=2):
 
 def load(data):
     if len(data) > MAX:
-        raise ValueError("备份文件过大")
+        raise ValueError("Backup archive too large")
     z = zipfile.ZipFile(io.BytesIO(data))
     infos = z.infolist()
     names = [x.filename for x in infos]
     if len(names) != len(set(names)) or len(names) > 500 or sum(x.file_size for x in infos) > MAX:
-        raise ValueError("备份包结构或解压大小不正确")
+        raise ValueError("Invalid backup archive structure or uncompressed size")
     for n in names:
         if n.startswith("/") or ".." in pathlib.PurePosixPath(n).parts or "\\" in n:
-            raise ValueError("备份路径不正确")
+            raise ValueError("Invalid backup path")
     m = json.loads(z.read("manifest.json"))
     expected = m.get("files")
     if (
@@ -201,28 +201,28 @@ def load(data):
         or not isinstance(expected, dict)
         or set(names) != set(expected) | {"manifest.json"}
     ):
-        raise ValueError("不是支持的鸭子备份文件")
+        raise ValueError("Unsupported duck backup archive")
     restore = {}
     skipped = []
     for n, h in expected.items():
         d = z.read(n)
         if hashlib.sha256(d).hexdigest() != h:
-            raise ValueError("备份校验失败：" + n)
+            raise ValueError("Backup verification failed: " + n)
         if n == CAMERA:
             skipped.append(n)
-            continue  # 相机设备树内核启动时加载，不通过网页恢复，只导出
+            continue  # Camera DT is loaded at kernel boot; export-only
         if n in CONFIG:
             v = parse_config(n, d)
             if n.endswith("robotd.toml"):
                 if not CONFIG[n].exists():
-                    raise ValueError("本机缺少可核对的 robotd.toml，无法恢复")
+                    raise ValueError("Local robotd.toml missing; cannot verify restore")
                 original, _ = read_config(CONFIG[n])
                 keys_subset(v, tomllib.loads(original.decode()))
             restore[n] = d
         elif not n.startswith("source/"):
-            raise ValueError("备份包含不支持的配置")
+            raise ValueError("Backup contains unsupported config")
     if not restore:
-        raise ValueError("备份没有可恢复的配置")
+        raise ValueError("Backup contains no restorable config")
     return m, restore, skipped
 
 
@@ -275,7 +275,7 @@ def unit_state(unit):
     if proc.returncode == 0 and state in (("loaded", "active", "running"),
                                          ("loaded", "inactive", "dead"), ("loaded", "failed", "failed")):
         return state[1]
-    raise ValueError("控制服务状态未确认：" + unit)
+    raise ValueError("Control service state unconfirmed: " + unit)
 
 
 def studio_ready():
@@ -288,7 +288,7 @@ def studio_ready():
         with conn.makefile("rb") as stream:
             reply = stream.readline(8193)
     if len(reply) > 8192 or not reply.endswith(b"\n") or json.loads(reply).get("ready") is not True:
-        raise ValueError("网页控制、录制或标定仍在运行")
+        raise ValueError("Web drive, recording, or calibration still active")
 
 
 class RecoveryUnconfirmed(ValueError):
@@ -315,7 +315,7 @@ def verify_restarted(timeout=15):
             return
         good_since = (good_since if good_since is not None else now) if ready else None
         if now >= deadline:
-            raise ValueError("重启后主程序未能连续报告运行状态")
+            raise ValueError("robotd failed to report steady running state after restart")
         time.sleep(0.25)
 
 
@@ -343,9 +343,9 @@ def paused_inputs(poweroff):
 def final_check():
     # An updater waiting on our lock may already have published its intent.
     if UPDATING.exists() or any(unit_state(u) == "active" for u in INPUT_SERVICES):
-        raise ValueError("更新或手柄控制已启动，维护操作已取消")
+        raise ValueError("Update or gamepad control started; maintenance cancelled")
     if not off():
-        raise ValueError("主程序未确认卸力和临时增益恢复，维护操作已取消")
+        raise ValueError("robotd did not confirm torque-off and gain restore; maintenance cancelled")
 
 
 def new_metadata(name, path):
@@ -360,7 +360,7 @@ def new_metadata(name, path):
             os.chown(path.parent, account.pw_uid, account.pw_gid)
         info = path.parent.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != account.pw_uid or info.st_mode & 0o022:
-            raise ValueError("手柄映射目录的身份或权限不正确")
+            raise ValueError("Invalid gamepad mapping directory owner/permissions")
         return 0o600, (account.pw_uid, account.pw_gid)
     if path.parent == STATE:
         info = STATE.stat()
@@ -370,18 +370,23 @@ def new_metadata(name, path):
         return 0o644, (0, grp.getgrnam("robot").gr_gid)
     if name == TOF:
         return 0o644, (0, 0)
-    raise ValueError("缺少恢复目标的权限配置")
+    raise ValueError("Missing restore target permission config")
 
 
 def main():
     if len(sys.argv) != 2:
-        raise ValueError("操作不正确")
+        raise ValueError("Invalid action")
     op = sys.argv[1]
     if op == "export":
         export()
         return
     if op in ["preview", "restore"]:
-        m, files, skipped = load(sys.stdin.buffer.read(MAX + 1))
+        raw = sys.stdin.buffer.read(MAX + 1)
+        if raw.strip() == b"RESTART_STUDIO":
+            systemctl("restart", "microduck-studio")
+            print(json.dumps({"ok": True, "restarted": True}))
+            return
+        m, files, skipped = load(raw)
         if op == "preview":
             print(
                 json.dumps(
@@ -399,7 +404,7 @@ def main():
             return
         with paused_inputs(poweroff=False):
             if not off():
-                raise ValueError("请先扶稳鸭子并卸力，再导入备份")
+                raise ValueError("Support the duck and release torque before importing backup")
             b = pathlib.Path(
                 tempfile.mkdtemp(
                     prefix="microduck-import-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S-"),
@@ -458,12 +463,12 @@ def main():
                         if state == "active":
                             final_check()
                         elif state not in ("inactive", "failed", "retrying"):
-                            raise ValueError("主程序状态未知")
+                            raise ValueError("Unknown robotd status")
                         systemctl("restart", "robotd.service", *(["tofd.service"] if TOF in files else []))
                         verify_restarted()
                         systemctl("restart", "microduck-studio.service")
                     except Exception as recovery:
-                        raise RecoveryUnconfirmed("原配置已写回，主程序恢复未确认。手柄仍暂停，请检查主程序日志。") from recovery
+                        raise RecoveryUnconfirmed("Original config restored, but robotd recovery unconfirmed. Gamepad paused; check robotd logs.") from recovery
                 raise
         try:
             prune_imports(2)
@@ -478,14 +483,14 @@ def main():
             deadline = time.monotonic() + 8
             while not off():
                 if time.monotonic() >= deadline:
-                    raise ValueError("卸力或增益恢复未确认，尚未安排关机")
+                    raise ValueError("Torque-off or gain restore unconfirmed; shutdown not scheduled")
                 time.sleep(0.1)
             os.sync()
             final_check()
             systemctl("--no-block", "poweroff")
         print(json.dumps({"ok": True, "scheduled": True}))
         return
-    raise ValueError("操作不支持")
+    raise ValueError("Unsupported operation")
 
 
 RESULTS = pathlib.Path("/var/lib/microduck-maintenance-results")
@@ -494,13 +499,13 @@ RESULTS = pathlib.Path("/var/lib/microduck-maintenance-results")
 def restore_with_receipt():
     raw = sys.stdin.buffer.readline(34)
     if not re.fullmatch(b"[0-9a-f]{32}\n", raw):
-        raise ValueError("缺少有效的恢复编号")
+        raise ValueError("Missing valid restore token")
     request_id = raw[:-1].decode("ascii")
     RESULTS.mkdir(mode=0o755, exist_ok=True)
     RESULTS.chmod(0o755)  # web service can read receipts under a restrictive unit UMask
     target = RESULTS / (request_id + ".json")
     if target.exists():
-        raise ValueError("这个恢复编号已经使用过，请读取原来的恢复结果")
+        raise ValueError("Restore token already consumed; read previous result")
     for old in sorted(RESULTS.glob("*.json"), key=lambda p: p.stat().st_mtime_ns)[:-19]:
         old.unlink()
 
@@ -513,7 +518,7 @@ def restore_with_receipt():
     try:
         result = main()
     except Exception as exc:
-        save("failed", ok=False, error=str(exc)[:300] if isinstance(exc, ValueError) else "恢复未完成，请查看维护日志")
+        save("failed", ok=False, error=str(exc)[:300] if isinstance(exc, ValueError) else "Restore incomplete; check maintenance logs")
         raise
     return save("completed", **result)
 
@@ -531,7 +536,7 @@ if __name__ == "__main__":
                     "ok": False,
                     "error": str(e)[:300]
                     if isinstance(e, ValueError)
-                    else "维护操作失败，请检查备份格式或服务日志",
+                    else "Maintenance failed; check backup format or service logs",
                 }
             )
         )

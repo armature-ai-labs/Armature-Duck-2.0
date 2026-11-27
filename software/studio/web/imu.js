@@ -1,62 +1,45 @@
-// IMU 页：看现在的姿态、选芯片、站着校安装方向。
-// 用户 10-18：「开启采集读数，官方站姿的时候收集左移右移前移后移，让代码自己去校准，校准成功写进去保存；旁边有鸭子的 3D」；
-// 接进 Studio 以后又定了流程：「点开始采集，采集开始，然后再点采集结束，采集完了，然后自动化校准」「大家装的都不一样，需要重新 offset 一下」。
-//
-// - 一个大按钮三种状态：开始采集 → 采集中…（点这里结束）→ 正在算… → 出结果。
-// - 采集中：先在桌上静止 3 秒；然后前、后、左、右各倾一次（顺序随便），每一步先端平停半秒当零点，再倾、停 1 秒。
-//   3D 上一条弯箭头示范下一步往哪倾；做够一个方向，那个方向的圆点亮、响一声短的（Web Audio 自己合成，能静音）。
-//   五步齐了自动结束；中途点结束，缺哪步就说哪步，接着采或重来。
-// - 算完：3D 变成「校准前 / 校准后」两只并排，竖直参考线 + 大字倾角，下面写差了几度；再下面是写入（后端现在拒，上鸭子才接）。
-//   完整站着校完、跟主程序现在用的方向差 < 2°、站姿倾斜 ≤ 5°：后端给总览的上手清单记一笔「核对过」（res.check；只是记录，
-//   不往鸭子写任何东西：总览重排审查 O4）。
-//   没过：写原因，只让人补做没过的那几步（后端回的 redo）。
-// - 「停住了没有」「端平的那一下」两条规则跟 studio/imu_calib.py 的 find_hold / find_ref 一句一句对应，参数同名（RULES 上半截）；
-//   前端只是更严（倾 ≥12°、≤30°、停满 1 秒、方向离前后左右之一 ≤35°），前端放行的后端一定收。
-//   方向由后端算：link.cmd('imu.op', {op:'solve', samples})，samples 是平铺列表 [{step, t, g}]。
-//   端到端测试：tests/imu_wizard_e2e.mjs 喂读数给这里的向导，tests/test_imu_wizard_e2e.py 把采到的交给 Python 算。
-// - 后端（studio/imu.py）接 solve / coarse-capture / verify：出厂标定模式下用 busStatus.last_sample.imu
-//   采「静止 + 前倾」，算完交给主程序的 verify-imu（摆正 ≤5°，20 秒内往前低头 15–30°）写进标定文件。
-//   总线板卡由主程序启动时自动识别；I²C 芯片检测仍用 microduck-firstboot。
+// IMU Calibration & Diagnostics page: live attitude, chip profile selection, coarse & full standing calibration.
+// Backend: studio/imu.py & studio/imu_calib.py.
 import { html, useState, useEffect, useLayoutEffect, useRef } from './vendor/preact-htm.module.js';
 import { Duck3D } from './duck3d.js';
 import { TwoStep } from './confirm.js';
 import { imuDiagnosticCopy } from './startup-status.js';
 
 const RULES = {
-  // ---- 跟 imu_calib.py RULES 同名同值（改一边就要改另一边，端到端测试会抓） ----
+  // ---- Must match studio/imu_calib.py RULES verbatim (verified by E2E tests) ----
   still_min_n: 15,
   still_max_spread_deg: 1.5,
-  level_deg: 5,              // 端平：离桌上静止这么多以内
-  ref_min_n: 5,              // 端平至少连续这么多个读数
-  ref_spread_deg: 1.5,       // 端平时自己最多晃这么多
-  hold_band_deg: 1.8,        // 停住段：跟最后一个读数差这么多以内（单个乱跳读数跳过）
-  // ---- 前端自己的（比后端严） ----
-  still_s: 3.0,              // 静止采 3 秒
-  hold_min_n: 8,             // 后端 5
-  hold_s: 1.0,               // 停满 1 秒算这个方向做够了
-  tilt_go_deg: 12,           // 后端最少 10°
+  level_deg: 5,
+  ref_min_n: 5,
+  ref_spread_deg: 1.5,
+  hold_band_deg: 1.8,
+  // ---- Frontend-only thresholds (stricter than backend) ----
+  still_s: 3.0,
+  hold_min_n: 8,
+  hold_s: 1.0,
+  tilt_go_deg: 12,
   tilt_target_deg: 15,
-  tilt_max_deg: 30,          // 后端最多 35°
-  dir_max_deg: 35,           // 倾的方向离前后左右之一（按现在的方向）≤ 这么多才认
+  tilt_max_deg: 30,
+  dir_max_deg: 35,
   stale_ms: 1000,
-  dedupe_ms: 40,             // 没有 state_t_ns 时：两帧的「生成时间」差这么少，当成同一个读数
-  max_step_n: 600,           // 每段最多留这么多个读数（10 Hz 下 1 分钟）
+  dedupe_ms: 40,
+  max_step_n: 600,
 };
 
 const STEPS = ['still', 'fwd', 'back', 'left', 'right'];
 const TILTS = ['fwd', 'back', 'left', 'right'];
-// dir：往这边倾时重力偏向哪（按「现在的方向」，从机身 +x 起逆时针，度）。只用来认方向、画箭头，不参与计算
+// dir: gravity direction relative to body +X (CCW degrees). Used for directional guidance only.
 const STEP = {
-  still: { cn: '静止站好', short: '静止' },
-  fwd: { cn: '前倾', short: '前', dir: 0, how: '头那边往下' },
-  back: { cn: '后倾', short: '后', dir: 180, how: '屁股那边往下' },
-  left: { cn: '左倾', short: '左', dir: 90, how: '鸭子自己的左边往下（站在它后面看，就是你的左边）' },
-  right: { cn: '右倾', short: '右', dir: -90, how: '鸭子自己的右边往下（站在它后面看，就是你的右边）' },
+  still: { cn: 'Still', short: 'Still' },
+  fwd: { cn: 'Pitch Forward', short: 'Fwd', dir: 0, how: 'nose down' },
+  back: { cn: 'Pitch Back', short: 'Back', dir: 180, how: 'tail down' },
+  left: { cn: 'Roll Left', short: 'Left', dir: 90, how: 'robot left side down' },
+  right: { cn: 'Roll Right', short: 'Right', dir: -90, how: 'robot right side down' },
 };
-const DIRV = { fwd: [1, 0, 0], back: [-1, 0, 0], left: [0, 1, 0], right: [0, -1, 0] };   // 机身系（= 3D 场景的世界系）
+const DIRV = { fwd: [1, 0, 0], back: [-1, 0, 0], left: [0, 1, 0], right: [0, -1, 0] };
 
-const CHIP_CN = { bus: '总线小板（ID 200）', bno08x: 'BNO085（I²C）', lsm6dsv16x: 'LSM6DSV16X（I²C）' };
-const BUS_BOARD_CN = { ft6: 'FT6', imu_to_dxl: 'IMU-to-DXL', sflp_124_12: 'SFLP 124/12', qinmo: 'Qinmo（已配置）' };
+const CHIP_CN = { bus: 'Bus IMU (ID 200)', bno08x: 'BNO085 (I²C)', lsm6dsv16x: 'LSM6DSV16X (I²C)' };
+const BUS_BOARD_CN = { ft6: 'FT6', imu_to_dxl: 'IMU-to-DXL', sflp_124_12: 'SFLP 124/12', qinmo: 'Qinmo (Configured)' };
 const BUS_PROTOCOL_CN = { feetech: 'Feetech', dxl2: 'Dynamixel 2.0' };
 const unsupportedProfile = info => info && info.profile !== undefined && !['legacy', 'qinmo'].includes(info.profile);
 const unsupportedTransport = info => info && (!['feetech', 'dxl2'].includes(info.protocol) || unsupportedProfile(info));
@@ -66,8 +49,8 @@ function chipLabel(imu, live = true, diagnosticElapsed = 0) {
   const diagnostic = imuDiagnosticCopy(imu?.diagnostic, live, diagnosticElapsed);
   if (diagnostic.board) return diagnostic.board;
   const info = imu.imu_bus;
-  if (imu?.profile_error || unsupportedTransport(info)) return 'IMU 协议 / 类型待确认';
-  return info ? `${BUS_BOARD_CN[info.board] || info.board || '总线小板'} · ${BUS_PROTOCOL_CN[info.protocol] || info.protocol}（ID 200）`
+  if (imu?.profile_error || unsupportedTransport(info)) return 'IMU Protocol / Profile Unconfirmed';
+  return info ? `${BUS_BOARD_CN[info.board] || info.board || 'Bus IMU'} · ${BUS_PROTOCOL_CN[info.protocol] || info.protocol} (ID 200)`
     : CHIP_CN.bus;
 }
 function imuContext(mode, imu) {
@@ -76,7 +59,7 @@ function imuContext(mode, imu) {
     imu?.redo?.session_id || null, !!imu?.redo?.active]);
 }
 
-// ---------------- 小算术（跟 imu_calib.py 同一套） ----------------
+// ---------------- Vector Math (matches imu_calib.py) ----------------
 
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -88,14 +71,12 @@ const rad = (d) => d * Math.PI / 180;
 const angle = (a, b) => { const ua = unit(a), ub = unit(b); return ua && ub ? deg(Math.acos(Math.max(-1, Math.min(1, dot(ua, ub))))) : null; };
 const meanDir = (vs) => (vs.length ? unit(vs.reduce((s, v) => [s[0] + v[0], s[1] + v[1], s[2] + v[2]], [0, 0, 0])) : null);
 const spread = (vs) => { const m = meanDir(vs); return m ? Math.max(0, ...vs.map((v) => angle(v, m) ?? 0)) : 0; };
-// 90% 分位（imu_calib.spread_p90_deg）：静止那一步用，一两帧乱跳不算晃
 const spreadP90 = (vs) => {
   const m = meanDir(vs);
   if (!m) return 0;
   const ds = vs.map((v) => angle(v, m) ?? 0).sort((a, b) => a - b);
   return ds[Math.floor(0.9 * (ds.length - 1))];
 };
-// imu_calib.trimmed_mean_dir：去掉离平均最远的 10% 再平均（静止那一步定「上」用）
 const trimmedMeanDir = (vs) => {
   const m = meanDir(vs);
   if (!m) return null;
@@ -105,7 +86,7 @@ const trimmedMeanDir = (vs) => {
 const okVec = (g) => Array.isArray(g) && g.length === 3 && g.every((x) => typeof x === 'number' && Number.isFinite(x));
 const DOWN = [0, 0, -1];
 
-/** 相对 g0 倾了多少度、往哪边（在 g0 定的水平面里从 +x 起逆时针，度）。跟 imu_calib.tilt_of 一样。 */
+/** Tilt angle (deg) and azimuth relative to g0 (CCW from +X). Matches imu_calib.tilt_of. */
 function tiltOf(g0, g) {
   const t = angle(g0, g);
   const up = [-g0[0], -g0[1], -g0[2]];
@@ -128,9 +109,9 @@ function qRotate(q, v) {
 const fmt = (v, d = 1) => (typeof v === 'number' && Number.isFinite(v) ? v.toFixed(d) : '—');
 const sgn = (v, d = 1) => (typeof v === 'number' && Number.isFinite(v) ? `${v > 0 ? '+' : ''}${v.toFixed(d)}` : '—');
 const dirDiff = (a, b) => Math.abs(((a - b) % 360 + 540) % 360 - 180);
-const names = (ks) => ks.map((k) => STEP[k].cn).join('、');
+const names = (ks) => ks.map((k) => STEP[k].cn).join(', ');
 
-// ---------------- 停住段、端平基准（imu_calib.py 的 _run_back / find_hold / find_ref，一句一句对应） ----------------
+// ---------------- Hold & Reference Detection (matches imu_calib.py) ----------------
 
 function runBack(gs, end, band) {
   const last = gs[end];
@@ -138,7 +119,7 @@ function runBack(gs, end, band) {
   let skipped = 0, j = end - 1;
   while (j >= 0) {
     if (angle(gs[j], last) <= band) { idx.push(j); j--; }
-    else if (j - 1 >= 0 && angle(gs[j - 1], last) <= band) { skipped++; j--; }   // 单个乱跳：跳过
+    else if (j - 1 >= 0 && angle(gs[j - 1], last) <= band) { skipped++; j--; }
     else break;
   }
   return { idx: idx.sort((a, b) => a - b), skipped };
@@ -166,14 +147,13 @@ function findRef(gs, g0, before) {
   return null;
 }
 
-// ---------------- 采集（状态放在 ref 里，每来一帧 st 喂一次） ----------------
-// phase：idle → collect →（齐了）solving → done / error；中途点结束、缺步 → short（接着采 / 重来）
+// ---------------- Sample Collection Wizard ----------------
 
 function freshWizard() {
   return { phase: 'idle', t0: 0, g0: null,
-    buf: { still: [], fwd: [], back: [], left: [], right: [] },          // 每个方向做够时，那一段读数（后端从里面找端平和停住）
+    buf: { still: [], fwd: [], back: [], left: [], right: [] },
     done: { still: false, fwd: false, back: false, left: false, right: false },
-    seg: [],                 // 上一个方向做够以后到现在的读数
+    seg: [],
     ref: null, level: 0, cand: null, inZone: false, repeat: null, needLevel: false,
     live: null, progress: 0, hold: 0, paused: null, moved: false, over: false,
     lastKey: null, lastBirth: null, events: [], missing: [], result: null, error: null };
@@ -182,17 +162,13 @@ function freshWizard() {
 const missingSteps = (W) => STEPS.filter((k) => !W.done[k]);
 const nextTodo = (W) => TILTS.find((k) => !W.done[k]) || null;
 
-/** 喂一帧。live：页面给的「跟鸭子的连接是不是实时的」（跟总览同一个判断）；没给就看 joints_age_ms。返回 true = 要重画。
- *  做够一个方向往 W.events 里放一条（'still' / 'fwd' … / 'all'），页面拿去响一声。 */
 function feed(W, st, live) {
   if (W.phase !== 'collect') return false;
   const g = st?.gravity;
   const fresh = live !== false && st && st.joints_age_ms != null && st.joints_age_ms < RULES.stale_ms;
-  if (!okVec(g) || !fresh) { const p = W.paused; W.paused = '读数断了，等它回来（已采的不丢）'; return p !== W.paused; }
+  if (!okVec(g) || !fresh) { const p = W.paused; W.paused = 'Telemetry paused — waiting for connection (samples preserved)'; return p !== W.paused; }
   const gu = unit(g);
   if (!gu) return false;
-  // 去重：Studio 10 Hz 推状态，robot.state 也是 10 Hz，同一个读数可能推两次（robotd 卡住时会一直推同一个）。
-  // 有 state_t_ns（robot.state 的 t_ns）就认它；没有就用「生成时间」= 收到的时间 − joints_age_ms
   const birth = performance.now() - st.joints_age_ms;
   if (st.state_t_ns != null) {
     if (st.state_t_ns === W.lastKey) return false;
@@ -216,12 +192,10 @@ function feed(W, st, live) {
     }
     return true;
   }
-  // 倾的几步：顺序随便。读数一直攒在 seg 里，停住了就看往哪倾、这个方向做过没有
   const b = W.seg;
   b.push(s);
   if (b.length > RULES.max_step_n) b.splice(0, b.length - RULES.max_step_n);
   const gs = b.map((x) => x.g);
-  // 端平：最后 ref_min_n 个读数离桌上静止 ≤ level_deg、自己晃 ≤ ref_spread_deg → 下一次倾的零点（以最后一次为准）
   const n = RULES.ref_min_n;
   const tail = gs.slice(-n);
   const levelNow = tail.length === n && tail.every((v) => angle(W.g0, v) <= RULES.level_deg) && spread(tail) <= RULES.ref_spread_deg;
@@ -232,7 +206,6 @@ function feed(W, st, live) {
   W.live = tiltOf(W.ref || W.g0, gu);
   W.over = W.live.t > RULES.tilt_max_deg;
   W.hold = 0; W.inZone = false; W.cand = null; W.repeat = null; W.needLevel = false;
-  // 停住：跟后端同一套（停住段 + 它之前最后一次端平）；再加前端自己的：倾 12–30°、离前后左右之一 ≤35°、停满 1 秒
   const { idx } = findHold(gs);
   const hold = idx.map((i) => b[i]);
   const hm = meanDir(hold.map((x) => x.g));
@@ -262,12 +235,10 @@ function finishStep(W, k) {
   else W.events.push(k);
 }
 
-/** 开始采集（全新的一遍）。 */
 function startCollect(W, now) {
   Object.assign(W, freshWizard(), { phase: 'collect', t0: now });
 }
 
-/** 点「结束」：齐了就去算，缺步就停在 short，说缺哪几步。 */
 function endCollect(W) {
   if (W.phase !== 'collect') return;
   const miss = missingSteps(W);
@@ -275,30 +246,26 @@ function endCollect(W) {
   W.phase = 'short'; W.missing = miss;
 }
 
-/** 接着采（做过的留着）。 */
 function resumeCollect(W) {
   W.phase = 'collect'; W.seg = []; W.ref = null; W.paused = null; W.missing = []; W.result = null; W.error = null;
   if (!W.done.still) { W.buf.still = []; W.progress = 0; }
 }
 
-/** 只补做这几步（后端回的 redo）：清掉它们再接着采。 */
 function redoSteps(W, steps) {
   for (const k of steps) { if (k in W.done) { W.done[k] = false; W.buf[k] = []; } }
   resumeCollect(W);
 }
 
-/** 交给后端的读数：平铺列表，每个带 step（studio/imu.py 要列表） */
 function payload(W) {
   return STEPS.flatMap((k) => W.buf[k].map((x) => ({ step: k, t: x.t, g: x.g })));
 }
 
-// ---------------- 提示音（Web Audio 自己合成，很短很轻；静音记在 localStorage） ----------------
+// ---------------- Audio Cues ----------------
 
 const MUTE_KEY = 'studio.imu.mute';
 function loadMute() { try { return localStorage.getItem(MUTE_KEY) === '1'; } catch { return false; } }
-function saveMute(v) { try { localStorage.setItem(MUTE_KEY, v ? '1' : '0'); } catch { /* 隐私模式：只在这一页有效 */ } }
+function saveMute(v) { try { localStorage.setItem(MUTE_KEY, v ? '1' : '0'); } catch { /* private mode */ } }
 let actx = null;
-/** 浏览器要求「用户点过」才能出声：在「开始采集」的点击里调一次。 */
 function audioUnlock() {
   try {
     const C = window.AudioContext || window.webkitAudioContext;
@@ -311,7 +278,6 @@ function beep(kind) {
   if (!actx) return;
   try {
     const t = actx.currentTime + 0.01;
-    // 做够一个方向：一声 990 Hz；静止：低一点 660 Hz；全齐：两声往上走
     const tones = kind === 'all' ? [[880, 0], [1320, 0.13]] : [[kind === 'still' ? 660 : 990, 0]];
     for (const [f, dt] of tones) {
       const o = actx.createOscillator(), gn = actx.createGain();
@@ -323,23 +289,22 @@ function beep(kind) {
       o.connect(gn); gn.connect(actx.destination);
       o.start(t + dt); o.stop(t + dt + 0.12);
     }
-  } catch { /* 出不了声就算了 */ }
+  } catch { /* ignore */ }
 }
 
 // ---------------- 3D ----------------
 
 const reduceMotion = () => { try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } };
 
-/** 在 3D 上面画：竖直参考线、示范箭头（从头顶往要倾的方向弯过去，来回摆）。用鸭子自己的相机投影，转视角也跟着。 */
 function drawOverlay(d, canvas, svg, arrow, plumb, now) {
   if (!svg) return;
   if (!d || !d.ready || !d.home || !d.blob) { svg.innerHTML = ''; return; }
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (!w || !h) return;
-  const V = d.camera.position.constructor;           // three.js 的 Vector3（不用另外 import three）
+  const V = d.camera.position.constructor;
   d.camera.updateMatrixWorld();
-  const P = d.blob.position;                          // 脚下（地面）中心
-  const H = 2 * (d.home.target.z - P.z);              // 鸭子高度
+  const P = d.blob.position;
+  const H = 2 * (d.home.target.z - P.z);
   const pr = (x, y, z) => { const v = new V(x, y, z).project(d.camera); return [(v.x + 1) / 2 * w, (1 - v.y) / 2 * h]; };
   let out = '';
   if (plumb) {
@@ -349,7 +314,7 @@ function drawOverlay(d, canvas, svg, arrow, plumb, now) {
   if (arrow && DIRV[arrow]) {
     const u = DIRV[arrow], R = H * 1.08;
     const swing = reduceMotion() ? 1 : 0.55 + 0.45 * Math.sin(now / 260);
-    const end = 6 + 20 * swing;                        // 弧从头顶（0°）摆到 6–26°
+    const end = 6 + 20 * swing;
     const pts = [];
     for (let a = 0; a <= end + 1e-6; a += 2) {
       const s = Math.sin(rad(a)), c = Math.cos(rad(a));
@@ -359,21 +324,17 @@ function drawOverlay(d, canvas, svg, arrow, plumb, now) {
       const [ex, ey] = pts[pts.length - 1], [px, py] = pts[pts.length - 2];
       const dx = ex - px, dy = ey - py, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, sz = Math.max(12, h * 0.03);
       const head = `${ex + ux * sz},${ey + uy * sz} ${ex - uy * sz * 0.6},${ey + ux * sz * 0.6} ${ex + uy * sz * 0.6},${ey - ux * sz * 0.6}`;
-      // 示范的「倾下去的鸭子」：从脚下到箭头尖的一条虚线（机身中线倒向那边）
       const [gx, gy] = pr(P.x, P.y, P.z);
       out += `<line class="ghost" x1="${gx}" y1="${gy}" x2="${ex}" y2="${ey}"/>`;
       out += `<polyline class="arc" points="${pts.map((p) => p.join(',')).join(' ')}"/><polygon class="head" points="${head}"/>`;
-      // 字放在箭头尖下面一点；别压到左上角的大字倾角、也别出框
       const lx = Math.min(w - 50, Math.max(50, ex)), ly = Math.min(h - 50, Math.max(120, ey + sz + 26));
-      out += `<text class="lbl" x="${lx}" y="${ly}">往${STEP[arrow].short}倾</text>`;
+      out += `<text class="lbl" x="${lx}" y="${ly}">Tilt ${STEP[arrow].short}</text>`;
     }
   }
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
   svg.innerHTML = out;
 }
 
-/** 换机位。字符串用 Duck3D 自带的（front34 / front / back34 / back）；{az, el} 是自己定的角度（度，跟 Duck3D 的 VIEWS 同一个算法：
- *  az 0 = 正前方，−90 = 鸭子右侧），先按 front 算好距离和看的点，再把机位挪过去（「回正」也回到这里）。 */
 function applyView(d, view) {
   if (typeof view === 'string') { d.setView(view); return; }
   d.setView('front');
@@ -397,7 +358,11 @@ function DuckView({ g, joints, stale, arrow, plumb, view = 'front34', children }
     const d = new Duck3D(canvasRef.current, { view: 'front34', centerX: 0.5, centerY: 0.56, fill: 0.7 });
     duckRef.current = d;
     d.onUserMove = () => setMoved(true);
-    d.load('model/').then(() => setReady(true)).catch((e) => setErr(`3D 模型没加载：${e.message}`));
+    d.load('model/').then(() => {
+      setReady(true);
+      d.setGrid(true);
+      d.setImuGizmo(true);
+    }).catch((e) => setErr(`3D model failed to load: ${e.message}`));
     return () => d.dispose();
   }, []);
 
@@ -428,13 +393,10 @@ function DuckView({ g, joints, stale, arrow, plumb, view = 'front34', children }
     <canvas ref=${canvasRef} class=${stale ? 'stale' : ''}></canvas>
     <svg class="imu-overlay" ref=${svgRef} aria-hidden="true"></svg>
     ${err ? html`<span class="imu-note" role="alert">${err}</span>` : children}
-    ${moved ? html`<button class="reset-view" onClick=${(e) => { e.currentTarget.blur(); duckRef.current?.resetView(); setMoved(false); }}>回正</button>` : null}
+    ${moved ? html`<button class="reset-view" onClick=${(e) => { e.currentTarget.blur(); duckRef.current?.resetView(); setMoved(false); }}>Reset View</button>` : null}
   </div>`;
 }
 
-/** 平时一只鸭子（采集中带示范箭头）；算完一左一右「校准前 / 校准后」。第一只始终是同一个实例（key 不变），切换不重新加载。
- *  机位：采集中从后面看（鸭子的左 = 屏幕左 = 方向盘的左 = 站在它后面的人的左）；
- *  对比时，修正以前后为主就从侧面看（前倾、后倾正面看不出来），以左右为主就从正面看。 */
 function ImuStage({ st, stale, corr, parts, collecting, arrow, cue }) {
   const g = okVec(st?.gravity) ? st.gravity : null;
   const joints = st?.joints;
@@ -443,38 +405,38 @@ function ImuStage({ st, stale, corr, parts, collecting, arrow, cue }) {
   const old = stale || !g;
   const sideways = corr && Math.abs(parts?.pitch_deg ?? 0) >= Math.abs(parts?.roll_deg ?? 0);
   const view = corr ? (sideways ? { az: -80, el: 6 } : 'front') : collecting ? 'back34' : 'front34';
-  const noteLive = old ? html`<span class="imu-note">${g ? '读数旧了，不是现在的样子' : '没有姿态数据'} · 主程序在运动模式时才有</span>`
-    : html`<span class="imu-note">实时 · 机身跟着 IMU 倾</span>`;
+  const noteLive = old ? html`<span class="imu-note">${g ? 'Stale attitude reading' : 'No attitude data'} · Available in Motion mode</span>`
+    : html`<span class="imu-note">Live · Body follows IMU gravity</span>`;
   return html`<div class="imu-stage-wrap">
     <div class=${'imu-stage' + (corr ? ' duo' : '')}>
       <${DuckView} key="before" g=${g} joints=${joints} stale=${old} arrow=${corr ? null : arrow} plumb=${!!corr} view=${view}>
-        <div class="imu-stage-read num"><span>${corr ? '校准前' : '机身倾角（跟竖直比）'}</span><b>${fmt(tb)}°</b></div>
+        <div class="imu-stage-read num"><span>${corr ? 'Before' : 'Body Tilt (vs Vertical)'}</span><b>${fmt(tb)}°</b></div>
         ${!corr && cue ? html`<span class="imu-cue">${cue}</span>` : null}
-        ${corr ? html`<span class="imu-note">现在存的方向</span>` : noteLive}
+        ${corr ? html`<span class="imu-note">Current mount</span>` : noteLive}
       <//>
       ${corr ? html`<${DuckView} key="after" g=${after} joints=${joints} stale=${old} plumb=${true} view=${view}>
-        <div class="imu-stage-read num after"><span>校准后</span><b>${fmt(ta)}°</b></div>
-        <span class="imu-note">按新方向 · 还没写</span>
+        <div class="imu-stage-read num after"><span>After</span><b>${fmt(ta)}°</b></div>
+        <span class="imu-note">New mount · unsaved</span>
       <//>` : null}
     </div>
-    ${corr ? html`<p class="imu-diff num">站着的时候：校准前倾 <b>${fmt(tb)}°</b> → 校准后 <b>${fmt(ta)}°</b>，差 <b>${fmt(g && after ? angle(g, after) : null)}°</b>。
-      两只鸭子都是现在的实时读数，虚线是竖直方向；${sideways ? '从侧面看（这次主要是前后歪）' : '从正面看（这次主要是左右歪）'}。</p>` : null}
+    ${corr ? html`<p class="imu-diff num">Standing tilt: Before <b>${fmt(tb)}°</b> → After <b>${fmt(ta)}°</b> (delta <b>${fmt(g && after ? angle(g, after) : null)}°</b>).
+      Dashed line is vertical; ${sideways ? 'side view (primary pitch offset)' : 'front view (primary roll offset)'}.</p>` : null}
   </div>`;
 }
 
-// ---------------- 方向盘：前后左右四个点 + 中间静止；做够的亮，下一个闪，蓝点是现在往哪倾 ----------------
+// ---------------- Direction Pad ----------------
 
 function DirPad({ W }) {
   const C = 100, R = 80, MAX = 32;
   const r = (t) => Math.min(t, MAX) / MAX * R;
-  const pt = (t, d) => [C - r(t) * Math.sin(rad(d)), C - r(t) * Math.cos(rad(d))];   // 头朝上：前 → 上，鸭子的左 → 左
+  const pt = (t, d) => [C - r(t) * Math.sin(rad(d)), C - r(t) * Math.cos(rad(d))];
   const collecting = W.phase === 'collect';
   const next = collecting && W.done.still ? nextTodo(W) : null;
   const L = collecting && W.done.still ? W.live : null;
   const p = L && L.t != null ? pt(L.t, L.d ?? 0) : [C, C];
   const ring = (t) => html`<circle cx=${C} cy=${C} r=${r(t)} class="pad-ring" />`;
   return html`<svg class="imu-pad" viewBox="0 0 200 200" role="img"
-    aria-label=${`已做：${names(STEPS.filter((k) => W.done[k])) || '还没有'}`}>
+    aria-label=${`Completed: ${names(STEPS.filter((k) => W.done[k])) || 'none'}`}>
     <circle cx=${C} cy=${C} r=${R + 6} class="pad-bg" />
     ${ring(RULES.tilt_go_deg)}${ring(RULES.tilt_max_deg)}
     ${TILTS.map((k) => {
@@ -494,38 +456,34 @@ function DirPad({ W }) {
   </svg>`;
 }
 
-// ---------------- 右边几块 ----------------
+// ---------------- Side Cards ----------------
 
-// 方向确认没有，只认 imu 消息里的 mount.verified（calibration-status 回读，studio/imu.py 的 view）。
-// 不看 robotd 起不来时的原话：关节没标定时报的也是「…and verified IMU mounting」（feetech.rs:1018-1029）。
-// 主程序只有「确认 / 没确认」两种；「临时方向」是 Studio 以后可能加的（方案拍板 3 的 ②），后端给 imu.temporary 才显示。
 function statusOf(st, imu, live) {
   const s = st?.imu?.status;
   const v = imu?.mount?.verified;
-  if (imu?.profile_error) return { word: 'IMU 类型无法确认', kind: 'bad', hint: imu.profile_error };
-  if (imu?.mount_protocol_mismatch) return { word: '方向需重新标定', kind: 'warn',
-    hint: '当前总线协议 / 类型与已存的安装方向不匹配：在下面重新标定，并交给主程序验证' };
+  if (imu?.profile_error) return { word: 'IMU Profile Unconfirmed', kind: 'bad', hint: imu.profile_error };
+  if (imu?.mount_protocol_mismatch) return { word: 'Recalibration Required', kind: 'warn',
+    hint: 'Bus protocol/profile mismatches stored mount orientation: recalibrate and verify below' };
   if (v === false) {
-    return { word: '方向没确认', kind: 'warn',
-      hint: st?.posture === 'starting' ? '主程序不让进运动模式（站不起来）：先粗校一次' : '装歪了走路会往前冲：先校准' };
+    return { word: 'Unverified', kind: 'warn',
+      hint: st?.posture === 'starting' ? 'robotd blocks Motion mode until IMU mounting is verified' : 'Misaligned mount causes walking drift: calibrate first' };
   }
-  if (imu?.temporary) return { word: '临时方向', kind: 'warn', hint: '只认了哪边朝上，朝前没验过：能站，别走' };
-  if (live !== false && s === 'missing') return { word: '读不到 IMU', kind: 'bad', hint: '检查模块接线，或者在下面重新识别芯片' };
-  if (live !== false && s === 'frozen') return { word: '读数冻住了', kind: 'bad', hint: '姿态不更新，别走路' };
-  // imu 消息还没到时：运动模式下 IMU 正常就说明方向确认过（没确认 robotd 进不了运动模式）
+  if (imu?.temporary) return { word: 'Temporary Orientation', kind: 'warn', hint: 'Up axis known, forward axis unverified: stand only, do not walk' };
+  if (live !== false && s === 'missing') return { word: 'IMU Missing', kind: 'bad', hint: 'Check module wiring or re-detect chip below' };
+  if (live !== false && s === 'frozen') return { word: 'Readings Frozen', kind: 'bad', hint: 'Attitude stopped updating — do not walk' };
   if (v === true || (v == null && s === 'ok' && st?.mode === 'motion')) {
     const when = imu?.stand_calib_at;
-    return { word: '方向已确认', kind: 'ok', hint: when ? `上次站着校准：${when}` : '主程序验过「哪边朝上、哪边朝前」；还没站着校过站姿' };
+    return { word: 'Verified', kind: 'ok', hint: when ? `Last standing calibration: ${when}` : 'robotd verified up & forward axes' };
   }
-  return { word: '不知道', kind: null, hint: '还没读到主程序存的安装方向' };
+  return { word: 'Unknown', kind: null, hint: 'Waiting for stored mount orientation from robotd' };
 }
 
 function freshText(st, live, age) {
-  if (live === false) return { live: false, text: Number.isFinite(age) ? `${Math.round(age / 1000)} 秒没更新` : '连不上鸭子' };
+  if (live === false) return { live: false, text: Number.isFinite(age) ? `${Math.round(age / 1000)}s stale` : 'Offline' };
   const a = st?.joints_age_ms;
-  if (a == null) return { live: false, text: '没有' };
-  if (a >= RULES.stale_ms) return { live: false, text: `${Math.round(a / 1000)} 秒没更新` };
-  return { live: true, text: `实时 · ${(a / 1000).toFixed(1)} 秒前` };
+  if (a == null) return { live: false, text: 'None' };
+  if (a >= RULES.stale_ms) return { live: false, text: `${Math.round(a / 1000)}s stale` };
+  return { live: true, text: `Live · ${(a / 1000).toFixed(1)}s ago` };
 }
 
 function StatusCard({ st, imu, live, age, diagnosticElapsed }) {
@@ -534,28 +492,28 @@ function StatusCard({ st, imu, live, age, diagnosticElapsed }) {
   const src = imu?.source;
   const guard = st?.guard;
   return html`<section class=${'board imu-card' + (F.live ? '' : ' imu-stale')}>
-    <h3>控制与安装方向${F.live ? '' : html` <span class="sv-small">（姿态读数：${F.text}）</span>`}</h3>
+    <h3>Control & Mount Orientation${F.live ? '' : html` <span class="sv-small">(Attitude: ${F.text})</span>`}</h3>
     <div class="imu-kv">
-      <span>方向</span><b class=${'imu-word ' + (S.kind || '')}>${S.kind === 'warn' || S.kind === 'bad' ? html`<span class=${'badge ' + S.kind}>${S.kind === 'bad' ? '×' : '!'}</span>` : S.kind === 'ok' ? '✓ ' : ''}${S.word}</b>
+      <span>Status</span><b class=${'imu-word ' + (S.kind || '')}>${S.kind === 'warn' || S.kind === 'bad' ? html`<span class=${'badge ' + S.kind}>${S.kind === 'bad' ? '×' : '!'}</span>` : S.kind === 'ok' ? '✓ ' : ''}${S.word}</b>
       <span></span><span class="sv-small">${S.hint}</span>
-      <span>芯片</span><b>${chipLabel(imu, live, diagnosticElapsed)}</b>
-      ${src === 'bus' ? html`<span>配置类型</span><b>${imu?.configured_imu_profile === 'qinmo' ? 'Qinmo（已配置）'
-        : imu?.configured_imu_profile === 'legacy' ? '现有板卡自动识别'
-        : imu?.metadata_error || unsupportedTransport(imu?.imu_bus) ? '待确认（诊断数据不受支持）'
-        : imu?.configured_imu_profile != null ? '不支持的类型（需确认）' : '现有板卡（旧版主程序）'}</b>
-        <span>实际连接</span><b>${imuDiagnosticCopy(imu?.diagnostic, live, diagnosticElapsed).board || (imu?.imu_bus ? chipLabel(imu, live, diagnosticElapsed) : '尚未连接')}</b>
-        <span>角速度单位</span><b class="num">${imu?.profile_error || unsupportedTransport(imu?.imu_bus) ? '待确认（诊断数据不受支持）'
-          : imu?.imu_bus?.profile === 'qinmo' ? '原始值 ÷ 16.4 °/s'
-          : imu?.imu_bus ? '原始值 × 0.0175 °/s' : '连接后显示'}</b>` : null}
-      <span>倾角</span><b class="num">${fmt(st?.tilt_deg)}°<small> 跟竖直比；主程序 ${guard?.tilt_tolerance_deg ?? 10}° 以内才让走</small></b>
-      <span>站姿</span><b class="num">${st?.hold ? html`离 HOME 最多差 ${fmt(st.hold.max_error_deg)}°<small> ${st.hold.stage === 'holding' && st.hold.imu_calibration_ready !== false ? '站姿已停稳' : '等关节停稳'}</small>`
-        : guard?.max_joint_error_deg != null ? html`离 HOME 最多差 ${fmt(guard.max_joint_error_deg)}°<small> ${imu?.coarse_sampling?.hold_ready ? '站姿已停稳，可标定。' : ''} 走路要求 ${guard.joint_tolerance_deg ?? 5}° 以内</small>` : '—'}</b>
-      <span>读数</span><b class=${'num' + (F.live ? '' : ' imu-dim')}>${F.text}${imu?.reader?.errors ? html`<small> 读错 ${imu.reader.errors} 次</small>` : null}</b>
+      <span>Sensor</span><b>${chipLabel(imu, live, diagnosticElapsed)}</b>
+      ${src === 'bus' ? html`<span>Profile</span><b>${imu?.configured_imu_profile === 'qinmo' ? 'Qinmo (Configured)'
+        : imu?.configured_imu_profile === 'legacy' ? 'Auto-detect (Legacy)'
+        : imu?.metadata_error || unsupportedTransport(imu?.imu_bus) ? 'Unconfirmed (unsupported diagnostics)'
+        : imu?.configured_imu_profile != null ? 'Unsupported profile' : 'Legacy board'}</b>
+        <span>Detected</span><b>${imuDiagnosticCopy(imu?.diagnostic, live, diagnosticElapsed).board || (imu?.imu_bus ? chipLabel(imu, live, diagnosticElapsed) : 'Not connected')}</b>
+        <span>Gyro Scale</span><b class="num">${imu?.profile_error || unsupportedTransport(imu?.imu_bus) ? 'Unconfirmed'
+          : imu?.imu_bus?.profile === 'qinmo' ? 'raw ÷ 16.4 °/s'
+          : imu?.imu_bus ? 'raw × 0.0175 °/s' : 'Shown after connect'}</b>` : null}
+      <span>Tilt</span><b class="num">${fmt(st?.tilt_deg)}°<small> from vertical; walk limit ≤${guard?.tilt_tolerance_deg ?? 10}°</small></b>
+      <span>Stance</span><b class="num">${st?.hold ? html`Max HOME err ${fmt(st.hold.max_error_deg)}°<small> ${st.hold.stage === 'holding' && st.hold.imu_calibration_ready !== false ? 'Steady' : 'Settling'}</small>`
+        : guard?.max_joint_error_deg != null ? html`Max HOME err ${fmt(guard.max_joint_error_deg)}°<small> ${imu?.coarse_sampling?.hold_ready ? 'Steady, ready to calibrate. ' : ''}Walk limit ≤${guard.joint_tolerance_deg ?? 5}°</small>` : '—'}</b>
+      <span>Telemetry</span><b class=${'num' + (F.live ? '' : ' imu-dim')}>${F.text}${imu?.reader?.errors ? html`<small> (${imu.reader.errors} read errors)</small>` : null}</b>
     </div>
-    ${src === 'bus' && imu?.imu_bus?.protocol === 'dxl2' ? html`<p class="sv-small">这类板卡不提供采样序号、状态位和传感器读数年龄；主程序按主机接收新鲜度和原始字节是否冻结检查读数。</p>` : null}
-    ${imu?.mount?.quat ? html`<details class="imu-details"><summary>安装方向（四元数 w, x, y, z）</summary>
-      <code class="num">${imu.mount.quat.map((x) => fmt(x, 4)).join(', ')}</code>${imu.mount.verified ? ' · 已验证' : ' · 没验证'}
-      <p class="sv-small">装法改了或上次没调对，可以在下面「IMU 安装方向」重新标定、重新验证。</p></details>` : null}
+    ${src === 'bus' && imu?.imu_bus?.protocol === 'dxl2' ? html`<p class="sv-small">DXL2 boards omit sample sequence/status flags; freshness is checked by host arrival time and byte changes.</p>` : null}
+    ${imu?.mount?.quat ? html`<details class="imu-details"><summary>Mount Quaternion (w, x, y, z)</summary>
+      <code class="num">${imu.mount.quat.map((x) => fmt(x, 4)).join(', ')}</code>${imu.mount.verified ? ' · Verified' : ' · Unverified'}
+      <p class="sv-small">If mounting changed, recalibrate and verify below.</p></details>` : null}
   </section>`;
 }
 
@@ -564,13 +522,13 @@ function DiagnosticCard({ st, imu, live, diagnosticElapsed }) {
   if ((imu?.source ?? st?.imu?.source) !== 'bus' || (st?.posture !== 'starting' && !diagnostic?.age_ms
       && diagnostic?.responding == null)) return null;
   const d = imuDiagnosticCopy(diagnostic, live, diagnosticElapsed);
-  return html`<section class="board imu-card imu-diagnostic" aria-label="总线 IMU 只读诊断">
-    <h3>总线 IMU 只读诊断</h3>
+  return html`<section class="board imu-card imu-diagnostic" aria-label="Bus IMU Read-Only Diagnostics">
+    <h3>Bus IMU Read-Only Diagnostics</h3>
     <p class=${'imu-word ' + d.kind}>${d.word}</p>
     ${d.board ? html`<p>${d.board}</p>` : null}
     <p class="sv-small">${d.hint}</p>
-    ${live !== false && diagnostic?.error ? html`<p class="sv-small">原文：${diagnostic.error}</p>` : null}
-    <p class="sv-small">板卡应答独立于舵机；不代表已确认安装方向、可采集标定或可运动。姿态和标定仍使用主程序的控制读数。</p>
+    ${live !== false && diagnostic?.error ? html`<p class="sv-small">Raw: ${diagnostic.error}</p>` : null}
+    <p class="sv-small">Board responses are independent of servos and do not imply verified orientation or motion readiness.</p>
   </section>`;
 }
 
@@ -580,80 +538,74 @@ function ChipCard({ imu, link, live, diagnosticElapsed }) {
   const [message, setMessage] = useState(null);
   useEffect(() => { setProfile(imu?.configured_imu_profile || 'legacy'); }, [imu?.configured_imu_profile]);
   const selection = imu?.profile_selection;
-  const reason = live === false || link.status !== 'open' ? '连不上鸭子：等它回来'
-    : imu?.metadata_error || unsupportedTransport(imu?.imu_bus) ? imu?.metadata_error || imu?.profile_error || '主程序报告了不支持的 IMU 类型'
-    : !selection?.can_start ? selection?.reason || '主程序尚不支持网页选择类型：请先由维护者更新主程序' : null;
+  const reason = live === false || link.status !== 'open' ? 'Offline — waiting for connection'
+    : imu?.metadata_error || unsupportedTransport(imu?.imu_bus) ? imu?.metadata_error || imu?.profile_error || 'Unsupported IMU profile reported by robotd'
+    : !selection?.can_start ? selection?.reason || 'Web profile selection requires an updated robotd' : null;
   const select = async () => {
     setBusy(true); setMessage(null);
     try {
       const reply = await link.cmd('imu.op', { op: 'profile-select', profile, confirmed: true }, 180000);
-      setMessage(reply.ok ? '类型已保存，正在重连标定模式。双手扶稳并保持卸力，完成上面的安装方向采集与主程序验证。'
-        : reply.reason || reply.error || '类型选择未完成：查看会话状态，可取消并恢复原参数');
+      setMessage(reply.ok ? 'Profile saved. Reconnecting in Commissioning mode — support the robot and complete mount verification.'
+        : reply.reason || reply.error || 'Profile selection failed');
     } finally { setBusy(false); }
   };
   return html`<section class="board imu-card">
-    <h3>芯片 <span class="sv-small">正在用：${chipLabel(imu, live, diagnosticElapsed)}</span></h3>
-    <p class="sv-small">现有自动识别支持 FT6、IMU-to-DXL（Feetech）；SFLP 124/12（Dynamixel 2.0）。FT6 和自家小板按已知身份识别；通用 DXL2 只确认兼容布局。</p>
-    <p class="sv-small">Qinmo 没有文档可验证的唯一身份，需在这里选择一次。保存后以后开机会沿用此类型与单位；页面显示「已配置」，不会把兼容布局当成厂商认证。换板或装法改变后，必须重新验证安装方向。</p>
-    ${imu?.source === 'bus' || imu?.source == null ? html`<label class="sv-small">总线 IMU 类型
-      <select aria-label="总线 IMU 类型" value=${profile} disabled=${busy || !!imu?.redo?.active}
+    <h3>IMU Hardware <span class="sv-small">Active: ${chipLabel(imu, live, diagnosticElapsed)}</span></h3>
+    <p class="sv-small">Auto-detection supports FT6, IMU-to-DXL (Feetech), and SFLP 124/12 (Dynamixel 2.0).</p>
+    <p class="sv-small">Qinmo has no unique hardware ID and must be selected explicitly here. Changing boards or mounting requires re-verification.</p>
+    ${imu?.source === 'bus' || imu?.source == null ? html`<label class="sv-small">Bus IMU Profile
+      <select aria-label="Bus IMU Profile" value=${profile} disabled=${busy || !!imu?.redo?.active}
         onChange=${e => { setProfile(e.target.value); setMessage(null); }}>
-        <option value="legacy">自动识别（现有板卡）</option><option value="qinmo">Qinmo · Feetech · 原始值 ÷ 16.4 °/s</option>
+        <option value="legacy">Auto-detect (Standard Boards)</option><option value="qinmo">Qinmo · Feetech · raw ÷ 16.4 °/s</option>
       </select></label>
-      <div class="imu-actions"><${TwoStep} key=${profile} label="保存类型并重新连接"
-        ask="已扶稳，确认重连并重新标定" onConfirm=${select} disabled=${busy || !!reason}
-        title=${reason} busyLabel="正在保存类型并重连…" /></div>
-      <p class="sv-small">先扶稳并卸力。保存后主程序会重启进入标定模式，旧安装方向失效；验证通过后才完成。取消可恢复原参数；启动失败恢复时会停留标定模式。</p>
+      <div class="imu-actions"><${TwoStep} key=${profile} label="Save Profile & Reconnect"
+        ask="Robot supported — confirm reconnect & recalibrate" onConfirm=${select} disabled=${busy || !!reason}
+        title=${reason} busyLabel="Saving & reconnecting…" /></div>
+      <p class="sv-small">Support the robot and relax servos first. robotd restarts into Commissioning mode; previous mount becomes invalid until verified.</p>
       ${reason ? html`<p class="sv-warn">${reason}</p>` : null}
       ${message ? html`<p role="status" class="sv-small">${message}</p>` : null}` : null}
-    <p class="sv-small">I²C 模块要在第一次开机前接好。之后才接的，用 SSH 在鸭子上运行</p>
+    <p class="sv-small">I²C modules must be wired before first boot. If added later, run via SSH on the robot:</p>
     <p><code class="num">sudo microduck-firstboot --detect-imu-only --force</code></p>
-    <p class="sv-small">它会重新检测 IMU 并补上启动配置；跑完重启一次主程序。</p>
+    <p class="sv-small">Then restart robotd.</p>
   </section>`;
 }
 
 function blockReason(st, imu, live) {
-  if (!st) return '还没连上鸭子';
-  if (live === false) return '连不上鸭子：等它回来';
+  if (!st) return 'Connecting to robot…';
+  if (live === false) return 'Offline — waiting for connection';
   if (imu?.profile_error) return imu.profile_error;
-  if (imu?.job?.phase === 'verify') return 'IMU 验证中';
-  if (imu?.redo?.active) return '正在重新标定安装方向：先完成主程序验证，或取消并恢复原参数';
-  if (st.posture === 'servo_session') return '舵机页还占着总线（有舵机保持着时不会自动交还）：点顶上的「交还主程序」';
-  if (st.posture === 'absent') return '鸭子主程序没在跑';
-  if (st.posture === 'starting') return `主程序还在启动${st.start_error ? `：${st.start_error}` : ''}`;
+  if (imu?.job?.phase === 'verify') return 'IMU verification in progress';
+  if (imu?.redo?.active) return 'Recalibration in progress: complete verification or cancel to restore';
+  if (st.posture === 'servo_session') return 'Servo Tuning holds the bus — click "Hand Back to robotd" first';
+  if (st.posture === 'absent') return 'robotd is not running';
+  if (st.posture === 'starting') return `robotd starting${st.start_error ? `: ${st.start_error}` : ''}`;
   if (st.mode === 'commissioning') {
-    // 标定模式也能站（fork hold-home，用户 10-21）：站住了就能站着校，方向没确认过也能校（算出整份新方向，第 3 步写进去）
-    if (!st.hold) return '标定模式软着：先点上面的「站姿使能」让它站起来（双手扶着）';
-    if (st.hold.stage !== 'holding' || st.hold.imu_calibration_ready === false) return '等站姿关节停稳';
-    if (!okVec(st.gravity) || st.joints_age_ms == null || st.joints_age_ms > RULES.stale_ms) return '没有实时姿态数据';
+    if (!st.hold) return 'Commissioning relaxed: click "Enable Stance" above first (support the robot)';
+    if (st.hold.stage !== 'holding' || st.hold.imu_calibration_ready === false) return 'Waiting for joints to settle';
+    if (!okVec(st.gravity) || st.joints_age_ms == null || st.joints_age_ms > RULES.stale_ms) return 'No live attitude data';
     return null;
   }
-  if (imu?.mount?.verified === false) return '方向还没确认过：先做上面的「粗校」';
-  // 站姿没使能：提示先点上面的「站姿使能」（任务 17）
-  if (st.posture === 'limp') return '软着：先点上面的「站姿使能」让它站起来（双手托着）';
+  if (imu?.mount?.verified === false) return 'Mount unverified: run Coarse Calibration above first';
+  if (st.posture === 'limp') return 'Relaxed: click "Enable Stance" above first (support the robot)';
   const calibrationHold = imu?.coarse_sampling?.hold_ready === true;
-  if (st.posture === 'homing' && !calibrationHold) return '正在站起来：等它站稳';
-  if (st.posture === 'walking') return '正在走：先停下';
-  if (st.posture === 'policy') return '策略在跑，一提起来它会迈腿：按一下手柄 +，回到「站好」再做';
-  if (st.posture === 'sitting') return '坐着：先点上面的「站姿使能」让它站起来';
-  if (st.posture !== 'holding' && !(st.posture === 'homing' && calibrationHold)) return '读不出它现在的姿势';
-  if (imu?.coarse_sampling?.live_verify && !calibrationHold) return '等站姿关节停稳';
-  if (!okVec(st.gravity) || st.joints_age_ms == null || st.joints_age_ms > RULES.stale_ms) return '没有实时姿态数据';
-  if (st.imu?.status === 'missing' || st.imu?.status === 'frozen') return 'IMU 读数不正常，先查线';
+  if (st.posture === 'homing' && !calibrationHold) return 'Standing up — wait until settled';
+  if (st.posture === 'walking') return 'Currently walking — stop first';
+  if (st.posture === 'policy') return 'Policy active — press gamepad + to return to Standing';
+  if (st.posture === 'sitting') return 'Sitting: click "Enable Stance" above first';
+  if (st.posture !== 'holding' && !(st.posture === 'homing' && calibrationHold)) return 'Unable to read current posture';
+  if (imu?.coarse_sampling?.live_verify && !calibrationHold) return 'Waiting for joints to settle';
+  if (!okVec(st.gravity) || st.joints_age_ms == null || st.joints_age_ms > RULES.stale_ms) return 'No live attitude data';
+  if (st.imu?.status === 'missing' || st.imu?.status === 'frozen') return 'IMU telemetry fault — check wiring';
   return null;
 }
 
-// ---------------- 站姿使能 / 失能（任务 17，用户 10-21：「得有个按钮站姿使能、失能」） ----------------
-// 「站姿使能」走遥控卡「站起来」同一条路：link.cmd('pad.op', {op: 'stand'})，后端按姿势再判一遍（软着 robot.init、坐着 sit_toggle）；
-// 能不能按用手柄快照里遥控卡那颗「站起来」的判断（pd.motion.buttons.stand）。「失能（卸力）」走顶上「卸力」同一条路：link.cmd('relax')。
-// 标定模式也能站（用户 10-21：「咱标定也能站姿不就好了吗？非要切到运动模式」）：「站姿使能」发 imu.op hold →
-// fork 标定模式的 hold-home，15 颗一起 3 秒转到 HOME 锁住（没有平衡，扶着点），IMU 照常读，站着校准就在标定模式做；
-// 「失能」一样走顶上「卸力」（标定模式下 robot.relax 就是总线 relax）。
-const POSE_CN = { holding: '站着', policy: '站着（策略在跑）', walking: '在走', limp: '软着', homing: '正在站起来',
-  sitting: '坐着', commissioning: '标定模式（软着）', starting: '主程序在启动', absent: '主程序没在跑', servo_session: '调舵机中' };
-const HOLD_CN = { holding: '标定模式（站着）', ramping: '标定模式（正在站起来）' };
-const HOLD_CONFIRM = '标定模式站姿使能：15 颗舵机会在 3 秒内一起转到站姿并锁住。\n'
-  + '标定模式不管平衡，站起来以后要扶着点；方向用舵机页设的（没设过的沿用主程序文件里的）。\n双手扶好鸭子，确定吗？';
+// ---------------- Stance Enable / Disable ----------------
+
+const POSE_CN = { holding: 'Standing', policy: 'Standing (Policy)', walking: 'Walking', limp: 'Relaxed', homing: 'Standing up',
+  sitting: 'Sitting', commissioning: 'Commissioning (Relaxed)', starting: 'robotd starting', absent: 'robotd stopped', servo_session: 'Servo Tuning' };
+const HOLD_CN = { holding: 'Commissioning (Holding)', ramping: 'Commissioning (Ramping)' };
+const HOLD_CONFIRM = 'Commissioning Stance: all 15 servos will ramp to HOME over 3 seconds and hold.\n'
+  + 'Active balance is off in Commissioning mode — support the robot at all times.\nContinue?';
 
 function StanceCard({ st, imu, pd, link, live }) {
   const [msg, setMsg] = useState(null);
@@ -663,74 +615,73 @@ function StanceCard({ st, imu, pd, link, live }) {
   const hold = st?.hold || imu?.hold || null;
   const calibrationHold = imu?.coarse_sampling?.hold_ready === true;
   const verifying = imu?.job?.phase === 'verify';
-  const now = !st ? '还没连上' : live === false ? '连不上鸭子' : st.posture === 'servo_session' ? POSE_CN.servo_session
-    : verifying ? 'IMU 验证中'
-    : commissioning && hold ? HOLD_CN[hold.stage] || '标定模式（站着）'
-    : st.posture === 'homing' && calibrationHold ? '站姿已停稳，可以标定' : (POSE_CN[st.posture] || '读不出');
-  const sb = pd?.motion?.buttons?.stand;              // 遥控卡「站起来」的判断（后端推的手柄快照，1 Hz 也够用）
-  const standWhy = !st || live === false ? '连不上鸭子：等它回来'
-    : verifying ? '正在验证，保持双手托稳'
+  const now = !st ? 'Connecting' : live === false ? 'Offline' : st.posture === 'servo_session' ? POSE_CN.servo_session
+    : verifying ? 'Verifying IMU'
+    : commissioning && hold ? HOLD_CN[hold.stage] || 'Commissioning (Holding)'
+    : st.posture === 'homing' && calibrationHold ? 'Settled, ready to calibrate' : (POSE_CN[st.posture] || 'Unknown');
+  const sb = pd?.motion?.buttons?.stand;
+  const standWhy = !st || live === false ? 'Offline — waiting for connection'
+    : verifying ? 'Verifying — keep supporting robot'
     : imu?.redo?.active && (!commissioning || !['commissioning', 'finish_failed'].includes(imu.redo.phase))
-      ? '重新标定模式正在切换或恢复：等当前操作结束再站姿使能'
-    : st.posture === 'servo_session' ? '舵机页还占着总线：点顶上的「交还主程序」'
-      : st.posture === 'starting' ? '主程序还在启动：等它起来'
-        : commissioning ? (hold ? (hold.stage === 'holding' ? '已经站着了' : '正在站起来') : null)
-          : st.posture === 'homing' && calibrationHold ? '可以采静止；开始走路前仍需到 HOME' : sb && !sb.ok ? sb.why : null;
+      ? 'Recalibration mode transition in progress'
+    : st.posture === 'servo_session' ? 'Servo Tuning holds the bus: click "Hand Back to robotd"'
+      : st.posture === 'starting' ? 'robotd is starting'
+        : commissioning ? (hold ? (hold.stage === 'holding' ? 'Already holding' : 'Ramping to HOME') : null)
+          : st.posture === 'homing' && calibrationHold ? 'Ready for still capture; wait for HOME before walking' : sb && !sb.ok ? sb.why : null;
   const stand = async () => {
     if (commissioning) {
       if (!window.confirm(HOLD_CONFIRM)) return;
       setBusy(true); setMsg(null);
       const r = await link.cmd('imu.op', { op: 'hold' }, 25000);
       setBusy(false);
-      setMsg(r.ok ? { ok: true, text: '站住了：双手扶住，现在可以做初次安装方向标定或「站着校准」；做完点「失能」或顶上「卸力」' }
-        : { ok: false, text: r.reason || r.error || '没站起来' });
+      setMsg(r.ok ? { ok: true, text: 'Holding HOME: support the robot while calibrating; click Disable (Relax) or E-Stop when done.' }
+        : { ok: false, text: r.reason || r.error || 'Failed to hold stance' });
       return;
     }
     if (typeof st?.tilt_deg === 'number' && st.tilt_deg > 30
-      && !window.confirm(`它现在是躺着的（倾斜 ${Math.round(st.tilt_deg)}°）。站起来时腿会突然用力：确定托好了吗？`)) return;
+      && !window.confirm(`Robot is tilted (${Math.round(st.tilt_deg)}°). Legs will apply torque to stand — support it first. Continue?`)) return;
     setBusy(true); setMsg(null);
     const r = await link.cmd('pad.op', { op: 'stand' }, 10000);
     setBusy(false);
-    setMsg(r.ok ? { ok: true, text: '站起来发出去了：双手托着它，站稳了再开始站着校准' } : { ok: false, text: r.reason || r.error || '没站起来' });
+    setMsg(r.ok ? { ok: true, text: 'Stand command sent — support the robot until settled.' } : { ok: false, text: r.reason || r.error || 'Stand failed' });
   };
   const relax = async () => {
     setMsg(null);
     const r = await link.cmd('relax', {}, 7000);
-    setMsg(r.ok ? { ok: true, text: '卸力发出去了：鸭子会软下来，扶住' } : { ok: false, text: r.reason || r.error || '卸力没发出去：用手柄 − 或关电源' });
+    setMsg(r.ok ? { ok: true, text: 'Relax sent — support the robot.' } : { ok: false, text: r.reason || r.error || 'Relax failed — use gamepad − or power off' });
   };
   return html`<section class="board imu-card imu-stance">
-    <h3>站姿 <span class="sv-small">站着校准要它先站住</span></h3>
+    <h3>Stance <span class="sv-small">Must be standing for calibration</span></h3>
     <div class="imu-actions">
       <button class="btn-dark imu-stand" disabled=${!!standWhy || busy} onClick=${stand}
-        title=${standWhy || '跟遥控卡上的「站起来」同一条路'}>${busy ? '等它回话…' : '站姿使能'}</button>
+        title=${standWhy || 'Stand up to HOME'}>${busy ? 'Waiting…' : 'Enable Stance'}</button>
       <button class="btn-light imu-relax" disabled=${!open} onClick=${relax}
-        title="跟顶上的「卸力」同一条路：15 颗舵机全部卸力">失能（卸力）</button>
-      <span class="sv-small imu-stance-now">现在：<b>${now}</b></span>
+        title="Relax all 15 servos (same as E-Stop)">Disable (Relax)</button>
+      <span class="sv-small imu-stance-now">Current: <b>${now}</b></span>
     </div>
     ${standWhy ? html`<p class="sv-small imu-stance-why">${standWhy}</p>` : null}
     ${imu?.redo?.active ? null : commissioning
-      ? html`<p class="sv-small">标定模式也能站：站姿使能 = 15 颗一起转到站姿锁住（不管平衡，扶着点）；失能 = 顶上的「卸力」，鸭子会软下来，扶住。站住以后就能做下面的「站着校准」。</p>`
+      ? html`<p class="sv-small">Commissioning stance locks all 15 joints at HOME without active balance — support the robot.</p>`
       : standWhy ? null
-        : html`<p class="sv-small">站姿使能 = 遥控卡上的「站起来」（双手托着它）；失能 = 顶上的「卸力」，鸭子会软下来，扶住。</p>`}
+        : html`<p class="sv-small">Enable Stance stands the robot up; Disable relaxes all servos.</p>`}
     ${msg && !verifying ? html`<div class=${'banner ' + (msg.ok ? 'warn' : 'bad')} role="status"><span>${msg.text}</span></div>` : null}
   </section>`;
 }
 
-/** 采集中这一刻该跟人说的一句话（大字）+ 一句补充（小字）。 */
 function collectWords(W) {
   if (W.paused) return [W.paused, ''];
   if (!W.done.still) {
-    return [W.moved ? '动了一下，重新数' : '放在平桌上，松手，别碰它',
-      `鸭子自己站着的这 3 秒就是「官方站姿」的参照 · 还要 ${Math.max(0, RULES.still_s * (1 - W.progress)).toFixed(1)} 秒`];
+    return [W.moved ? 'Movement detected — restarting timer' : 'Place on flat surface, hands off',
+      `Capturing 3s standing reference · ${Math.max(0, RULES.still_s * (1 - W.progress)).toFixed(1)}s left`];
   }
   const next = nextTodo(W);
   const n = next ? STEP[next] : null;
-  const tip = n ? `双手捏住躯干两侧提起来一点（脚离桌 2–3 cm），端平停半秒，再往${n.short}倾（${n.how}）15° 左右，停 1 秒。顺序随便` : '';
-  if (W.over) return ['太多了，回一点', tip];
-  if (W.repeat) return [`${STEP[W.repeat].cn}已经记下了`, `放回端平，做${next ? STEP[next].cn : '下一个'}`];
-  if (W.needLevel) return ['先端平停一下', '零点没记上：每次倾之前，端平停半秒'];
-  if (W.inZone && W.cand) return [`${STEP[W.cand].cn}：停住…`, '再停一下就记下了'];
-  return [n ? `下一个：${n.cn}` : '都齐了', tip];
+  const tip = n ? `Lift torso 2–3 cm, hold level for 0.5s, then tilt ${n.short} (${n.how}) ~15° and hold 1s.` : '';
+  if (W.over) return ['Too far — ease back slightly', tip];
+  if (W.repeat) return [`${STEP[W.repeat].cn} already recorded`, `Return level, then do ${next ? STEP[next].cn : 'next'}`];
+  if (W.needLevel) return ['Hold level first', 'Hold level for 0.5s before each tilt'];
+  if (W.inZone && W.cand) return [`${STEP[W.cand].cn}: hold steady…`, 'Keep holding until chime'];
+  return [n ? `Next: ${n.cn}` : 'All steps complete', tip];
 }
 
 function CollectCard({ st, imu, live, W, act, muted, setMuted }) {
@@ -738,44 +689,43 @@ function CollectCard({ st, imu, live, W, act, muted, setMuted }) {
   const ph = W.phase;
   const guardErr = st?.guard?.max_joint_error_deg;
   const res = W.result;
-  const mute = html`<label class="imu-mute" title="做够一个方向时响一声"><input type="checkbox" checked=${muted}
-    onChange=${(e) => setMuted(e.target.checked)} /> 静音</label>`;
+  const mute = html`<label class="imu-mute" title="Audio cue on step completion"><input type="checkbox" checked=${muted}
+    onChange=${(e) => setMuted(e.target.checked)} /> Mute</label>`;
   let button;
-  if (ph === 'collect') button = html`<button class="imu-big rec" onClick=${act.end}><span class="rec-dot"></span>采集中…（点这里结束）</button>`;
-  else if (ph === 'solving') button = html`<button class="imu-big" disabled>正在算…</button>`;
-  else if (ph === 'short') button = html`<button class="imu-big" onClick=${act.resume}>接着采</button>`;
-  else button = html`<button class="imu-big" disabled=${!!block} onClick=${act.start}>${ph === 'idle' ? '开始采集' : '重新采集'}</button>`;
+  if (ph === 'collect') button = html`<button class="imu-big rec" onClick=${act.end}><span class="rec-dot"></span>Collecting… (Click to Stop)</button>`;
+  else if (ph === 'solving') button = html`<button class="imu-big" disabled>Solving…</button>`;
+  else if (ph === 'short') button = html`<button class="imu-big" onClick=${act.resume}>Resume Collection</button>`;
+  else button = html`<button class="imu-big" disabled=${!!block} onClick=${act.start}>${ph === 'idle' ? 'Start Collection' : 'Recollect'}</button>`;
   const [say, sub] = ph === 'collect' ? collectWords(W) : ['', ''];
   return html`<section class="board imu-card imu-collect">
-    <h3>站着校准 <span class="sv-small">约 1 分钟 · 两只手</span>${mute}</h3>
+    <h3>Standing Calibration <span class="sv-small">~1 min · 4-axis tilt</span>${mute}</h3>
     ${ph === 'idle' ? html`<ol class="imu-howto">
-      <li>鸭子站好（点上面的「站姿使能」或者按手柄 +，别开走路），点「开始采集」。</li>
-      <li>放在平桌上，<b>别碰它 3 秒</b>。</li>
-      <li>站到鸭子后面（跟它朝一个方向，它的左就是你的左），双手捏住躯干两侧提起来，<b>前、后、左、右各倾一次</b>：
-        每次先端平停半秒，再倾 15° 左右停 1 秒。顺序随便，3D 上的箭头会示范。</li>
-      <li>做够一个方向那个点就亮、响一声；四个都亮了自动结束、自动算。</li>
+      <li>Enable Stance (no walking) and click "Start Collection".</li>
+      <li>Leave the robot standing still on a flat surface for <b>3 seconds</b>.</li>
+      <li>Stand behind the robot and tilt <b>Forward, Back, Left, and Right</b> (~15°, hold 1s each, level 0.5s between tilts).</li>
+      <li>Each direction lights up and chimes when captured; solving runs automatically once all 4 are done.</li>
     </ol>` : null}
     ${ph === 'collect' || ph === 'solving' || ph === 'short' ? html`<div class="imu-live">
       <${DirPad} W=${W} />
       <div class="imu-live-txt">
         ${ph === 'collect' ? html`<p class="imu-say"><b>${say}</b><br /><span class="sv-small">${sub}</span></p>
-          ${!W.done.still ? html`<div class="imu-bar" aria-label="静止进度"><span style=${{ width: `${Math.round(W.progress * 100)}%` }}></span></div>`
-            : html`<p class="imu-tilt num"><b>${fmt(W.live?.t)}°</b><span>离端平那一下</span></p>`}`
-        : ph === 'solving' ? html`<p class="imu-say"><b>采完了，正在算…</b></p>`
-          : html`<p class="imu-say"><b>还差：${names(W.missing)}</b><br />
-            <span class="sv-small">做过的都留着。点「接着采」把${names(W.missing)}补上；不想要这一遍就「重来」。</span></p>`}
+          ${!W.done.still ? html`<div class="imu-bar" aria-label="Still progress"><span style=${{ width: `${Math.round(W.progress * 100)}%` }}></span></div>`
+            : html`<p class="imu-tilt num"><b>${fmt(W.live?.t)}°</b><span>from level</span></p>`}`
+        : ph === 'solving' ? html`<p class="imu-say"><b>Collection complete — solving…</b></p>`
+          : html`<p class="imu-say"><b>Missing: ${names(W.missing)}</b><br />
+            <span class="sv-small">Completed steps are kept. Click Resume to finish ${names(W.missing)}, or Restart.</span></p>`}
       </div>
     </div>` : null}
-    ${ph === 'error' ? html`<div class="banner bad" role="alert"><b>没算成</b><span class="more">${W.error}</span></div>` : null}
-    ${ph === 'done' && res && !res.ok ? html`<p class="sv-warn">没校成，原因和要补做哪步在下面「结果」里。</p>` : null}
+    ${ph === 'error' ? html`<div class="banner bad" role="alert"><b>Solve Failed</b><span class="more">${W.error}</span></div>` : null}
+    ${ph === 'done' && res && !res.ok ? html`<p class="sv-warn">Calibration did not pass — see Result below.</p>` : null}
     ${block && ph !== 'solving' ? html`<p class="sv-warn">${block}</p>`
-      : ph === 'idle' && guardErr != null && guardErr > 5 ? html`<p class="sv-warn">腿离 HOME 还差 ${fmt(guardErr)}°：站姿不准，补偿也会跟着不准。先把舵机零位校好</p>` : null}
+      : ph === 'idle' && guardErr != null && guardErr > 5 ? html`<p class="sv-warn">Legs are ${fmt(guardErr)}° off HOME — calibrate servo zero offsets first.</p>` : null}
     <div class="imu-actions">${button}
-      ${ph === 'short' || ph === 'collect' ? html`<button class="btn-light" onClick=${act.start} disabled=${!!block && ph !== 'collect'}>重来</button>` : null}</div>
+      ${ph === 'short' || ph === 'collect' ? html`<button class="btn-light" onClick=${act.start} disabled=${!!block && ph !== 'collect'}>Restart</button>` : null}</div>
   </section>`;
 }
 
-const GRADE = { good: ['好', 'ok'], ok: ['能用', 'warn'], coarse: ['粗校', 'warn'] };
+const GRADE = { good: ['Good', 'ok'], ok: ['Usable', 'warn'], coarse: ['Coarse', 'warn'] };
 
 function ResultCard({ res, imu, link, live, onRedo }) {
   const [checks, setChecks] = useState({});
@@ -798,57 +748,56 @@ function ResultCard({ res, imu, link, live, onRedo }) {
       setOut(null);
       const r = await link.cmd('imu.op', { op: 'verify', confirmed: true, mount_wxyz: res.mount }, 90000);
       setBusy(false);
-      setOut({ ok: r.ok, text: r.ok ? r.data?.note || '安装方向已保存' : r.reason || r.error || '验证未通过' });
+      setOut({ ok: r.ok, text: r.ok ? r.data?.note || 'Mount orientation saved' : r.reason || r.error || 'Verification failed' });
       return;
     }
-    setOut({ ok: true, text: '这次的方向已经记在 Studio 里：去上手清单第 3 步点「写进主程序」。' });
+    setOut({ ok: true, text: 'Orientation staged in Studio: go to Onboarding Step 3 to commit to robotd.' });
     location.hash = '#/';
     setTimeout(() => document.querySelector('[data-step="commit"]')?.scrollIntoView({ block: 'center' }), 300);
   };
   const detail = html`<table class="imu-table num">
-      <thead><tr><th>步骤</th><th class="r">倾了</th><th class="r">斜了</th><th class="r">晃</th><th></th></tr></thead>
+      <thead><tr><th>Step</th><th class="r">Tilt</th><th class="r">Skew</th><th class="r">Spread</th><th></th></tr></thead>
       <tbody>${STEPS.map((k) => { const s = (res.steps || {})[k] || {}; return html`<tr class=${s.ok === false ? 'bad' : ''}
-        title=${s.ref ? `零点：${s.ref}${s.ref_offset_deg != null ? `（离桌上静止 ${fmt(s.ref_offset_deg)}°）` : ''}` : ''}>
+        title=${s.ref ? `Ref: ${s.ref}${s.ref_offset_deg != null ? ` (${fmt(s.ref_offset_deg)}° off still)` : ''}` : ''}>
         <td>${STEP[k].cn}</td><td class="r">${k === 'still' ? '—' : `${fmt(s.tilt_deg, 0)}°`}</td>
         <td class="r">${s.skew_deg != null ? `${fmt(s.skew_deg, 0)}°` : '—'}</td><td class="r">${s.spread_deg != null ? `${fmt(s.spread_deg)}°` : '—'}</td>
         <td>${s.ok ? '✓' : s.msg || (s.ok === false ? '×' : '')}</td></tr>`; })}</tbody>
     </table>
-    ${res.ok && Q.grade !== 'coarse' ? html`<p class="sv-small">自检：前后两次差 ${fmt(Q.fb_pair_deg)}°、左右两次差 ${fmt(Q.lr_pair_deg)}°、前后和左右差 ${fmt(Q.cross_deg)}°、
-      最斜的一步 ${fmt(Q.max_skew_deg)}°（越小越好；每步斜 ≤${R.good_skew_deg ?? 10}°、两对差 ≤${R.good_cross_deg ?? 6}° 评「好」，
-      斜 >${R.skew_max_deg ?? 20}° 或两对差 >${R.cross_max_deg ?? 12}° 判失败）</p>` : null}
-    ${res.standard ? html`<p class="sv-small">新方向：${res.standard.text}${res.standard.off_deg > 0.5 ? `（再偏 ${fmt(res.standard.off_deg)}°）` : ''}</p>` : null}
-    ${res.mount ? html`<details class="imu-details"><summary>新安装方向（四元数 w, x, y, z）</summary><code class="num">${res.mount.map((x) => fmt(x, 6)).join(', ')}</code></details>` : null}`;
+    ${res.ok && Q.grade !== 'coarse' ? html`<p class="sv-small">Checks: F/B delta ${fmt(Q.fb_pair_deg)}° · L/R delta ${fmt(Q.lr_pair_deg)}° · Cross ${fmt(Q.cross_deg)}° ·
+      Max skew ${fmt(Q.max_skew_deg)}° (Good: skew ≤${R.good_skew_deg ?? 10}°, cross ≤${R.good_cross_deg ?? 6}°; Fail: skew >${R.skew_max_deg ?? 20}° or cross >${R.cross_max_deg ?? 12}°)</p>` : null}
+    ${res.standard ? html`<p class="sv-small">Orientation: ${res.standard.text}${res.standard.off_deg > 0.5 ? ` (${fmt(res.standard.off_deg)}° offset)` : ''}</p>` : null}
+    ${res.mount ? html`<details class="imu-details"><summary>New Mount Quaternion (w, x, y, z)</summary><code class="num">${res.mount.map((x) => fmt(x, 6)).join(', ')}</code></details>` : null}`;
   return html`<section class="board imu-card">
-    <h3>结果 ${res.ok ? html`<span class=${'imu-grade ' + gk}>${gw}</span>` : html`<span class="imu-grade bad">没过</span>`}</h3>
+    <h3>Result ${res.ok ? html`<span class=${'imu-grade ' + gk}>${gw}</span>` : html`<span class="imu-grade bad">Failed</span>`}</h3>
     ${!res.ok ? html`<p class="sv-warn">${res.reason}</p>
-      ${redo.length ? html`<div class="imu-actions"><button class="btn-dark" onClick=${() => onRedo(redo)}>补做${names(redo)}</button>
-        <span class="sv-small">别的几步留着，只重做这${redo.length > 1 ? '几' : '一'}步</span></div>` : null}` : html`
+      ${redo.length ? html`<div class="imu-actions"><button class="btn-dark" onClick=${() => onRedo(redo)}>Redo ${names(redo)}</button>
+        <span class="sv-small">Other steps are preserved</span></div>` : null}` : html`
       <div class="imu-parts num">
-        <div><span>前后</span><b>${sgn(P.pitch_deg)}°</b><small>+ = 站着时读数前倾</small></div>
-        <div><span>左右</span><b>${sgn(P.roll_deg)}°</b><small>+ = 左倾</small></div>
-        <div><span>朝向</span><b>${sgn(P.yaw_deg)}°</b><small>绕竖直轴，站着看不出</small></div>
-        <div><span>一共</span><b>${fmt(P.total_deg)}°</b><small>相对现在的方向</small></div>
+        <div><span>Pitch</span><b>${sgn(P.pitch_deg)}°</b><small>+ = forward tilt</small></div>
+        <div><span>Roll</span><b>${sgn(P.roll_deg)}°</b><small>+ = left tilt</small></div>
+        <div><span>Yaw</span><b>${sgn(P.yaw_deg)}°</b><small>Unobservable while standing</small></div>
+        <div><span>Total</span><b>${fmt(P.total_deg)}°</b><small>vs current mount</small></div>
       </div>`}
     ${res.check ? html`<p class=${res.check.ok ? 'sv-small imu-check' : 'sv-warn imu-check'}>${res.check.ok
-      ? `✓ 跟主程序现在用的方向只差 ${fmt(res.check.diff_deg)}°、站姿倾斜 ${fmt(res.check.tilt_deg)}°：${res.check.recorded ? '记下了「核对过」（总览上手清单第 2 步）' : '够近，但没记上（看日志）'}`
-      : `这次不算「核对过」：${res.check.why}`}</p>` : null}
+      ? `✓ Within ${fmt(res.check.diff_deg)}° of active mount (standing tilt ${fmt(res.check.tilt_deg)}°): ${res.check.recorded ? 'recorded as Verified in Onboarding' : 'not recorded (see Logs)'}`
+      : `Not recorded as verified: ${res.check.why}`}</p>` : null}
     ${(res.notes || []).map((n) => html`<p class="sv-small">· ${n}</p>`)}
-    ${res.ok ? html`<details class="imu-details"><summary>详细数据</summary>${detail}</details>` : detail}
+    ${res.ok ? html`<details class="imu-details"><summary>Detailed Breakdown</summary>${detail}</details>` : detail}
     ${confirms.map((c, i) => html`<label class="imu-confirm"><input type="checkbox" checked=${!!checks[i]} onChange=${(e) => setChecks({ ...checks, [i]: e.target.checked })} /> ${c}</label>`)}
     ${res.ok && res.live_verify ? html`<div class="imu-save">
       <button class="btn-dark" disabled=${!res.mount || !canSave || !allChecked || busy || out?.ok}
-        onClick=${save}>${busy ? '正在核验…' : out?.ok ? '已保存' : '验证并保存 IMU 方向'}</button>
-      <span class="sv-small">保持 HOME。先把实物回正并停住，再点验证。按提示在 20 秒内托住躯干前倾 15–30°，通过后直接保存。</span>
+        onClick=${save}>${busy ? 'Verifying…' : out?.ok ? 'Saved' : 'Verify & Save Mount'}</button>
+      <span class="sv-small">Hold HOME. Level robot first, click Verify, then tilt torso forward 15–30° within 20s.</span>
     </div>` : res.ok ? html`<div class="imu-save">
-      <button class="btn-dark" disabled=${!res.mount} onClick=${save}>去上手清单第 3 步</button>
-      <span class="sv-small">这里只记下方向；第 3 步「写进主程序」才会重启主程序、切到运动模式</span>
+      <button class="btn-dark" disabled=${!res.mount} onClick=${save}>Go to Onboarding Step 3</button>
+      <span class="sv-small">Staged locally; Step 3 "Commit to robotd" restarts into Motion mode.</span>
     </div>` : null}
-    ${!res.mount && res.ok ? html`<p class="sv-warn">算不出新方向（不知道现在的方向），不能写</p>` : null}
-    ${out ? html`<div class=${'banner ' + (out.ok ? 'warn' : 'bad')} role="status"><b>${out.ok ? '写好了' : '没写成'}</b><span class="more">${out.text}</span></div>` : null}
+    ${!res.mount && res.ok ? html`<p class="sv-warn">Cannot compute new mount (current orientation unknown)</p>` : null}
+    ${out ? html`<div class=${'banner ' + (out.ok ? 'warn' : 'bad')} role="status"><b>${out.ok ? 'Saved' : 'Save Failed'}</b><span class="more">${out.text}</span></div>` : null}
   </section>`;
 }
 
-// ---------------- 方向没确认、站不起来：先粗校 ----------------
+// ---------------- Coarse Calibration ----------------
 
 function CoarseCard({ st, imu, link, live }) {
   const [opened, setOpened] = useState(false);
@@ -871,19 +820,19 @@ function CoarseCard({ st, imu, link, live }) {
   const needsUnload = inPlace ? sampling.needs_unload !== false : !!redo.active && !!hold;
   const holdReady = hold && hold.stage === 'holding' && (hold.imu_calibration_ready ??
     (Number.isFinite(hold.max_error_deg) && hold.max_error_deg >= 0 && hold.max_error_deg <= 5));
-  const captureWhy = inPlace ? sampling.reason : hold && !holdReady ? '等关节停稳，再采静止或前倾' : null;
+  const captureWhy = inPlace ? sampling.reason : hold && !holdReady ? 'Wait for joints to settle before capturing' : null;
   const canCollect = !imu?.profile_error && (inPlace || commissioning && (!redo.active || ['commissioning', 'finish_failed'].includes(redo.phase)));
   const showSteps = canCollect && (!verified || opened || redo.active);
   const showStart = !showSteps && !redo.active;
-  const startWhy = !open ? '连不上鸭子：等它回来' : imu?.profile_error ? imu.profile_error : working ? '上一项操作还没结束'
-    : !localEntry && !redo.can_start ? redo.reason || '暂时不能返回标定模式：先卸力并等待读数更新' : null;
+  const startWhy = !open ? 'Offline — waiting for connection' : imu?.profile_error ? imu.profile_error : working ? 'Previous operation still running'
+    : !localEntry && !redo.can_start ? redo.reason || 'Cannot enter Commissioning mode yet: relax servos first' : null;
   const run = async (op) => {
     setBusy(true); setMsg(null);
     const r = await link.cmd('imu.op', { op, confirmed: true }, 90000);
     setBusy(false);
     setMsg({ ok: r.ok, text: r.ok ? r.data?.note || (op === 'redo-start'
-      ? '已回到标定模式。可先点「站姿使能」，等站稳后扶住采集；也可卸力托住采集。' : '已取消，原来的安装方向和模式已恢复。')
-      : r.reason || r.error || '操作没完成：查看当前状态后重试' });
+      ? 'Entered Commissioning mode. Enable Stance or support robot relaxed to capture.' : 'Cancelled and restored previous orientation & mode.')
+      : r.reason || r.error || 'Operation failed' });
   };
   const start = async () => {
     if (startWhy || busy) return;
@@ -891,26 +840,26 @@ function CoarseCard({ st, imu, link, live }) {
     else await run('redo-start');
   };
   return html`<section class="board imu-card imu-coarse">
-    <h3>IMU 安装方向 <span class="sv-small">${redo.active ? '重标定未结束' : verified ? '已保存，可重新校验' : '第一次标定'}</span></h3>
-    <p class="sv-small">先采静止和前倾，计算安装方向（四元数），再由主程序验证。装法改了或上次没调对，都可以重新做。</p>
-    ${imu?.mount_protocol_mismatch ? html`<p class="sv-warn">总线协议与已存安装方向不匹配：需要重新标定；主程序验证通过后才确认这份方向。</p>` : null}
+    <h3>IMU Mount Orientation <span class="sv-small">${redo.active ? 'Recalibration active' : verified ? 'Saved · re-verifiable' : 'Initial calibration'}</span></h3>
+    <p class="sv-small">Capture Still + Forward Tilt to compute mount quaternion, then verify with robotd.</p>
+    ${imu?.mount_protocol_mismatch ? html`<p class="sv-warn">Bus protocol mismatches stored mount orientation: recalibrate and verify.</p>` : null}
     ${redo.active ? html`<p class="sv-warn">${canCollect
-      ? '本次重标定可先站姿使能、站稳后扶住采集，也可卸力托住采集。验证通过后恢复原模式；验证或取消前先失能（卸力）。'
-      : '正在切换或恢复标定会话，请等当前操作结束；如未能恢复，可以取消并恢复原参数。'}</p>
-      <div class="imu-actions"><${TwoStep} label="取消并恢复原参数" ask="扶好鸭子，确认恢复原方向和模式？"
+      ? 'Recalibration active: capture while holding stance or supported relaxed. Relax before verifying or cancelling.'
+      : 'Switching calibration session — please wait.'}</p>
+      <div class="imu-actions"><${TwoStep} label="Cancel & Restore" ask="Support robot — restore previous mount & mode?"
         disabled=${!open || busy || working || needsUnload}
-        onConfirm=${() => run('redo-cancel')} busyLabel="正在恢复…" /></div>` : null}
+        onConfirm=${() => run('redo-cancel')} busyLabel="Restoring…" /></div>` : null}
     ${showStart ? html`<div class="imu-actions">${liveVerify
-      ? html`<button class="btn-dark" disabled=${!!startWhy || busy} title=${startWhy} onClick=${start}>重新标定方向</button>`
-      : html`<${TwoStep} label="重新标定方向" ask=${inPlace ? '保持 HOME，确认采集安装方向？' : commissioning ? '扶好鸭子，确认重新采集？' : '扶好并已卸力，确认重启并进入标定模式？'}
-          cls="btn-dark" disabled=${!!startWhy || busy} title=${startWhy} onConfirm=${start} busyLabel="正在进入标定模式…" />`}</div>
+      ? html`<button class="btn-dark" disabled=${!!startWhy || busy} title=${startWhy} onClick=${start}>Recalibrate Mount</button>`
+      : html`<${TwoStep} label="Recalibrate Mount" ask=${inPlace ? 'Hold HOME and capture mount orientation?' : commissioning ? 'Support robot and recalibrate?' : 'Support robot & relaxed — restart into Commissioning?'}
+          cls="btn-dark" disabled=${!!startWhy || busy} title=${startWhy} onConfirm=${start} busyLabel="Entering Commissioning…" />`}</div>
       <p class="sv-small">${liveVerify
-        ? '保持 HOME 站姿，扶稳后可以采数、验证并保存。先停下模型，采前倾时托住整个躯干。'
+        ? 'Hold HOME stance to capture, verify, and save in-place.'
         : inPlace
-        ? '现在可保持 HOME 站姿，直接采静止和前倾，不用先卸力，也不重启主程序。最后验证写入前再扶稳并卸力，采好的结果会保留。'
+        ? 'Capture Still & Forward Tilt in HOME without restarting; relax before final verification.'
         : commissioning
-        ? '双手扶稳，可卸力托住，也可站姿使能后等站稳，再重新采集。'
-        : '重新标定前先点「失能（卸力）」并扶住鸭子。进入和完成时会重启主程序，并备份原 IMU 方向。'}保留舵机零位、方向和限位；验证通过才采用新方向。</p>
+        ? 'Support robot relaxed or enable stance to capture.'
+        : 'Click Disable (Relax) and support the robot before starting. Servo zeros and limits are preserved.'}</p>
       ${startWhy ? html`<p class="sv-warn">${startWhy}</p>` : null}` : null}
     ${!verifying && captureWhy && (!showStart || captureWhy !== startWhy) ? html`<p class="sv-warn">${captureWhy}</p>` : null}
     ${showSteps ? html`<${CoarseSteps} key=${context} link=${link} disabled=${!open || busy || working || !!captureWhy}
@@ -922,7 +871,7 @@ function CoarseCard({ st, imu, link, live }) {
 }
 
 function CoarseSteps({ link, disabled, redoSession, inPlace, liveVerify, needsUnload, verifyWhy, onBegin, onDone }) {
-  const [step, setStep] = useState('idle');       // idle / still / fwd / confirm / verifying / done / failed
+  const [step, setStep] = useState('idle');
   const [still, setStill] = useState(null);
   const [res, setRes] = useState(null);
   const [checks, setChecks] = useState({});
@@ -937,14 +886,14 @@ function CoarseSteps({ link, disabled, redoSession, inPlace, liveVerify, needsUn
     const r = await link.cmd('imu.op', { op: 'coarse-capture', phase, seconds }, 15000);
     if (!alive.current) return null;
     setBusy(false);
-    if (!r.ok) { setOut({ ok: false, text: r.reason || r.error || '没采到读数' }); return null; }
+    if (!r.ok) { setOut({ ok: false, text: r.reason || r.error || 'Capture failed' }); return null; }
     return r.data || {};
   };
   const takeStill = async () => {
     const d = await grab('still', 3);
     if (!d) return;
     setStill(d); setStep('fwd');
-    setOut({ ok: true, text: `静止采到 ${d.n} 个读数。现在往前低头 15–30°，停住再点下一步。` });
+    setOut({ ok: true, text: `Captured ${d.n} still samples. Now pitch forward 15–30° and hold.` });
   };
   const takeFwd = async () => {
     const d = await grab('fwd', 3);
@@ -956,11 +905,11 @@ function CoarseSteps({ link, disabled, redoSession, inPlace, liveVerify, needsUn
     setBusy(false);
     if (!r.ok || !r.data || r.data.ok !== true) {
       setStep('failed');
-      setOut({ ok: false, text: r.reason || (r.data && r.data.reason) || r.error || '算不出方向' });
+      setOut({ ok: false, text: r.reason || (r.data && r.data.reason) || r.error || 'Solve failed' });
       return;
     }
     setRes(r.data); setStep('confirm');
-    setOut({ ok: true, text: '方向算出来了：对照模块实际装法勾一下，再交给主程序验证。' });
+    setOut({ ok: true, text: 'Solved: confirm physical mounting checkboxes below before verifying.' });
   };
   const reset = () => { setStep('idle'); setStill(null); setRes(null); setChecks({}); setOut(null); };
   const verify = async () => {
@@ -968,89 +917,82 @@ function CoarseSteps({ link, disabled, redoSession, inPlace, liveVerify, needsUn
     setBusy(true); setStep('verifying'); setOut(null);
     const r = await link.cmd('imu.op', { op: 'verify', confirmed: true, mount_wxyz: res.mount }, 90000);
     if (!alive.current) return;
-    if (r.ok) onDone(r.data?.note || '主程序验证通过，安装方向已经保存。');
+    if (r.ok) onDone(r.data?.note || 'Verified and saved by robotd.');
     setBusy(false);
-    if (r.ok) { setStep('done'); setOut({ ok: true, text: (r.data && r.data.note) || '主程序验证通过，安装方向已经写进标定文件' }); }
-    else { setStep('failed'); setOut({ ok: false, text: r.reason || r.error || '主程序没通过验证' }); }
+    if (r.ok) { setStep('done'); setOut({ ok: true, text: (r.data && r.data.note) || 'Verified and written to calibration config' }); }
+    else { setStep('failed'); setOut({ ok: false, text: r.reason || r.error || 'Verification failed' }); }
   };
   const confirms = (res && res.confirm) || [];
   const allChecked = confirms.every((_, i) => checks[i]);
   const nowStep = step === 'idle' ? 'still' : step;
   return html`<div class="imu-coarse-steps">
     <p class="sv-small">${liveVerify
-      ? '保持 HOME，先停下模型。扶稳后采静止，托住整个躯干采前倾。验证通过后会在当前站姿下保存并应用方向。'
+      ? 'Hold HOME (stop policy first). Capture Still, then support torso and capture Forward Tilt.'
       : inPlace
-      ? '保持 HOME、模型不要接管，直接采静止；再托住整个躯干前倾采数。采数不卸力、不切换模式。最后验证写入前，再扶稳并卸力。'
+      ? 'Hold HOME to capture Still & Forward Tilt; relax servos before final verification.'
       : redoSession
-      ? '本次重标定可先点「站姿使能」，等站稳后扶住采集；也可失能（卸力）后托住采集。交给主程序验证或取消前，再先失能（卸力）。'
-      : '粗校在标定模式做：可先点「站姿使能」，等站稳后双手扶住；也可失能（卸力）后双手托住。站姿使能只锁住关节，需要一直扶稳。'}
-      先把整个鸭子摆正、别动，采 3 秒；再让整个躯干前倾 15–30° 停住，采 3 秒；电脑算出方向，再交给主程序自己验一遍。</p>
+      ? 'Enable Stance or support relaxed to capture; relax before verifying or cancelling.'
+      : 'Hold the robot upright for 3s, then pitch the whole torso forward 15–30° for 3s.'}</p>
     ${nowStep === 'still' ? html`<div class="imu-coarse-step">
-      <p class="imu-say"><b>① 扶住鸭子，摆正，别动</b></p>
-      <p class="sv-small">双手扶住躯干，让实物站直、脚朝下，保持不动；已站姿使能的先等站稳。屏幕仍按旧方向显示，先以实物摆正为准。</p>
-      <button class="btn-dark" disabled=${busy || disabled} onClick=${takeStill}>${busy ? '采集中…' : '采静止（3 秒）'}</button>
+      <p class="imu-say"><b>1. Hold robot upright and still</b></p>
+      <p class="sv-small">Support the torso upright with feet down. Use physical levelness as reference.</p>
+      <button class="btn-dark" disabled=${busy || disabled} onClick=${takeStill}>${busy ? 'Capturing…' : 'Capture Still (3s)'}</button>
     </div>` : null}
     ${nowStep === 'fwd' ? html`<div class="imu-coarse-step">
-      <p class="imu-say"><b>② 往前低头 15–30°，停住</b></p>
-      <p class="sv-small">托住整个躯干往前倾，头那边往下，慢慢低到 15–30°，保持不动 3 秒。不要只转头，也不要往左右歪。</p>
+      <p class="imu-say"><b>2. Pitch forward 15–30° and hold</b></p>
+      <p class="sv-small">Tilt the entire torso nose-down 15–30° without rolling left/right, and hold 3 seconds.</p>
       <div class="imu-actions">
-        <button class="btn-dark" disabled=${busy || disabled} onClick=${takeFwd}>${busy ? '采集 / 计算中…' : '采前倾（3 秒）'}</button>
-        <button class="btn-light" disabled=${busy || disabled} onClick=${takeStill}>重采静止</button>
+        <button class="btn-dark" disabled=${busy || disabled} onClick=${takeFwd}>${busy ? 'Capturing / Solving…' : 'Capture Forward (3s)'}</button>
+        <button class="btn-light" disabled=${busy || disabled} onClick=${takeStill}>Recapture Still</button>
       </div>
     </div>` : null}
     ${nowStep === 'confirm' && res ? html`<div class="imu-coarse-step">
-      <p class="sv-small">粗校算出来：${res.standard ? `${res.standard.text}${res.standard.off_deg > 0.5 ? `（再偏 ${fmt(res.standard.off_deg)}°）` : ''}` : '方向已算出'}。
-        这次只采静止和前倾，左右还没验；之后再做下面的「站着校准」精校一次。</p>
+      <p class="sv-small">Coarse result: ${res.standard ? `${res.standard.text}${res.standard.off_deg > 0.5 ? ` (${fmt(res.standard.off_deg)}° offset)` : ''}` : 'Solved'}.
+        Run Standing Calibration afterwards for fine roll/pitch refinement.</p>
       <div class="imu-parts num">
-        <div><span>俯仰</span><b>${sgn(res.parts?.pitch_deg)}°</b><small>+ = 静止时读数前倾</small></div>
-        <div><span>横滚</span><b>${sgn(res.parts?.roll_deg)}°</b><small>+ = 左倾</small></div>
-        <div><span>总改变量</span><b>${fmt(res.parts?.total_deg)}°</b><small>相对原安装方向</small></div>
+        <div><span>Pitch</span><b>${sgn(res.parts?.pitch_deg)}°</b><small>+ = forward tilt</small></div>
+        <div><span>Roll</span><b>${sgn(res.parts?.roll_deg)}°</b><small>+ = left tilt</small></div>
+        <div><span>Total Delta</span><b>${fmt(res.parts?.total_deg)}°</b><small>vs previous mount</small></div>
       </div>
-      <p class="sv-small">静止时躯干姿态的偏差也会折入安装方向；这些修正量同时包含参考姿态偏差和安装偏差，采静止时要以实物摆正为准。</p>
       ${(res.notes || []).map((n) => html`<p class="sv-small">· ${n}</p>`)}
       ${confirms.map((c, i) => html`<label class="imu-confirm"><input type="checkbox" checked=${!!checks[i]}
         onChange=${(e) => setChecks({ ...checks, [i]: e.target.checked })} /> ${c}</label>`)}
       <div class="imu-actions">
-        <button class="btn-dark" disabled=${busy || disabled || needsUnload || !!verifyWhy || !res.mount || !allChecked} onClick=${verify}>交给主程序验证</button>
-        <button class="btn-light" disabled=${busy} onClick=${reset}>重做</button>
+        <button class="btn-dark" disabled=${busy || disabled || needsUnload || !!verifyWhy || !res.mount || !allChecked} onClick=${verify}>Verify with robotd</button>
+        <button class="btn-light" disabled=${busy} onClick=${reset}>Restart</button>
       </div>
       ${verifyWhy ? html`<p class="sv-warn">${verifyWhy}</p>` : null}
-      ${(redoSession || inPlace) && !liveVerify ? html`<p class=${needsUnload ? 'sv-warn' : 'sv-small'}>先扶稳并点「失能（卸力）」，已采集和求解的结果会保留。${inPlace ? '点击验证后才备份原方向并切换模式；' : ''}验证通过后恢复原运行模式。</p>` : null}
-      <p class="sv-small"><b>点击验证前，先把实物回正并停住。</b>点了以后，再按提示在 20 秒内往前倾 15–30° 并停住。</p>
+      ${(redoSession || inPlace) && !liveVerify ? html`<p class=${needsUnload ? 'sv-warn' : 'sv-small'}>Click Disable (Relax) and support the robot before verifying.</p>` : null}
+      <p class="sv-small"><b>Level the robot before clicking Verify</b>, then tilt forward 15–30° within 20s when prompted.</p>
     </div>` : null}
     ${nowStep === 'verifying' ? html`<div class="imu-coarse-step">
-      <p class="imu-say"><b>按主程序提示，在 20 秒内往前倾 15–30°</b></p>
-      <p class="sv-small">保持双手托住。主程序会先检查摆正，再检查前倾；验证成功后会保存，重标定会话还需等原模式恢复完毕。</p>
+      <p class="imu-say"><b>Pitch forward 15–30° within 20 seconds</b></p>
+      <p class="sv-small">Support the robot while robotd verifies upright and forward tilt.</p>
     </div>` : null}
-    ${nowStep === 'done' ? html`<p class="sv-small">主程序验证通过，方向已经写进标定文件。下面「站着校准」还可以再精校一次。</p>` : null}
+    ${nowStep === 'done' ? html`<p class="sv-small">Verified and saved. You can run Standing Calibration below to refine.</p>` : null}
     ${nowStep === 'failed' ? html`<div class="imu-actions">
-      <button class="btn-dark" onClick=${reset}>重做</button>
-      <span class="sv-small">按下面的具体原因处理；重标定会话可以取消并恢复原参数。</span>
+      <button class="btn-dark" onClick=${reset}>Restart</button>
+      <span class="sv-small">Review the error below and retry.</span>
     </div>` : null}
     ${out ? html`<div class=${'banner ' + (out.ok ? 'warn' : 'bad')} role="status"><span>${out.text}</span></div>` : null}
   </div>`;
 }
 
-// ---------------- 后端在做的事（粗校、写入、换芯片）：一步一步报给页面 ----------------
-// imu.job = { kind: 'coarse'|'save'|'set_chip'|'detect', title, msg, tilt_deg?, target_deg?, hold?, failed?, done? }
-// 托着鸭子的那几步（摆正 ≤5°、低头 15–30°）要看倾角，所以 tilt_deg 放大写
+// ---------------- Import IMU Mount ----------------
 
-// ---------------- 导入 IMU 方向 ----------------
-// 已经有这只鸭子的方向文件时用，不用再站着校。页面只从文件里取 IMU 类型和四个数交给后端（文件里别的内容不上传）；
-// 后端记成「待写入的方向」，上手清单第 3 步「写进主程序」才生效。
 const IMPORT_MAX_BYTES = 256 * 1024;
 function mountFromFile(doc) {
-  if (!doc || typeof doc !== 'object') throw new Error('文件内容不是方向文件');
+  if (!doc || typeof doc !== 'object') throw new Error('Invalid orientation file');
   const records = Array.isArray(doc.records) ? doc.records.map(r => r?.imu) : [];
   const found = [doc, doc.imu, doc.mount, ...records].filter(m => m && typeof m === 'object' && 'quat' in m);
-  if (!found.length) throw new Error('文件里没找到 IMU 方向');
-  if (found.length > 1) throw new Error(`文件里有 ${found.length} 份方向：请用只含一份方向的文件`);
+  if (!found.length) throw new Error('No IMU orientation found in file');
+  if (found.length > 1) throw new Error(`File contains ${found.length} orientations; expected 1`);
   const { source, quat } = found[0];
-  if (!['bus', 'bno08x', 'lsm6dsv16x'].includes(source)) throw new Error('文件里没写清是哪种 IMU 的方向');
+  if (!['bus', 'bno08x', 'lsm6dsv16x'].includes(source)) throw new Error('Missing valid IMU source type');
   if (!Array.isArray(quat) || quat.length !== 4 || !quat.every(Number.isFinite)) {
-    throw new Error('方向需要四个有限数');
+    throw new Error('Quaternion must contain 4 finite numbers');
   }
-  if (Math.abs(Math.hypot(...quat) - 1) > 1e-3) throw new Error('文件里的方向不是单位四元数');
+  if (Math.abs(Math.hypot(...quat) - 1) > 1e-3) throw new Error('Quaternion is not unit length');
   return { source, quat };
 }
 function ImportCard({ link, live }) {
@@ -1065,27 +1007,27 @@ function ImportCard({ link, live }) {
     setOut(null);
     let mount;
     try {
-      if (file.size > IMPORT_MAX_BYTES) throw new Error('文件太大：不像是方向文件');
+      if (file.size > IMPORT_MAX_BYTES) throw new Error('File too large');
       let doc;
-      try { doc = JSON.parse(await file.text()); } catch { throw new Error('文件读不出来：不是 json'); }
+      try { doc = JSON.parse(await file.text()); } catch { throw new Error('Invalid JSON file'); }
       mount = mountFromFile(doc);
-    } catch (err) { setOut({ ok: false, text: `没导入：${err.message}` }); return; }
+    } catch (err) { setOut({ ok: false, text: `Import failed: ${err.message}` }); return; }
     setBusy(true);
     const r = await link.cmd('imu.op', { op: 'import-mount', source: mount.source, quat: mount.quat }, 15000);
     setBusy(false);
     setOut(r.ok
-      ? { ok: true, text: `导入好了${r.data?.standard?.text ? `（${r.data.standard.text}）` : ''}，还没生效：去总览上手清单第 3 步点「写进主程序」。` }
-      : { ok: false, text: `没导入：${r.reason || r.error || '没说原因'}` });
+      ? { ok: true, text: `Imported${r.data?.standard?.text ? ` (${r.data.standard.text})` : ''}. Commit in Onboarding Step 3 to apply.` }
+      : { ok: false, text: `Import failed: ${r.reason || r.error || 'unknown error'}` });
   };
   return html`<section class="board imu-card imu-import">
-    <h3>导入 IMU 方向 <span class="sv-small">已经有方向文件时用，不用再站着校</span></h3>
+    <h3>Import IMU Orientation <span class="sv-small">Load from an existing calibration JSON</span></h3>
     <div class="imu-actions">
-      <button class="btn-light imu-import-btn" disabled=${busy || off} onClick=${() => input.current?.click()}>${busy ? '正在导入…' : '导入 IMU 方向…'}</button>
+      <button class="btn-light imu-import-btn" disabled=${busy || off} onClick=${() => input.current?.click()}>${busy ? 'Importing…' : 'Import IMU JSON…'}</button>
       <input ref=${input} class="imu-import-file" type="file" accept=".json,application/json" hidden onChange=${pick} />
-      <span class="sv-small">文件里的方向要是这只鸭子、这种装法的；装法不一样，写进去站起来会往一边倒。</span>
+      <span class="sv-small">Must match this robot's physical IMU mounting.</span>
     </div>
     ${out ? html`<p class=${out.ok ? 'sv-small imu-import-out' : 'sv-warn imu-import-out'} role="status">${out.text}
-      ${out.ok ? html` <a href="#/" onClick=${() => setTimeout(() => document.querySelector('[data-step="commit"]')?.scrollIntoView({ block: 'center' }), 300)}>去上手清单</a>` : null}</p>` : null}
+      ${out.ok ? html` <a href="#/" onClick=${() => setTimeout(() => document.querySelector('[data-step="commit"]')?.scrollIntoView({ block: 'center' }), 300)}>Go to Onboarding</a>` : null}</p>` : null}
   </section>`;
 }
 
@@ -1093,19 +1035,17 @@ function JobBanner({ job }) {
   if (!job) return null;
   const kind = job.failed ? 'bad' : 'warn';
   return html`<div class=${'banner imu-job ' + kind} role="status" aria-live="polite">
-    <b>${job.title || '在做'}</b><span class="more">${job.msg || ''}</span>
+    <b>${job.title || 'Working'}</b><span class="more">${job.msg || ''}</span>
     ${job.tilt_deg != null ? html`<span class="imu-job-tilt num">${fmt(job.tilt_deg)}°${job.target_deg ? html`<small> / ${job.target_deg}</small>` : null}</span>` : null}
     ${job.hold != null && !job.done ? html`<span class="imu-bar small"><span style=${{ width: `${Math.round(Math.min(1, job.hold) * 100)}%` }}></span></span>` : null}
   </div>`;
 }
 
-// 给测试用（不接浏览器也能喂一串读数，看采集怎么走）
 export const _test = { RULES, STEPS, TILTS, feed, freshWizard, startCollect, endCollect, resumeCollect, redoSteps,
   missingSteps, payload, findHold, findRef, spreadP90, tiltOf, qRotate };
 
-// ---------------- 页面 ----------------
+// ---------------- Page ----------------
 
-/** live / age：跟总览同一个判断（app.js 的 Main 里算好传进来）；没传就只看 st.joints_age_ms。 */
 export function ImuPage({ st, imu, link, live, age, diagnosticElapsed = 0, pd }) {
   const W = useRef(freshWizard());
   const [, bump] = useState(0);
@@ -1123,14 +1063,11 @@ export function ImuPage({ st, imu, link, live, age, diagnosticElapsed = 0, pd })
   }, [context]);
 
   useEffect(() => {
-    // HOME readiness gates final verification, not passive sample collection.
-    // feed pauses on stale IMU data and preserves the samples already collected.
     if (!feed(W.current, st, live)) return;
     for (const e of W.current.events.splice(0)) if (!mutedRef.current) beep(e);
     redraw();
   }, [st, live]);
 
-  // 采完了：交给后端算（旧方向后端自己从 calibration-status 拿，不用页面传）
   const phase = W.current.phase;
   useEffect(() => {
     if (phase !== 'solving') return undefined;
@@ -1140,7 +1077,7 @@ export function ImuPage({ st, imu, link, live, age, diagnosticElapsed = 0, pd })
     link.cmd('imu.op', { op: 'solve', frame: 'body', mode: 'full', samples: payload(w), ...basis }, 15000).then((r) => {
       if (dead || W.current !== w) return;
       if (r.ok && r.data) { w.phase = 'done'; w.result = r.data; setRes(r.data); }
-      else { w.phase = 'error'; w.error = r.reason || r.error || '没算出来'; }
+      else { w.phase = 'error'; w.error = r.reason || r.error || 'Solve failed'; }
       redraw();
     });
     return () => { dead = true; };
@@ -1159,33 +1096,26 @@ export function ImuPage({ st, imu, link, live, age, diagnosticElapsed = 0, pd })
   };
   const onRedo = (steps) => { audioUnlock(); redoSteps(W.current, steps); setRes(null); redraw(); };
 
-  const run = async (args, what, timeout = 15000) => {
-    setBusy(true); setMsg(null);
-    const r = await link.cmd('imu.op', args, timeout);
-    setBusy(false);
-    setMsg(r.ok ? { ok: true, text: `${what}：${r.data?.note || '好了'}` } : { ok: false, text: `${what}没成：${r.reason || r.error || '没说原因'}` });
-    return r;
-  };
   const w = W.current;
   const S = statusOf(st, imu, live);
   const F = freshText(st, live, age);
   const applied = res?.live_verify && imu?.mount?.verified &&
     res.mount?.every((value, i) => Math.abs(value - imu.mount.quat?.[i]) < 1e-8);
   const arrow = w.phase === 'collect' && w.done.still ? nextTodo(w) : null;
-  const cue = w.phase === 'collect' ? (!w.done.still ? '静止 3 秒：别碰它' : arrow ? `下一个：${STEP[arrow].cn}（顺序随便）` : null) : null;
+  const cue = w.phase === 'collect' ? (!w.done.still ? 'Hold still for 3s' : arrow ? `Next: ${STEP[arrow].cn} (any order)` : null) : null;
   return html`<div class="imu-page">
     <header class="sv-head">
       <h1>IMU</h1>
       <span class="sv-metrics num">
-        <span>方向 <b>${S.word}</b></span>
-        <span>倾角 <b>${fmt(st?.tilt_deg)}°</b>${F.live ? '' : `（${F.text}）`}</span>
-        <span>芯片 <b>${chipLabel(imu, live, diagnosticElapsed)}</b></span>
+        <span>Mount <b>${S.word}</b></span>
+        <span>Tilt <b>${fmt(st?.tilt_deg)}°</b>${F.live ? '' : ` (${F.text})`}</span>
+        <span>Sensor <b>${chipLabel(imu, live, diagnosticElapsed)}</b></span>
       </span>
     </header>
-    <div class="sv-sub">IMU 告诉策略「机身往哪边歪」。大家装的都不一样，装歪几度站着看不出来，一走就往前冲（一号鸭 10-12 装歪 8.5° 就是这样），所以要重新校一下。</div>
+    <div class="sv-sub">IMU calibration aligns the sensor frame to the robot body so locomotion balance stays centered without forward or lateral drift.</div>
     <${JobBanner} job=${imu?.job} />
     ${msg ? html`<div class=${'banner ' + (msg.ok ? 'warn' : 'bad')} role="status"><span>${msg.text}</span>
-      <a href="#" onClick=${(e) => { e.preventDefault(); setMsg(null); }}>知道了</a></div>` : null}
+      <a href="#" onClick=${(e) => { e.preventDefault(); setMsg(null); }}>Dismiss</a></div>` : null}
     <div class="imu-grid">
       <${ImuStage} st=${st} stale=${!F.live} corr=${res?.ok && !applied ? res.correction : null} parts=${res?.parts}
         collecting=${w.phase === 'collect'} arrow=${arrow} cue=${cue} />

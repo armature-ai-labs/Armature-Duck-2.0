@@ -36,8 +36,8 @@ class PublishedContract(unittest.TestCase):
         document=Path(__file__).resolve().parents[3]/'docs/native-update-20261104.md'
         self.assertTrue(document.is_file())
         self.assertIn('docs/native-update-20261104.md',C.PREDECESSOR_PROCEDURE)
-        self.assertIn('恢复旧配套驱动',C.PREDECESSOR_PROCEDURE)
-        self.assertIn('**恢复旧配套驱动**',document.read_text(encoding='utf-8'))
+        self.assertIn('item',C.PREDECESSOR_PROCEDURE)
+        self.assertIn('**item**',document.read_text(encoding='utf-8'))
 
 
 class BundleManifest(unittest.TestCase):

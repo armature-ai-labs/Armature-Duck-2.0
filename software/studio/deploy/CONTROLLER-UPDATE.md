@@ -85,7 +85,7 @@ While present, the gate allows only a root-managed release whose signed suite
 declares and hashes the actual mapping consumer and reader. Software rollback or
 reboot cannot silently launch older default-R3 voice against a custom native map.
 
-Use “恢复旧配套驱动” before “退回上一版网页 / 语音”. The compatibility marker and
+Use "Restore Previous Companion Driver" before "Roll Back Studio / Voice". The compatibility marker and
 external guard are removed only after the old native vector is running and its
 owned runtime is handled. Failed/incomplete restoration keeps legacy exclusion.
 

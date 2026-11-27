@@ -66,7 +66,7 @@ class StartupObservationsTest(unittest.TestCase):
         self.assertEqual(result["posture"], "starting")
         self.assertFalse(result["guard"])
         self.assertEqual(result["estop"]["state"], "unavailable")
-        self.assertEqual(result["start_wait"]["text"], "等待 IMU 数据（来源：lsm6dsv16x）")
+        self.assertEqual(result["start_wait"]["text"], "Waiting for IMU data (source: lsm6dsv16x)")
         self.assertIn("host IMU", result["start_error"])
         json.dumps(result, allow_nan=False)
 
@@ -234,9 +234,9 @@ class StartupCopyTest(unittest.TestCase):
                     state, header, item, phase, todo = self.texts()
                     for text in (header["text"], item["text"], phase["word"], todo["msg"],
                                  (state.get("start_wait") or {}).get("text", "")):
-                        self.assertIn("等待 IMU 数据", text)
+                        self.assertIn("Waiting for IMU data", text)
                         self.assertIn(source, text)
-                        self.assertNotIn("舵机没上电", text)
+                        self.assertNotIn("item", text)
                     self.assertEqual(header["raw"], error)
                     self.assertEqual(phase["error"], error)
                     self.assertIn(error, item["text"])
@@ -248,12 +248,12 @@ class StartupCopyTest(unittest.TestCase):
         state, header, item, phase, todo = self.texts()
         for text in (header["text"], item["text"], phase["word"], todo["msg"],
                      (state.get("start_wait") or {}).get("text", "")):
-            self.assertIn("等待总线设备响应", text)
-            self.assertNotIn("多半", text)
+            self.assertIn("Waiting for servo bus response", text)
+            self.assertNotIn("item", text)
         self.assertIn("missing IDs [21]", header["raw"])
 
     def test_calibration_refusal_keeps_its_existing_explanation(self):
         self.rd.bus.set(startup_bus(error="motion requires all 15 calibrated joints and verified IMU mounting"))
         header = onboard.header_of({"bus": self.rd.bus.value, "present": True})
         self.assertEqual(header["kind"], "stuck_calib")
-        self.assertIn("标定或 IMU 方向没过", header["text"])
+        self.assertIn("calibration or IMU unverified", header["text"])

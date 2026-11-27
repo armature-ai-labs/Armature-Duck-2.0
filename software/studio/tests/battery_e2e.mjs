@@ -1,9 +1,9 @@
-// 电池（battery-plan.md v2 §5、§4）的端到端：连本机无头 Edge（CDP），打开 Studio（假 robotd 回放二号鸭 + 电池剧本，
-// Studio 的估算器 20 倍速快进），看总览电池格的各种状态、点开的详情、待办，再到设置页改提醒线 / 红线、
-// 「我量了电池电压」、切到台架电源。每一步的结果用 JSON 打到 stdout，由 tests/test_battery_e2e.py 判断。
-// 单独跑（先起好假 robotd、Studio（STUDIO_BATTERY_SPEED=20）、无头 Edge）：
-//   node tests/battery_e2e.mjs --url http://127.0.0.1:18103/ --cdp 9353 --fake 17056 [--shots <截图目录>]
-// Node ≥ 22（自带 WebSocket），不需要装任何包。
+//  (battery-plan.md v2 §5, §4):  Edge (CDP),  Studio ( robotd  + , 
+// Studio  20 ), , , ,  / , 
+// '', . JSON  stdout,  tests/test_battery_e2e.py .
+//  ( robotd, Studio (STUDIO_BATTERY_SPEED=20),  Edge): 
+//   node tests/battery_e2e.mjs --url http://127.0.0.1:18103/ --cdp 9353 --fake 17056 [--shots <>]
+// Node ≥ 22 ( WebSocket), .
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -41,14 +41,14 @@ ws.addEventListener('message', (ev) => {
 const send = (method, params = {}) => new Promise((r) => { const i = ++id; waiting.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
 const js = async (expression) => {
   const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-  if (r.result?.exceptionDetails) throw new Error(`页面里出错：${r.result.exceptionDetails.exception?.description || r.result.exceptionDetails.text}`);
+  if (r.result?.exceptionDetails) throw new Error(`item: ${r.result.exceptionDetails.exception?.description || r.result.exceptionDetails.text}`);
   return r.result?.result?.value;
 };
 const cellText = () => js(`(document.querySelector('.bat-cell')?.innerText || '').replace(/\\s+/g, ' ').trim()`);
 const waitFor = async (expr, what, timeout = 15000, every = 100) => {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (await js(expr)) return true; await sleep(every); }
-  throw new Error(`${timeout / 1000} 秒没等到：${what}。电池格现在：${await cellText()} ／ 待办：${await js(`document.querySelector('.todo')?.innerText?.replace(/\\s+/g, ' ')`)}`);
+  throw new Error(`${timeout / 1000} item: ${what}.item: ${await cellText()} item item: ${await js(`document.querySelector('.todo')?.innerText?.replace(/\\s+/g, ' ')`)}`);
 };
 await send('Runtime.enable');
 await send('Page.enable');
@@ -64,7 +64,7 @@ async function open(hash, w = 1440, h = 900, mobile = false) {
   await setView(w, h, mobile);
   await send('Page.navigate', { url: `${BASE}${hash}` });
 }
-// 截图：sels 里几个元素的外接框（详情弹窗是绝对定位的，跟电池格一起框）
+// : sels  (, )
 async function shot(name, ...sels) {
   if (!SHOTS) return;
   const r = await js(`(() => { const rs = ${JSON.stringify(sels)}.map((s) => document.querySelector(s)).filter(Boolean).map((e) => e.getBoundingClientRect());
@@ -73,84 +73,84 @@ async function shot(name, ...sels) {
     return { x: l + scrollX - 8, y: t + scrollY - 8, width: R - l + 16, height: B - t + 16 }; })()`);
   const res = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, ...(r ? { clip: { ...r, scale: 1 } } : {}) });
   writeFileSync(join(SHOTS, name), Buffer.from(res.result.data, 'base64'));
-  log('截图', name);
+  log('item', name);
 }
 const mode = (m) => `document.querySelector('.bat-cell')?.dataset.mode === ${JSON.stringify(m)}`;
 const todoText = () => js(`(document.querySelector('.todo')?.innerText || '').replace(/\\s+/g, ' ')`);
-// 估算器 20 倍速：读不到 10 秒（真时间 0.5 秒）就重新起步。用它把上一段的「最近 5 分钟」清掉，换一个新电压
+//  20 :  10  ( 0.5 ).' 5 ', 
 async function restart(battery) {
   await fakeSet({ battery: { gone: true } });
-  await waitFor(mode('no_data'), '读不到电压', 8000);
+  await waitFor(mode('no_data'), 'item', 8000);
   await fakeSet({ battery: { gone: false, sag: 0, ...battery } });
 }
 
 const out = { errors, steps: {} };
 
-// ---- 1. 总览：静置 7.62 V ----
+// ---- 1. :  7.62 V ----
 // Studio may have accumulated the recorded fixture's 7.54 V while Edge was
 // starting. Explicitly clear that history before testing the scripted 7.62 V.
 await fakeSet({ battery: { gone: true } });
 await open('#/');
-await waitFor(`!!document.querySelector('.bat-cell') && !!document.querySelector('.band-cpu')`, '总览出来');
-await waitFor(mode('no_data'), '清空启动时的电池样本', 8000);
+await waitFor(`!!document.querySelector('.bat-cell') && !!document.querySelector('.band-cpu')`, 'item');
+await waitFor(mode('no_data'), 'item', 8000);
 await fakeSet({ battery: { v: 7.62, sag: 0, gone: false } });
-await waitFor(mode('calm'), '电池格出数');
+await waitFor(mode('calm'), 'item');
 await sleep(400);
 out.steps.calm = { text: await cellText(), cls: await js(`document.querySelector('.bat-cell').className`) };
 await shot('battery-calm.png', '.band');
 
-// ---- 2. 点开看怎么算的 ----
+// ---- 2.  ----
 await js(`document.querySelector('.bat-hit').click()`);
-await waitFor(`!!document.querySelector('.bat-pop')`, '详情弹出来');
+await waitFor(`!!document.querySelector('.bat-pop')`, 'item');
 out.steps.detail = { lines: await js(`[...document.querySelectorAll('.bat-pop li')].map((l) => l.textContent)`),
   expanded: await js(`document.querySelector('.bat-hit').getAttribute('aria-expanded')`) };
 await shot('battery-detail.png', '.band', '.bat-pop');
 await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
-await waitFor(`!document.querySelector('.bat-pop')`, '按 Esc 收起');
+await waitFor(`!document.querySelector('.bat-pop')`, 'item Esc item');
 
-// ---- 3. 读不到 → 重新起步「估算中」 ----
+// ---- 3.  → '' ----
 await fakeSet({ battery: { gone: true } });
-await waitFor(mode('no_data'), '读不到电压', 8000);
+await waitFor(mode('no_data'), 'item', 8000);
 out.steps.nodata = { text: await cellText() };
 await shot('battery-nodata.png', '.band');
 await fakeSet({ battery: { gone: false, v: 7.40 } });
-await waitFor(mode('estimating'), '估算中', 8000, 40);
+await waitFor(mode('estimating'), 'item', 8000, 40);
 out.steps.estimating = { text: await cellText(), todo: await todoText() };
 await shot('battery-estimating.png', '.band');
 
-// ---- 4. 黄：7.40 V（约 28%） ----
-await waitFor(`document.querySelector('.bat-cell')?.classList.contains('warn')`, '黄条', 15000);
+// ---- 4. : 7.40 V ( 28%) ----
+await waitFor(`document.querySelector('.bat-cell')?.classList.contains('warn')`, 'item', 15000);
 out.steps.warn = { text: await cellText(), todo: await todoText() };
 await shot('battery-warn.png', '.band', '.todo');
 
-// ---- 5. 红：7.15 V（约 9%） ----
+// ---- 5. : 7.15 V ( 9%) ----
 await restart({ v: 7.15 });
-await waitFor(`document.querySelector('.bat-cell')?.classList.contains('bad') && /电量只剩约/.test(document.querySelector('.todo')?.innerText || '')`, '红线', 15000);
+await waitFor(`document.querySelector('.bat-cell')?.classList.contains('bad') && /item/.test(document.querySelector('.todo')?.innerText || '')`, 'item', 15000);
 out.steps.red = { text: await cellText(), todo: await todoText() };
 await shot('battery-red.png', '.band', '.todo');
 
-// ---- 6. 电压很低：负载把电压拉到 6.8 V 左右 ----
+// ---- 6. :  6.8 V  ----
 await restart({ v: 7.60 });
-await waitFor(mode('calm'), '重新出数');
+await waitFor(mode('calm'), 'item');
 await fakeSet({ battery: { sag: 0.8 } });
-await waitFor(`/电压很低/.test(document.querySelector('.todo')?.innerText || '')`, '电压很低', 15000);
+await waitFor(`/item/.test(document.querySelector('.todo')?.innerText || '')`, 'item', 15000);
 out.steps.lowvolt = { text: await cellText(), todo: await todoText(), badge: await js(`!!document.querySelector('.bat-cell .badge.bad')`) };
 await shot('battery-lowvolt.png', '.band', '.todo');
 await fakeSet({ battery: { sag: 0 } });
 
-// ---- 7. 手机宽度：电池格 + 详情不出横向滚动 ----
+// ---- 7. Phone:  +  ----
 await restart({ v: 7.62 });
 await open('#/', 390, 844, true);
-await waitFor(mode('calm'), '手机上出数');
+await waitFor(mode('calm'), 'Phoneitem');
 await js(`document.querySelector('.bat-hit').click()`);
-await waitFor(`!!document.querySelector('.bat-pop')`, '手机上详情弹出来');
+await waitFor(`!!document.querySelector('.bat-pop')`, 'Phoneitem');
 out.steps.mobile = await js(`({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth,
   popRight: Math.round(document.querySelector('.bat-pop').getBoundingClientRect().right) })`);
 await shot('battery-mobile.png', '.band', '.bat-pop');
 
-// ---- 8. 设置页：电池一栏 ----
+// ---- 8. :  ----
 await open('#/settings');
-await waitFor(`!!document.querySelector('.bset input[name=bat-preset]')`, '设置页的电池一栏');
+await waitFor(`!!document.querySelector('.bset input[name=bat-preset]')`, 'item');
 await sleep(300);
 out.steps.settings = { text: await js(`document.querySelector('.bset').innerText.replace(/\\s+/g, ' ')`) };
 await shot('settings-battery.png', '.bset');
@@ -161,50 +161,50 @@ const setNum = (label, v) => js(`(() => { const e = document.querySelector('.bse
 const clickBtn = (text) => js(`(() => { const b = [...document.querySelectorAll('.bset button')].find((x) => x.textContent.trim().startsWith(${JSON.stringify(text)}));
   if (!b || b.disabled) return false; b.click(); return true; })()`);
 const bmsg = () => js(`[...document.querySelectorAll('.bset .msg')].map((e) => e.textContent.replace(/\\s+/g, ' ')).join(' | ')`);
-// 不合法：红线 28%（没比提醒线 30% 低 5%）
+// :  28% ( 30%  5%)
 await setNum('red_pct', 28);
-await clickBtn('保存');
-await waitFor(`/没存/.test(document.querySelector('.bset').innerText)`, '拒掉不合法的');
+await clickBtn('item');
+await waitFor(`/item/.test(document.querySelector('.bset').innerText)`, 'item');
 out.steps.bad = { msg: await bmsg() };
 await setNum('red_pct', 20);
-await clickBtn('保存');
-await waitFor(`/已保存/.test(document.querySelector('.bset').innerText)`, '存好');
-out.steps.saved = { msg: await bmsg(), logs: (await studioLogs()).filter((m) => m.startsWith('电池设置改了')) };
-// 我量了电池电压：鸭子卸力静置（假 robotd 一开始就是软着的）
+await clickBtn('item');
+await waitFor(`/item/.test(document.querySelector('.bset').innerText)`, 'item');
+out.steps.saved = { msg: await bmsg(), logs: (await studioLogs()).filter((m) => m.startsWith('item')) };
+// : E-Stop ( robotd )
 await sleep(2500);
-await setNum('万用表读数', 7.80);
-await clickBtn('算一下');
-await waitFor(`/用这个校准/.test(document.querySelector('.bset').innerText) || /要先卸力/.test(document.querySelector('.bset').innerText)`, '算出校准');
+await setNum('item', 7.80);
+await clickBtn('item');
+await waitFor(`/item/.test(document.querySelector('.bset').innerText) || /itemE-Stop/.test(document.querySelector('.bset').innerText)`, 'item');
 out.steps.calc = { msg: await bmsg(), text: await js(`document.querySelector('.bset').innerText.replace(/\\s+/g, ' ')`) };
 await shot('settings-calibrate.png', '.bset');
-await clickBtn('用这个校准');
-await waitFor(`/已保存/.test(document.querySelector('.bset').innerText) && /校准 \\+0\\.18 V/.test(document.querySelector('.bset').innerText)`, '校准存好', 8000);
+await clickBtn('item');
+await waitFor(`/item/.test(document.querySelector('.bset').innerText) && /item \\+0\\.18 V/.test(document.querySelector('.bset').innerText)`, 'item', 8000);
 out.steps.calibrated = { now: await js(`document.querySelector('.bset .now').textContent`) };
 
-// ---- 9. 台架电源 ----
+// ---- 9.  ----
 await js(`document.querySelector('.bset input[value=bench]').click()`);
 await sleep(200);
 out.steps.benchForm = { text: await js(`document.querySelector('.bset').innerText.replace(/\\s+/g, ' ')`) };
-await clickBtn('保存');
-await waitFor(`/已保存/.test(document.querySelector('.bset').innerText) && /台架电源（不算电量） · 只显示电压/.test(document.querySelector('.bset .now').textContent)`, '台架电源存好');
+await clickBtn('item');
+await waitFor(`/item/.test(document.querySelector('.bset').innerText) && /item (item) · item/.test(document.querySelector('.bset .now').textContent)`, 'item');
 await shot('settings-bench.png', '.bset');
 await open('#/');
-await waitFor(mode('bench'), '总览变成台架电源');
+await waitFor(mode('bench'), 'item');
 await sleep(400);
 out.steps.bench = { text: await cellText(), todo: await todoText() };
-// 手机那一步弹出来的详情还开着（换页只换地址，总览一直挂着）：没开才点
+// Phone (, ): 
 await js(`document.querySelector('.bat-pop') || document.querySelector('.bat-hit').click()`);
-await waitFor(`!!document.querySelector('.bat-pop')`, '台架电源的详情');
+await waitFor(`!!document.querySelector('.bat-pop')`, 'item');
 out.steps.bench.lines = await js(`[...document.querySelectorAll('.bat-pop li')].map((l) => l.textContent)`);
 await shot('battery-bench.png', '.band', '.bat-pop');
-// 收尾：回到 2S 锂电（别把设置留在台架电源）
+// :  2S  ()
 await open('#/settings');
-await waitFor(`!!document.querySelector('.bset input[value="2s_liion"]')`, '设置页');
+await waitFor(`!!document.querySelector('.bset input[value="2s_liion"]')`, 'item');
 await js(`document.querySelector('.bset input[value="2s_liion"]').click()`);
 await sleep(200);
-await clickBtn('保存');
-await waitFor(`/已保存/.test(document.querySelector('.bset').innerText)`, '改回 2S 锂电');
-out.logs = (await studioLogs()).filter((m) => /电量|电压|电池/.test(m)).slice(-40);
+await clickBtn('item');
+await waitFor(`/item/.test(document.querySelector('.bset').innerText)`, 'item 2S item');
+out.logs = (await studioLogs()).filter((m) => /item|item|item/.test(m)).slice(-40);
 
 process.stdout.write(JSON.stringify(out));
 ws.close();

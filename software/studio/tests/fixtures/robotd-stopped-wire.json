@@ -773,7 +773,7 @@
         "complete_but_late": 0,
         "failed_reads": 0,
         "last_complete_but_late": null,
-        "last_error": "飞特 \"回包\"\\状态",
+        "last_error": "Feetech \"reply\"\\status",
         "last_failure": null,
         "last_missing_read_by_id": {},
         "missing_by_id": {},

@@ -1,4 +1,4 @@
-/* 模型管理沿用 Studio 颜色。输入区域增加底色和边界，明确区分可编辑内容。 */
+
 .models-page { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .models-heading, .models-section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .models-heading h1 { margin: 0; font-size: 26px; line-height: 1.3; }
@@ -9,20 +9,20 @@
 .models-warning { color: var(--warn); }
 .models-error { color: var(--danger); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .models-count { color: var(--text-2); font-size: 13px; }
-.models-btn { border: 1px solid #D2D2D7; background: #F5F5F7; color: var(--text); padding: 8px 14px; min-height: 36px; border-radius: 9px; font: inherit; font-size: 13px; white-space: nowrap; }
+.models-btn { border: 1px solid #D2D2D7; background: var(--panel-2); color: var(--text); padding: 8px 14px; min-height: 36px; border-radius: 9px; font: inherit; font-size: 13px; white-space: nowrap; }
 .models-btn:hover:enabled { background: #E8E8ED; }
 .models-btn.primary { background: var(--blue); border-color: var(--blue); color: #FFF; }
 .models-btn.primary:hover:enabled { background: #0066CC; }
 .models-btn.danger { color: var(--danger); background: #FFF4F5; border-color: #F4BFC5; }
 .models-btn:disabled { opacity: .48; cursor: default; }
 .models-page button:focus-visible, .models-page summary:focus-visible { outline: 3px solid #8EC5FF; outline-offset: 3px; }
-.models-page input, .models-page select { min-width: 0; width: 100%; box-sizing: border-box; padding: 9px 11px; border: 1px solid #A6A6AE; border-radius: 8px; background: #F1F1F5; color: var(--text); font: inherit; font-size: 14px; min-height: 40px; }
-.models-page input:focus, .models-page select:focus { outline: 3px solid #D7EAFF; border-color: var(--blue); background: #FFF; }
+.models-page input, .models-page select { min-width: 0; width: 100%; box-sizing: border-box; padding: 9px 11px; border: 1px solid var(--hair-strong); border-radius: var(--radius); background: var(--panel-2); color: var(--ink); font: inherit; font-size: 14px; min-height: 40px; }
+.models-page input:focus, .models-page select:focus { outline: 2px solid var(--accent); border-color: var(--accent); background: var(--panel-elevated); }
 .models-page input:disabled, .models-page select:disabled { opacity: .6; cursor: default; }
-.models-page input::placeholder { color: #74747D; }
-.models-page label { display: flex; flex-direction: column; gap: 6px; color: var(--text-2); font-size: 12px; min-width: 0; }
+.models-page input::placeholder { color: var(--fg-3); }
+.models-page label { display: flex; flex-direction: column; gap: 6px; color: var(--fg-2); font-size: 12px; min-width: 0; }
 .models-page input[type=file] { padding: 5px 7px; }
-.models-page input[type=file]::file-selector-button { font: inherit; color: var(--text); background: #FFF; border: 1px solid #B7B7C0; border-radius: 5px; padding: 4px 9px; margin-right: 9px; cursor: pointer; }
+.models-page input[type=file]::file-selector-button { font: inherit; color: var(--ink); background: var(--panel-elevated); border: 1px solid var(--hair-strong); border-radius: var(--radius); padding: 4px 9px; margin-right: 9px; cursor: pointer; }
 .models-import { display: grid; grid-template-columns: minmax(200px, 1.5fr) minmax(180px, 1fr) auto; align-items: end; gap: 12px; margin-top: 16px; }
 .models-import > .models-btn { min-height: 40px; }
 .models-list { display: flex; flex-direction: column; }
@@ -62,7 +62,7 @@
 .models-binding { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(300px, 1.5fr); align-items: center; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); }
 .models-binding-current { display: flex; align-items: center; gap: 12px; min-width: 0; font-size: 13px; line-height: 1.6; }
 .models-binding-current span { overflow-wrap: anywhere; }
-.models-binding kbd { display: inline-flex; flex-shrink: 0; justify-content: center; align-items: center; min-width: 38px; padding: 3px 8px; border: 1px solid #D2D2D7; background: #F5F5F7; border-radius: 6px; color: var(--text); font: inherit; font-size: 12px; }
+.models-binding kbd { display: inline-flex; flex-shrink: 0; justify-content: center; align-items: center; min-width: 38px; padding: 3px 8px; border: 1px solid #D2D2D7; background: var(--panel-2); border-radius: 6px; color: var(--text); font: inherit; font-size: 12px; }
 .models-binding-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; }
 .models-bindings { scroll-margin-top: calc(var(--bar-h, 40px) + 16px); }
 .models-bind-hint { font-size: 13px; color: var(--link); padding: 10px 12px; border-radius: 8px; background: #EFF7FF; }

@@ -1,4 +1,4 @@
-/* 「动作」页。照动作库设计稿的 Studio 画板：苹果白底、左边暖灰舞台（跟动作广场网页的鸭子底色一样）、右边动作列表、下面五个键帽。 */
+
 .ac-page { display: flex; flex-direction: column; gap: 16px; min-width: 0; padding-top: 8px; }
 .ac-head { display: flex; justify-content: space-between; align-items: end; gap: 12px; flex-wrap: wrap; }
 .ac-head h1 { margin: 0; font-size: 28px; line-height: 1.25; letter-spacing: -.01em; }
@@ -22,7 +22,6 @@
 
 .ac-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr); gap: 14px; align-items: stretch; }
 
-/* 舞台 */
 .ac-stage { position: relative; display: flex; flex-direction: column; min-height: 0; border-radius: 18px; padding: 18px; color: #0E0E0C; overflow: hidden; background: #EDE9DF; }
 .ac-stage-top h2 { margin: 0; font-size: 22px; font-weight: 700; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .ac-stage-top h2 span { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #6B6555; font-weight: 400; }
@@ -56,14 +55,13 @@
 .ac-install details p { margin: 8px 0 0; line-height: 1.6; }
 .ac-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-top: 8px; }
 .ac-fields label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-2); min-width: 0; }
-.ac-fields input { min-height: 38px; padding: 7px 10px; border: 1px solid #C8C8CE; border-radius: 8px; background: #F5F5F7; font: inherit; font-size: 14px; color: var(--text); min-width: 0; }
+.ac-fields input { min-height: 38px; padding: 7px 10px; border: 1px solid #C8C8CE; border-radius: 8px; background: var(--panel-2); font: inherit; font-size: 14px; color: var(--text); min-width: 0; }
 .ac-fields input:focus { outline: 3px solid #D7EAFF; border-color: var(--blue); background: #FFF; }
 .ac-fields label.ac-check { flex-direction: row; align-items: center; color: var(--text); font-size: 13px; align-self: end; min-height: 38px; }
 .ac-fields label.ac-check input { min-height: 0; }
 .ac-bad { margin: 0; color: var(--danger); font-size: 13px; }
 .ac-dim { color: #6B6555; }
 
-/* 我的动作 */
 .ac-list { background: #FFF; border-radius: 18px; padding: 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .ac-list-head { display: flex; justify-content: space-between; align-items: baseline; padding: 2px 4px 6px; }
 .ac-list-head h2 { margin: 0; font-size: 16px; }
@@ -77,9 +75,9 @@
 .ac-thumb.ac-none svg { width: 70%; }
 .ac-item-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .ac-item-name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
-.ac-item-name em { font-style: normal; font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: 4px; background: #F5B400; color: #1D1D1F; }
+.ac-item-name em { font-style: normal; font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: 4px; background: #F5B400; color: var(--ink); }
 .ac-item-sub { font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ac-cap { flex: none; min-width: 26px; padding: 0 8px; height: 22px; border-radius: 11px; background: #1D1D1F; color: #FFF; font-size: 11px; font-weight: 700;
+.ac-cap { flex: none; min-width: 26px; padding: 0 8px; height: 22px; border-radius: 11px; background: var(--ink); color: #FFF; font-size: 11px; font-weight: 700;
   display: inline-flex; align-items: center; justify-content: center; }
 .ac-pill { flex: none; font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #EFEFF4; color: var(--text-2); white-space: nowrap; }
 .ac-pill.warn { background: #FFF3D6; color: #8A5A00; }
@@ -87,7 +85,6 @@
 .ac-add { margin-top: 4px; padding: 14px; border-radius: 14px; border: 1.5px dashed #D2D2D7; background: transparent; font: inherit; font-size: 13px; color: var(--text-2); cursor: pointer; }
 .ac-add:hover:enabled { background: #F7F7F9; }
 
-/* 手柄键 */
 .ac-keys, .ac-more { background: #FFF; border-radius: 18px; padding: 18px; }
 .ac-keys-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; flex-wrap: wrap; }
 .ac-keys h2, .ac-more h2 { margin: 0; font-size: 16px; }
@@ -96,7 +93,7 @@
 .ac-keycap { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px 8px; border-radius: 14px; border: 1px solid #E8E8ED; background: #FFF; font: inherit;
   color: var(--text); cursor: pointer; transition: transform .2s cubic-bezier(.2,1.3,.3,1), box-shadow .2s ease; }
 .ac-keycap:hover:enabled { transform: translateY(-3px); }
-.ac-keycap .cap { min-width: 38px; height: 38px; padding: 0 6px; border-radius: 19px; background: #1D1D1F; color: #FFF; font-weight: 700; font-size: 13px;
+.ac-keycap .cap { min-width: 38px; height: 38px; padding: 0 6px; border-radius: 19px; background: var(--ink); color: #FFF; font-weight: 700; font-size: 13px;
   display: flex; align-items: center; justify-content: center; }
 .ac-keycap .what { font-size: 13px; font-weight: 600; text-align: center; overflow-wrap: anywhere; }
 .ac-keycap.listen { border-color: var(--blue); }

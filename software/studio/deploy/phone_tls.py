@@ -26,7 +26,7 @@ def openssl(*args):
 def secure_directory(path):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
-        raise ValueError("证书目录的类型、所有者或权限不正确")
+        raise ValueError("Invalid TLS directory type, owner, or permissions")
 
 
 def issue_leaf(directory, ca, name, group):
@@ -96,7 +96,7 @@ def valid_leaf(directory, name):
 
 def provision(directory, name, group):
     if not re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", name):
-        raise ValueError("主机名需要是有效的 DNS 标签")
+        raise ValueError("Hostname must be a valid DNS label")
     directory.parent.mkdir(mode=0o755, exist_ok=True)
     secure_directory(directory.parent)
     parent_fd = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -107,14 +107,14 @@ def provision(directory, name, group):
             for basename in ("ca.key", "ca.crt", "duck.crt", "duck.key"):
                 path = directory / basename
                 if os.path.lexists(path) and not stat.S_ISREG(path.lstat().st_mode):
-                    raise ValueError("现有证书路径需要是普通文件")
+                    raise ValueError("Existing certificate path must be a regular file")
             if (directory / "ca.crt").exists() or (directory / "ca.key").exists():
                 ca_key = directory / "ca.key"
                 if not ca_key.is_file() or not (directory / "ca.crt").is_file():
-                    raise ValueError("现有 CA 文件不完整，请先从本机备份恢复")
+                    raise ValueError("Existing CA files incomplete; restore from local backup")
                 info = ca_key.stat()
                 if info.st_uid != os.geteuid() or info.st_mode & 0o077:
-                    raise ValueError("CA 私钥需要 root 所有且仅 root 可读")
+                    raise ValueError("CA private key must be owned by root and readable only by root")
                 if valid_leaf(directory, name):
                     return
                 with tempfile.TemporaryDirectory(dir=directory.parent) as work:

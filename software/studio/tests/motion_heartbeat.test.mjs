@@ -54,9 +54,9 @@ test('old heartbeat replies cannot cancel a newer token', async () => {
 });
 
 test('a failed live heartbeat stops that session and reports its reason', async () => {
-  const x = setup(async args => args.action === 'heartbeat' ? { ok: false, reason: '控制权已变化' } : { ok: true });
+  const x = setup(async args => args.action === 'heartbeat' ? { ok: false, reason: 'item' } : { ok: true });
   x.lease.sync(live()); await flush();
-  assert.equal(x.callbacks.size, 0); assert.deepEqual(x.errors, ['控制权已变化']);
+  assert.equal(x.callbacks.size, 0); assert.deepEqual(x.errors, ['item']);
   assert.equal(x.calls.at(-1).action, 'stop');
 });
 

@@ -63,31 +63,31 @@ try {
       diagnostic:{status:'identified',responding:true,age_ms:20,sample_valid:true,sensor_ready:true,
         sample_fresh:null,info:{protocol:'feetech',board:'imu_to_dxl',identity:[1],profile:'legacy'}}}; draw()`);
   await wait(`document.querySelector('.imu-diagnostic')`, 'independent diagnostic shown');
-  assert.match(await js(`document.querySelector('.imu-diagnostic').innerText`), /已识别.*有数据/);
+  assert.match(await js(`document.querySelector('.imu-diagnostic').innerText`), /item.*item/);
   assert.match(await js(`document.querySelector('.imu-diagnostic').innerText`), /IMU-to-DXL.*Feetech.*200/);
-  assert.match(await js(`document.querySelector('.imu-diagnostic').innerText`), /不代表.*安装方向.*运动/);
-  assert.doesNotMatch(await js(`document.querySelector('.sv-metrics').innerText`), /方向已确认/);
+  assert.match(await js(`document.querySelector('.imu-diagnostic').innerText`), /item.*item.*item/);
+  assert.doesNotMatch(await js(`document.querySelector('.sv-metrics').innerText`), /item/);
   assert.equal(await js(`!!document.querySelector('.imu-big:not([disabled])')`), false);
-  for (const [status, expected] of [['data_wait','等待数据'], ['no_response','未应答'],
-    ['stale','诊断已过期'], ['unknown','诊断未知']]) {
+  for (const [status, expected] of [['data_wait','item'], ['no_response','No Reply'],
+    ['stale','item'], ['unknown','itemUnknown']]) {
     await js(`props.imu={...props.imu,diagnostic:{...props.imu.diagnostic,status:${JSON.stringify(status)},responding:null,info:null}};draw()`);
     await wait(`document.querySelector('.imu-diagnostic').innerText.includes(${JSON.stringify(expected)})`, 'diagnostic '+status);
     assert.doesNotMatch(await js(`document.querySelector('.imu-diagnostic').innerText`), /IMU-to-DXL/);
   }
   await js(`props.imu={...props.imu,diagnostic:{status:'identified',info:{protocol:'feetech',board:'imu_to_dxl'}}}; props.live=false;draw()`);
-  await wait(`document.querySelector('.imu-diagnostic').innerText.includes('诊断未知')`, 'browser disconnect invalidation');
+  await wait(`document.querySelector('.imu-diagnostic').innerText.includes('itemUnknown')`, 'browser disconnect invalidation');
   assert.doesNotMatch(await js(`document.querySelector('.sv-metrics').innerText`), /IMU-to-DXL/);
   await js(`props.live=true;props.diagnosticElapsed=200;
     props.imu={...props.imu,diagnostic:{status:'identified',age_ms:2800,info:{protocol:'feetech',board:'imu_to_dxl'}}};draw()`);
-  await wait(`document.querySelector('.imu-diagnostic').innerText.includes('诊断已过期')`, 'browser receipt age added');
+  await wait(`document.querySelector('.imu-diagnostic').innerText.includes('item')`, 'browser receipt age added');
   assert.doesNotMatch(await js(`document.querySelector('.sv-metrics').innerText`), /IMU-to-DXL/);
   await js(`props.diagnosticElapsed=0;props.imu={...props.imu,diagnostic:{status:'unknown',responding:true,info:null}};draw()`);
-  await wait(`document.querySelector('.imu-diagnostic').innerText.includes('有应答 · 类型待确认')`, 'unknown identity response');
+  await wait(`document.querySelector('.imu-diagnostic').innerText.includes('Responding · item')`, 'unknown identity response');
   await js(`props.st=savedProps.st;props.imu=savedProps.imu;props.live=true;props.diagnosticElapsed=0;draw()`);
   await pause(120);
   assert.match(await js('document.querySelector(".imu-side").innerText'), /FT6.*Feetech/);
-  assert.doesNotMatch(await js('document.body.innerText'), /只认 FT6/);
-  assert.match(await js('document.body.innerText'), /支持 FT6、IMU-to-DXL（Feetech）；SFLP 124\/12（Dynamixel 2\.0）/);
+  assert.doesNotMatch(await js('document.body.innerText'), /item FT6/);
+  assert.match(await js('document.body.innerText'), /item FT6, IMU-to-DXL (Feetech)itemSFLP 124\/12 (Dynamixel 2\.0)/);
   for (const [protocol, board, label] of [['feetech', 'imu_to_dxl', 'IMU-to-DXL'], ['dxl2', 'sflp_124_12', 'SFLP 124/12']]) {
     for (const mode of ['motion', 'commissioning']) {
       await js(`props.st = {...props.st, mode:${JSON.stringify(mode)}};
@@ -99,88 +99,88 @@ try {
     }
     const text = await js('document.body.innerText');
     if (protocol === 'dxl2') {
-      assert.match(text, /重新标定/);
-      assert.doesNotMatch(await js('document.querySelector(".sv-metrics").innerText'), /方向已确认/);
-      assert.match(text, /不提供.*序号.*状态.*年龄/);
-      assert.match(text, /主机.*新鲜度.*原始字节/);
+      assert.match(text, /item/);
+      assert.doesNotMatch(await js('document.querySelector(".sv-metrics").innerText'), /item/);
+      assert.match(text, /item.*item.*item.*item/);
+      assert.match(text, /item.*item.*item/);
     } else {
-      assert.match(await js('document.querySelector(".sv-metrics").innerText'), /方向已确认/);
-      assert.doesNotMatch(text, /不提供采样序号/);
+      assert.match(await js('document.querySelector(".sv-metrics").innerText'), /item/);
+      assert.doesNotMatch(text, /item/);
     }
   }
   // A delayed capture belongs to the original board and must not advance its replacement.
-  await js(`clickText('采静止（3 秒）')`);
+  await js(`clickText('item (3 item)')`);
   await wait('calls.length === 1', 'coarse capture request');
   await js(`props.imu = {...props.imu, imu_bus: {...props.imu.imu_bus, identity:[9,9,9]}}; draw()`);
   await pause(120);
   await js(`replies.shift()({ok:true, data:{n:30, samples:[{step:'still',g:[0,0,-1]}]}})`);
   await pause(120);
-  assert.equal(await js(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='采前倾（3 秒）')`), false);
-  assert.equal(await js(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='采静止（3 秒）'&&!b.disabled)`), true);
+  assert.equal(await js(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='item (3 item)')`), false);
+  assert.equal(await js(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='item (3 item)'&&!b.disabled)`), true);
   // Standing collection also resets when only transport identity changes.
   await js(`props.st = {...props.st, mode:'motion', hold:null}; props.imu = {...props.imu, mode:'motion',
     mount:{quat:[1,0,0,0],verified:true}, mount_protocol_mismatch:false}; draw()`);
   await pause(120);
-  await js(`clickText('开始采集')`);
+  await js(`clickText('item')`);
   await wait('document.querySelector(".imu-big.rec")', 'standing collection started');
   await js(`props.imu = {...props.imu, imu_bus:{...props.imu.imu_bus, identity:[8,8,8]}}; draw()`);
   await wait('!document.querySelector(".imu-big.rec")', 'standing collection reset');
-  assert.equal(await js(`document.querySelector('.imu-big').textContent.trim()`), '开始采集');
+  assert.equal(await js(`document.querySelector('.imu-big').textContent.trim()`), 'item');
   // A conflicting secondary diagnostic leaves the chosen board unchanged, but
   // its validity transition must discard collection and stay discarded on recovery.
-  await js(`clickText('开始采集')`);
+  await js(`clickText('item')`);
   await wait('document.querySelector(".imu-big.rec")', 'collection before diagnostic conflict');
-  await js(`props.imu={...props.imu,metadata_error:'主程序报告了不一致的 IMU 类型',
-    profile_error:'主程序报告了不一致的 IMU 类型',mount:{...props.imu.mount,verified:false}}; draw()`);
+  await js(`props.imu={...props.imu,metadata_error:'item IMU item',
+    profile_error:'item IMU item',mount:{...props.imu.mount,verified:false}}; draw()`);
   await wait('!document.querySelector(".imu-big.rec")', 'conflicting metadata resets collection');
   await js(`props.imu={...props.imu,metadata_error:null,profile_error:null,
     mount:{...props.imu.mount,verified:true}}; draw()`);
   await pause(120);
   assert.equal(await js(`!!document.querySelector('.imu-big.rec')`),false);
-  assert.equal(await js(`document.querySelector('.imu-big').textContent.trim()`),'开始采集');
+  assert.equal(await js(`document.querySelector('.imu-big').textContent.trim()`),'item');
   // Same wire and identity, different explicitly configured data profile.
   await js(`props.imu = {...props.imu, configured_imu_profile:'qinmo', profile_selection:{can_start:true},
     imu_bus:{protocol:'feetech',board:'qinmo',identity:[],profile:'qinmo',gyro_dps_per_lsb:1/16.4,identification:'configured_profile'}}; draw()`);
   await wait('document.querySelector(".imu-side").innerText.includes("Qinmo")', 'Qinmo label');
   await pause(120); // let the configured-profile state synchronize before user input
-  assert.match(await js('document.body.innerText'), /已配置.*Qinmo|Qinmo.*已配置/);
+  assert.match(await js('document.body.innerText'), /item.*Qinmo|Qinmo.*item/);
   assert.match(await js('document.body.innerText'), /16\.4/);
-  assert.match(await js('document.body.innerText'), /唯一.*身份|身份.*唯一/);
-  assert.match(await js('document.body.innerText'), /配置类型/);
-  assert.match(await js('document.body.innerText'), /实际连接/);
-  await js(`const select=document.querySelector('select[aria-label="总线 IMU 类型"]'); select.value='legacy'; select.dispatchEvent(new Event('change',{bubbles:true}));`);
+  assert.match(await js('document.body.innerText'), /item.*item|item.*item/);
+  assert.match(await js('document.body.innerText'), /item/);
+  assert.match(await js('document.body.innerText'), /item/);
+  await js(`const select=document.querySelector('select[aria-label="item IMU item"]'); select.value='legacy'; select.dispatchEvent(new Event('change',{bubbles:true}));`);
   await pause(100);
-  await js(`clickText('保存类型并重新连接')`);
+  await js(`clickText('item')`);
   await pause(750);
-  await js(`clickText('已扶稳，确认重连并重新标定')`);
+  await js(`clickText('item, item')`);
   await wait('calls.some(c=>c.args.op==="profile-select")', 'profile selection command');
   assert.deepEqual(await js(`calls.find(c=>c.args.op==='profile-select').args`), {op:'profile-select',profile:'legacy',confirmed:true});
   await js(`replies.shift()({ok:true,data:{}})`);
   await pause(100);
   // Failed discovery still leaves the selector available through configured diagnostics.
   await js(`props.imu={...props.imu,imu_bus:null}; draw()`);
-  await wait(`document.body.innerText.includes('尚未连接')`, 'configured versus effective missing');
-  await js(`props.imu={...props.imu, configured_imu_profile:null,profile_selection:{can_start:false,reason:'主程序尚不支持网页选择类型'}}; draw()`);
-  await wait(`document.body.innerText.includes('主程序尚不支持网页选择类型')`, 'old daemon fallback');
+  await wait(`document.body.innerText.includes('item')`, 'configured versus effective missing');
+  await js(`props.imu={...props.imu, configured_imu_profile:null,profile_selection:{can_start:false,reason:'item'}}; draw()`);
+  await wait(`document.body.innerText.includes('item')`, 'old daemon fallback');
   await js(`props.imu={...props.imu,imu_bus:{protocol:'feetech',board:'ft6',identity:[1],profile:'future'},
-    profile_error:'主程序报告了不支持的 IMU 类型',mount:{quat:[1,0,0,0],verified:false}}; draw()`);
-  await wait(`document.querySelector('.imu-side').innerText.includes('IMU 类型无法确认')`, 'unknown profile stays visible and unsafe');
-  assert.match(await js(`document.querySelector('.imu-side').innerText`), /不支持的 IMU 类型/);
-  assert.doesNotMatch(await js(`document.querySelector('.imu-side').innerText`), /原始值 × 0\.0175|方向已确认/);
+    profile_error:'item IMU item',mount:{quat:[1,0,0,0],verified:false}}; draw()`);
+  await wait(`document.querySelector('.imu-side').innerText.includes('IMU item')`, 'unknown profile stays visible and unsafe');
+  assert.match(await js(`document.querySelector('.imu-side').innerText`), /item IMU item/);
+  assert.doesNotMatch(await js(`document.querySelector('.imu-side').innerText`), /item × 0\.0175|item/);
   for (const raw of [
     {imu_bus:{protocol:'future',profile:'legacy'},configured_imu_profile:'legacy'},
     {imu_bus:{protocol:'feetech',profile:'legacy'},configured_imu_profile:'future'},
     {imu_bus:null,configured_imu_profile:null},
   ]) {
     await js(`props.imu={...props.imu,...${JSON.stringify(raw)},profile_selection:{can_start:true},
-      metadata_error:'主程序报告了不支持的 IMU 协议 / 类型',profile_error:'主程序报告了不支持的 IMU 协议 / 类型'}; draw()`);
+      metadata_error:'item IMU item / item',profile_error:'item IMU item / item'}; draw()`);
     await pause(100);
-    assert.match(await js(`document.querySelector('.imu-side').innerText`), /待确认/);
-    assert.doesNotMatch(await js(`document.querySelector('.imu-side .imu-kv').innerText`), /原始值 × 0\.0175|原始值 ÷ 16\.4/);
-    assert.equal(await js(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='保存类型并重新连接').disabled`), true);
+    assert.match(await js(`document.querySelector('.imu-side').innerText`), /item/);
+    assert.doesNotMatch(await js(`document.querySelector('.imu-side .imu-kv').innerText`), /item × 0\.0175|item ÷ 16\.4/);
+    assert.equal(await js(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='item').disabled`), true);
   }
   await js(`props.imu = {...props.imu, source:'lsm6dsv16x', imu_bus:null}; draw()`);
-  await wait('document.querySelector(".sv-metrics").innerText.includes("LSM6DSV16X（I²C）")', 'I2C label');
+  await wait('document.querySelector(".sv-metrics").innerText.includes("LSM6DSV16X (I²C)")', 'I2C label');
   // Exercise the actual global Space handler used beside the IMU page. Keep its
   // real component source, with only the link transport supplied by this fixture.
   await js(`(async()=>{
@@ -210,18 +210,18 @@ try {
     window.drawBand=(diagnostic,gray=false,source='bus')=>render(h(Band,{st:{posture:'starting',servos:{online:0,total:15},imu:{source,status:'missing',diagnostic}},gray,live:!gray,onSame:()=>{}}),root);
     drawBand({status:'identified',info:{protocol:'feetech',board:'imu_to_dxl',profile:'legacy'}});
   })()`);
-  await wait(`document.querySelector('#overview-band a[href="#/imu"]').innerText.includes('已识别')`, 'overview independent IMU');
-  assert.match(await js(`document.querySelector('#overview-band').innerText`), /舵机\s*0\s*\/ 15/);
+  await wait(`document.querySelector('#overview-band a[href="#/imu"]').innerText.includes('item')`, 'overview independent IMU');
+  assert.match(await js(`document.querySelector('#overview-band').innerText`), /item\s*0\s*\/ 15/);
   assert.match(await js(`document.querySelector('#overview-band a[href="#/imu"]').innerText`), /IMU-to-DXL.*Feetech/);
-  assert.doesNotMatch(await js(`document.querySelector('#overview-band a[href="#/imu"]').innerText`), /没读到|正常|方向已确认/);
+  assert.doesNotMatch(await js(`document.querySelector('#overview-band a[href="#/imu"]').innerText`), /item|Normal|item/);
   await js(`drawBand({status:'identified',info:{protocol:'feetech',board:'imu_to_dxl'}},true)`);
-  await wait(`document.querySelector('#overview-band a[href="#/imu"]').innerText.includes('诊断未知')`, 'stale overview invalidation');
-  for (const [status, word] of [['data_wait','已识别 · 等待数据'], ['no_response','未应答'], ['stale','诊断已过期'], ['unknown','诊断未知']]) {
+  await wait(`document.querySelector('#overview-band a[href="#/imu"]').innerText.includes('itemUnknown')`, 'stale overview invalidation');
+  for (const [status, word] of [['data_wait','item · item'], ['no_response','No Reply'], ['stale','item'], ['unknown','itemUnknown']]) {
     await js(`drawBand({status:${JSON.stringify(status)},info:null})`);
     await wait(`document.querySelector('#overview-band a[href="#/imu"]').innerText.includes(${JSON.stringify(word)})`, 'overview '+status);
   }
   await js(`drawBand({status:'identified',info:{protocol:'feetech',board:'imu_to_dxl'}},false,'lsm6dsv16x')`);
-  await wait(`document.querySelector('#overview-band a[href="#/imu"]').innerText.includes('没读到')`, 'I2C retains configured source health');
+  await wait(`document.querySelector('#overview-band a[href="#/imu"]').innerText.includes('item')`, 'I2C retains configured source health');
   assert.doesNotMatch(await js(`document.querySelector('#overview-band a[href="#/imu"]').innerText`), /ID 200|IMU-to-DXL/);
   // Exercise the real Main subscription, so a reconnect and new source/profile
   // state cannot revive its cached IMU message before the next imu event arrives.
@@ -272,34 +272,34 @@ try {
     props.imu={source:'bus',mode:'motion',mount:{quat:[1,0,0,0],verified:true},
       imu_bus:{protocol:'feetech',board:'imu_to_dxl',identity:[1,1,0,68,77]},
       coarse_sampling:{available:true,reason:null,needs_unload:true},
-      redo:{can_start:false,reason:'先扶稳并卸力，等主程序确认全部失能'}};
+      redo:{can_start:false,reason:'itemE-Stop, item'}};
     props.live=true;draw()`);
-  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='重新标定方向'&&!b.disabled)`, 'motion HOME installation entry enabled');
-  await js(`clickText('重新标定方向')`);
+  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='item'&&!b.disabled)`, 'motion HOME installation entry enabled');
+  await js(`clickText('item')`);
   await pause(750);
-  await js(`clickText('保持 HOME，确认采集安装方向？')`);
-  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='采静止（3 秒）'&&!b.disabled)`, 'motion HOME can collect still');
+  await js(`clickText('item HOME, item')`);
+  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='item (3 item)'&&!b.disabled)`, 'motion HOME can collect still');
   assert.equal(await js(`calls.length`),0, 'opening collection never changes mode or torque');
-  await js(`clickText('采静止（3 秒）')`);
+  await js(`clickText('item (3 item)')`);
   await wait(`calls.length===1`, 'motion HOME still request');
   assert.deepEqual(await js(`calls[0]`),{name:'imu.op',args:{op:'coarse-capture',phase:'still',seconds:3}});
   await js(`replies.shift()({ok:true,data:{n:30,samples:[{step:'still',g:[0,0,-1]}]}})`);
-  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='采前倾（3 秒）'&&!b.disabled)`, 'motion HOME forward follows still');
-  await js(`clickText('采前倾（3 秒）')`);
+  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='item (3 item)'&&!b.disabled)`, 'motion HOME forward follows still');
+  await js(`clickText('item (3 item)')`);
   await wait(`calls.length===2`, 'motion HOME forward request');
   await js(`replies.shift()({ok:true,data:{n:30,samples:[{step:'fwd',g:[.34,0,-.94]}]}})`);
   await wait(`calls.length===3`, 'motion HOME solve request');
   await js(`replies.shift()({ok:true,data:{ok:true,mount:[1,0,0,0],confirm:[],notes:[],
     parts:{pitch_deg:8.6,roll_deg:-2.4,total_deg:24.8}}})`);
-  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='交给主程序验证'&&b.disabled)`, 'motion HOME final write requires unload');
+  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='item'&&b.disabled)`, 'motion HOME final write requires unload');
   assert.equal(await js(`!!document.querySelector('.imu-coarse .imu-parts')`), true, 'coarse confirmation shows correction angles');
   const correction = await js(`document.querySelector('.imu-coarse .imu-parts').innerText`);
-  assert.match(correction, /俯仰[\s\S]*\+8\.6°/);
-  assert.match(correction, /横滚[\s\S]*-2\.4°/);
-  assert.match(correction, /总改变量[\s\S]*24\.8°/);
-  assert.match(await js(`document.querySelector('.imu-coarse').innerText`), /静止时躯干姿态.*折入.*安装方向/);
+  assert.match(correction, /item[\s\S]*\+8\.6°/);
+  assert.match(correction, /item[\s\S]*-2\.4°/);
+  assert.match(correction, /item[\s\S]*24\.8°/);
+  assert.match(await js(`document.querySelector('.imu-coarse').innerText`), /item.*item.*item/);
   await js(`props.imu={...props.imu,coarse_sampling:{...props.imu.coarse_sampling,needs_unload:false}};draw()`);
-  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='交给主程序验证'&&!b.disabled)`, 'motion HOME unload preserves solved candidate');
+  await wait(`[...document.querySelectorAll('.imu-coarse button')].some(b=>b.textContent.trim()==='item'&&!b.disabled)`, 'motion HOME unload preserves solved candidate');
   assert.equal(await js(`calls.some(c=>c.args.op==='redo-start'||c.name==='relax'||c.args.op==='verify')`),false);
   // A persisted redo session may hold HOME for sampling, but must unload before
   // final verification/cancellation. Unloading must keep the solved samples.
@@ -310,28 +310,28 @@ try {
       redo:{active:true,phase:'commissioning',session_id:'redo-held',source:'bus'}};
     props.live=true;draw()`);
   await wait(`document.querySelector('.imu-stand')&&!document.querySelector('.imu-stand').disabled`, 'redo stance enable available');
-  await js(`clickText('站姿使能')`);
+  await js(`clickText('item')`);
   await wait(`calls.some(c=>c.args.op==='hold')`, 'redo uses commissioning hold');
   assert.deepEqual(await js(`calls.find(c=>c.args.op==='hold')`), {name:'imu.op',args:{op:'hold'}});
   await js(`replies.shift()({ok:true,data:{accepted:true}});
     props.st={...props.st,hold:{stage:'ramping',max_error_deg:8}};props.imu={...props.imu,hold:props.st.hold};draw()`);
-  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='采静止（3 秒）'&&b.disabled)`, 'ramping cannot collect');
+  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='item (3 item)'&&b.disabled)`, 'ramping cannot collect');
   await js(`props.st={...props.st,hold:{stage:'holding',max_error_deg:0.4}};props.imu={...props.imu,hold:props.st.hold};draw()`);
-  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='采静止（3 秒）'&&!b.disabled)`, 'settled redo hold can collect');
-  assert.match(await js(`document.querySelector('.imu-coarse').innerText`), /站姿使能/);
-  await js(`clickText('采静止（3 秒）')`);
+  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='item (3 item)'&&!b.disabled)`, 'settled redo hold can collect');
+  assert.match(await js(`document.querySelector('.imu-coarse').innerText`), /item/);
+  await js(`clickText('item (3 item)')`);
   await wait(`calls.some(c=>c.args.op==='coarse-capture'&&c.args.phase==='still')`, 'held still capture');
   await js(`replies.shift()({ok:true,data:{n:30,samples:[{step:'still',g:[0,0,-1]}]}})`);
-  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='采前倾（3 秒）'&&!b.disabled)`, 'held forward capture offered');
-  await js(`clickText('采前倾（3 秒）')`);
+  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='item (3 item)'&&!b.disabled)`, 'held forward capture offered');
+  await js(`clickText('item (3 item)')`);
   await wait(`calls.some(c=>c.args.op==='coarse-capture'&&c.args.phase==='fwd')`, 'held forward capture');
   await js(`replies.shift()({ok:true,data:{n:30,samples:[{step:'fwd',g:[0.34,0,-0.94]}]}})`);
   await wait(`calls.some(c=>c.args.op==='solve')`, 'held samples solved');
   await js(`replies.shift()({ok:true,data:{ok:true,mount:[1,0,0,0],confirm:[],notes:[],quality:{grade:'coarse'}}})`);
-  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='交给主程序验证'&&b.disabled)`, 'redo verification requires unloading');
-  assert.match(await js(`document.querySelector('.imu-coarse').innerText`), /卸力/);
+  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='item'&&b.disabled)`, 'redo verification requires unloading');
+  assert.match(await js(`document.querySelector('.imu-coarse').innerText`), /E-Stop/);
   await js(`props.st={...props.st,hold:null};props.imu={...props.imu,hold:null};draw()`);
-  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='交给主程序验证'&&!b.disabled)`, 'unloading preserves the solved candidate');
+  await wait(`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='item'&&!b.disabled)`, 'unloading preserves the solved candidate');
   assert.equal(await js(`calls.filter(c=>c.args.op==='coarse-capture').length`),2);
   assert.equal(await js(`calls.some(c=>c.args.op==='verify')`),false, 'UI never auto-verifies or auto-relaxes');
   assert.deepEqual(errors, []);

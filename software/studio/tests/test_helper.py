@@ -1,6 +1,6 @@
-"""studio/helper.py（root 小助手的 Python 薄封装）：_call 解析、friendly 映射、available 缓存。
+"""studio/helper.py (root item Python item): _call item, friendly item, available item.
 
-不碰真系统：mock subprocess.run 和 sys.platform。真正的小助手总线逻辑在 tests/test_helper_bus.py。
+item: mock subprocess.run item sys.platform.item tests/test_helper_bus.py.
 """
 import json
 import unittest
@@ -33,100 +33,100 @@ class FriendlyTest(unittest.TestCase):
         self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"by": "test", "action": "enter", "confirmed": True})
 
     def test_take(self):
-        self.assertIn("主程序停了", helper.friendly("taken", None, "bus-take"))
+        self.assertIn("Controller stopped", helper.friendly("taken", None, "bus-take"))
 
     def test_take_port_busy(self):
-        self.assertIn("串口还被占着", helper.friendly("port_busy", None, "bus-take"))
+        self.assertIn("Serial port is still in use", helper.friendly("port_busy", None, "bus-take"))
 
     def test_give_soft(self):
-        self.assertIn("主程序起来了", helper.friendly("soft", None, "bus-give-back"))
+        self.assertIn("Controller restarted", helper.friendly("soft", None, "bus-give-back"))
 
     def test_give_limp(self):
-        self.assertIn("全卸", helper.friendly("limp", None, "bus-give-back"))
+        self.assertIn("relaxed", helper.friendly("limp", None, "bus-give-back"))
 
     def test_give_still_starting_is_not_called_cannot_start(self):
-        # 任务 16：主程序在回话、只是一直报启动阶段（旧 fork）：不说「起不来」，用小助手的整句原话
-        msg = "主程序 30 秒一直报「启动中」（phase=configuring_bus）：可能其实起来了、只是状态没更新（旧版主程序的毛病）"
+        #  16: ,  ( fork): '', 
+        msg = "item 30 item'item' (phase=configuring_bus): item, item (item)"
         self.assertEqual(msg, helper.friendly("soft_failed", {"msg": msg, "still_starting": True}, "bus-give-back"))
-        self.assertIn("主程序起不来", helper.friendly("soft_failed", {"msg": "x"}, "bus-give-back"))
+        self.assertIn("Controller failed to start", helper.friendly("soft_failed", {"msg": "x"}, "bus-give-back"))
 
     def test_unknown_result(self):
-        # 不认识的结果回退成原样，不带 msg 就不拼原话
+        # ,  msg 
         self.assertEqual("weird", helper.friendly("weird", None, "bus-take"))
 
     def test_msg_appended_when_not_duplicate(self):
-        d = {"msg": "具体原因"}
-        self.assertEqual("串口还被占着：具体原因", helper.friendly("port_busy", d, "bus-take"))
+        d = {"msg": "item"}
+        self.assertEqual("Serial port is still in use: item", helper.friendly("port_busy", d, "bus-take"))
 
     def test_pad_pair_failure_has_official_reason(self):
         text = helper.friendly("pair_failed", {"reason": "not_found"}, "pad-pair")
-        self.assertIn("没配上", text)
+        self.assertIn("Pairing failed", text)
         self.assertIn("not_found", text)
 
     def test_pad_missing_robotctl(self):
         self.assertIn("robotctl", helper.friendly("no_robotctl", None, "pad-pair"))
 
     def test_pad_forget(self):
-        self.assertIn("忘掉了", helper.friendly("forgotten", None, "pad-forget"))
+        self.assertIn("Device forgotten", helper.friendly("forgotten", None, "pad-forget"))
 
     def test_not_motion_keeps_helper_reason(self):
-        msg = "写进去了，但主程序停在调试模式：commissioning；已经换回原来的文件，再起了一次"
+        msg = "item, item: commissioningitem, item"
         self.assertEqual(msg, helper.friendly("not_motion", {"msg": msg}, "calib-commit"))
 
     def test_wifi_old_helper_says_reinstall(self):
         text = helper.friendly("bad_verb", None, "wifi-hotspot-down")
-        self.assertIn("小助手太旧", text)
+        self.assertIn("Root helper is outdated", text)
         self.assertIn("deploy/install.sh", text)
 
     def test_wifi_results(self):
-        self.assertIn("热点关了", helper.friendly("hotspot_down", None, "wifi-hotspot-down"))
-        self.assertIn("本来就没开", helper.friendly("already_down", None, "wifi-hotspot-down"))
-        self.assertIn("热点开回来了", helper.friendly("hotspot_up", None, "wifi-hotspot-up"))
+        self.assertIn("Hotspot disabled", helper.friendly("hotspot_down", None, "wifi-hotspot-down"))
+        self.assertIn("already disabled", helper.friendly("already_down", None, "wifi-hotspot-down"))
+        self.assertIn("Hotspot enabled", helper.friendly("hotspot_up", None, "wifi-hotspot-up"))
 
 
 class PadCallTest(unittest.TestCase):
     def test_pair_payload_and_wrapper_timeout(self):
         out = '{"step":"done","detail":{"exit":0,"result":"paired","pair":{"outcome":"paired"}}}\n'
         with mock.patch.object(helper.subprocess, "run", return_value=_proc(out)) as run:
-            ok, result, detail = helper.pad_pair("电脑", mac="aa:bb:cc:dd:ee:ff", timeout=20)
+            ok, result, detail = helper.pad_pair("PC", mac="aa:bb:cc:dd:ee:ff", timeout=20)
         self.assertTrue(ok)
         self.assertEqual(result, "paired")
         self.assertEqual(detail["pair"]["outcome"], "paired")
         self.assertEqual(run.call_args.args[0], ["sudo", "-n", helper.HELPER, "pad-pair"])
         payload = json.loads(run.call_args.kwargs["input"])
-        self.assertEqual(payload, {"by": "电脑", "timeout": 20, "mac": "aa:bb:cc:dd:ee:ff"})
+        self.assertEqual(payload, {"by": "PC", "timeout": 20, "mac": "aa:bb:cc:dd:ee:ff"})
         self.assertEqual(run.call_args.kwargs["timeout"], 65)
 
     def test_forget_payload(self):
         out = '{"step":"done","detail":{"exit":0,"result":"forgotten","removed":true}}\n'
         with mock.patch.object(helper.subprocess, "run", return_value=_proc(out)) as run:
-            ok, result, detail = helper.pad_forget("电脑", "AA:BB:CC:DD:EE:FF")
+            ok, result, detail = helper.pad_forget("PC", "AA:BB:CC:DD:EE:FF")
         self.assertTrue(ok)
         self.assertEqual(result, "forgotten")
         self.assertEqual(run.call_args.args[0], ["sudo", "-n", helper.HELPER, "pad-forget"])
         self.assertEqual(json.loads(run.call_args.kwargs["input"]),
-                         {"by": "电脑", "mac": "AA:BB:CC:DD:EE:FF"})
+                         {"by": "PC", "mac": "AA:BB:CC:DD:EE:FF"})
 
 
 class WifiCallTest(unittest.TestCase):
     def test_down_payload_and_wrapper_timeout(self):
         out = '{"step":"done","detail":{"exit":0,"result":"hotspot_down"}}\n'
         with mock.patch.object(helper.subprocess, "run", return_value=_proc(out)) as run:
-            ok, result, detail = helper.wifi_hotspot_down("电脑", "Home")
+            ok, result, detail = helper.wifi_hotspot_down("PC", "Home")
         self.assertTrue(ok)
         self.assertEqual(result, "hotspot_down")
         self.assertEqual(run.call_args.args[0], ["sudo", "-n", helper.HELPER, "wifi-hotspot-down"])
-        self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"by": "电脑", "ssid": "Home"})
+        self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"by": "PC", "ssid": "Home"})
         self.assertEqual(run.call_args.kwargs["timeout"], 30)
 
     def test_up_payload_and_wrapper_timeout(self):
         out = '{"step":"done","detail":{"exit":0,"result":"hotspot_up"}}\n'
         with mock.patch.object(helper.subprocess, "run", return_value=_proc(out)) as run:
-            ok, result, detail = helper.wifi_hotspot_up("电脑")
+            ok, result, detail = helper.wifi_hotspot_up("PC")
         self.assertTrue(ok)
         self.assertEqual(result, "hotspot_up")
         self.assertEqual(run.call_args.args[0], ["sudo", "-n", helper.HELPER, "wifi-hotspot-up"])
-        self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"by": "电脑"})
+        self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"by": "PC"})
         self.assertEqual(run.call_args.kwargs["timeout"], 40)
 
 
@@ -148,10 +148,10 @@ class CallParseTest(unittest.TestCase):
         self.assertEqual(result, "port_busy")
 
     def test_no_done_falls_back_to_stderr(self):
-        with _patch_run("不是 JSON\n", "小助手没装"):
+        with _patch_run("item JSON\n", "already disabled"):
             ok, result, detail = helper._call("bus-take", {"by": "x"}, 30)
         self.assertFalse(ok)
-        self.assertEqual(result, "小助手没装")
+        self.assertEqual(result, "already disabled")
 
     def test_no_done_no_stderr_falls_back_to_exit_code(self):
         with _patch_run("", rc=1):

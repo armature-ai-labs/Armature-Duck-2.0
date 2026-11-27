@@ -1,47 +1,48 @@
-/* Microduck Studio 的设计规范（design-brief-v3.1 §4、review-design-v3 第四节）。
-   改颜色、字号、圆角只改这里的变量。 */
+/* Armature x Microduck Studio - Core Layout & Components */
 :root {
-  --page: #F2F2F7;
-  --board: #FFFFFF;
-  --board-edge: rgba(0, 0, 0, 0.08);
-  --line: #F0F0F2;
-  --text: #1D1D1F;
-  --text-2: #6E6E73;
-  --link: #0066CC;
-  --blue: #0071E3;
-  --blue-dark-bg: #409CFF;
-  --warn: #B25000;
-  --danger: #D70015;
-  --ok: #1E7E34;
-  --brand: #F5B400;
-  --radius-stage: 20px;
-  --radius-board: 16px;
-  --font: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", -apple-system, sans-serif;
+  --page: var(--paper);
+  --board: var(--panel);
+  --board-edge: var(--hair);
+  --line: var(--hair-subtle);
+  --text: var(--ink);
+  --text-2: var(--fg-2);
+  --link: var(--saffron-soft);
+  --blue: var(--accent);
+  --blue-dark-bg: var(--saffron);
+  --warn: var(--saffron);
+  --danger: #ed927c;
+  --ok: #9bc28a;
+  --brand: var(--saffron);
+  --radius-stage: var(--radius);
+  --radius-board: var(--radius);
+  --font: var(--font-sans);
 
-  /* 舞台：三种背景（设置 › 舞台背景），默认中灰 */
-  --stage-bg: radial-gradient(circle farthest-corner at 62% 38%, #9A9EA6 0%, #74787F 55%, #5B5E64 100%);
-  --stage-fg: #FFFFFF;
-  --stage-fg-2: #EBEBF0;
-  --stage-btn-bg: #FFFFFF;
-  --stage-btn-fg: #1D1D1F;
-  --stage-btn2-bg: rgba(255, 255, 255, 0.18);
-  --stage-btn2-fg: #FFFFFF;
-  --stage-edge: none;
+  --stage-bg: radial-gradient(circle farthest-corner at 60% 38%, #201e1a 0%, #141412 55%, #090d13 100%);
+  --stage-fg: var(--ink);
+  --stage-fg-2: var(--fg-2);
+  --stage-btn-bg: var(--panel-2);
+  --stage-btn-fg: var(--ink);
+  --stage-btn2-bg: rgb(255 255 245 / 10%);
+  --stage-btn2-fg: var(--ink);
+  --stage-edge: inset 0 0 0 1px var(--hair);
+}
+:root[data-theme="light"] {
+  --link: #8f3d14;
+  --danger: #c44a2a;
+  --ok: #3f5430;
 }
 :root[data-stage="graphite"] {
-  --stage-bg: radial-gradient(circle farthest-corner at 62% 40%, #34363B 0%, #1E1F22 55%, #121315 100%);
-  --stage-fg-2: #A1A1A6;
-  --stage-btn2-bg: rgba(255, 255, 255, 0.12);
+  --stage-bg: radial-gradient(circle farthest-corner at 62% 40%, #1c1d20 0%, #111214 60%, #090d13 100%);
 }
 :root[data-stage="light"] {
-  --stage-bg: radial-gradient(circle farthest-corner at 62% 38%, #FFFFFF 0%, #ECECF0 50%, #D5D5DB 100%);
-  --stage-fg: #1D1D1F;
-  --stage-fg-2: #6E6E73;
-  --stage-btn-bg: #1D1D1F;
-  --stage-btn-fg: #FFFFFF;
-  --stage-btn2-bg: rgba(0, 0, 0, 0.06);
-  --stage-btn2-fg: #1D1D1F;
-  --stage-edge: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+  --stage-bg: radial-gradient(circle farthest-corner at 62% 38%, #f8f7f4 0%, #eceae3 55%, #dedad0 100%);
+  --stage-fg: #111110;
+  --stage-fg-2: #575753;
+  --stage-btn-bg: #111110;
+  --stage-btn-fg: #f2e6cc;
+  --stage-btn2-bg: rgb(17 17 16 / 8%);
+  --stage-btn2-fg: #111110;
+  --stage-edge: inset 0 0 0 1px rgb(17 17 16 / 18%);
 }
 
 * { box-sizing: border-box; }
@@ -53,109 +54,98 @@ button:disabled { cursor: default; }
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .num { font-variant-numeric: tabular-nums; }
 
-/* ---- 外壳：侧栏 + 内容 ---- */
 .shell { display: flex; flex-wrap: wrap; min-height: 100vh; }
 .nav { flex: 1 1 200px; max-width: 216px; padding: 18px 12px; display: flex; flex-direction: column; gap: 2px; }
 .nav-logo { display: flex; align-items: center; gap: 10px; padding: 0 10px 18px; font-size: 15px; font-weight: 600; }
-.nav a, .nav .nav-item { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 10px; border-radius: 10px; color: var(--text); font-size: 14px; text-decoration: none; }
+.nav a, .nav .nav-item { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 10px; border-radius: var(--radius); color: var(--text); font-size: 14px; text-decoration: none; }
 .nav a.sub { padding-left: 40px; height: 34px; }
 .nav a[aria-current="page"] { background: var(--board); box-shadow: 0 0 0 1px var(--board-edge); font-weight: 600; }
 .nav .group { color: var(--text-2); margin-top: 6px; }
 .nav .spacer { flex: 1; min-height: 24px; }
 .main { flex: 999 1 600px; min-width: 0; padding: 0 24px 24px; display: flex; flex-direction: column; }
-/* 侧栏吸住、一屏高（用户 10-19：往下滑侧栏一直在；「设置」贴在屏幕底下）。窄过 840 侧栏会折到内容上面一行，那时不吸 */
+
 @media (min-width: 840px) {
   .nav { position: sticky; top: 0; align-self: flex-start; height: 100vh; overflow-y: auto; }
 }
 
-/* ---- 顶部安全条 ---- */
-/* 吸顶（总览重排审查 O3）：总览成了往下刷的长页（下面就是遥控），卸力不能滑出屏幕。左右各伸出 .main 的内边距，底色盖住下面滚上来的内容 */
 .topbar { position: sticky; top: 0; z-index: 30; height: 56px; margin: 0 -24px; padding: 0 24px; background: var(--page);
   display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .duckid { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .duckid .dot { width: 10px; height: 10px; border-radius: 50%; }
 .duckid .name { font-size: 15px; font-weight: 600; }
 .duckid .meta { font-size: 13px; color: var(--text-2); }
-.estop { display: inline-flex; align-items: center; gap: 10px; height: 36px; padding: 0 8px 0 18px; border: 0; border-radius: 999px; background: var(--danger); color: #FFF; font-size: 15px; font-weight: 600; }
-.estop .kbd { font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 6px; background: rgba(255, 255, 255, 0.22); }
+.estop { display: inline-flex; align-items: center; gap: 10px; height: 36px; padding: 0 8px 0 18px; border: 0; border-radius: var(--radius); background: var(--estop-bg); color: var(--estop-ink); font-size: 15px; font-weight: 600; }
+.estop .kbd { font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: var(--radius); background: rgba(255, 255, 255, 0.22); }
 .estop.unavailable { background: var(--board); color: var(--text-2); border: 1.5px solid var(--danger); padding: 0 16px; }
 .estop.done { background: var(--text); }
 .estop-wrap { display: inline-flex; align-items: center; gap: 12px; }
 .estop-wrap .why { font-size: 13px; color: var(--text-2); }
 
-/* ---- 横幅 ---- */
-.banner { min-height: 40px; margin-bottom: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 16px; border-radius: 12px; font-size: 14px; }
-.banner.bad { background: #FFF1F1; box-shadow: inset 0 0 0 1px rgba(215, 0, 21, 0.18); }
-.banner.warn { background: #FFF7EC; box-shadow: inset 0 0 0 1px #F5DDBF; }
+.banner { min-height: 40px; margin-bottom: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 16px; border-radius: var(--radius); font-size: 14px; }
+.banner.bad { background: var(--danger-soft); box-shadow: inset 0 0 0 1px var(--danger); }
+.banner.warn { background: var(--warn-soft); box-shadow: inset 0 0 0 1px var(--hair-strong); }
 .banner .more { color: var(--text-2); }
 .banner a { margin-left: auto; }
-/* 舵机会话的提示条（每一页顶栏下面）和「交还主程序」两步按钮（用户 10-18：离开舵机页舵机照样保持）。
-   吸顶、贴在顶栏下面（所有宽度：审查 D6——手机上滚到手柄区也得看得到「调舵机中」）；底色是实的，盖住滚上来的内容 */
-/* 吸顶的是外面那层 .sticky-bar（app.js 量它多高写进 --bar-h，仪表带、手柄 3D 卡、舵机页左栏照着往下让）；没有提示条时它是空的、0 高 */
+
 .sticky-bar { position: sticky; top: 56px; z-index: 29; }
-.servo-bar { margin: 0 0 12px; box-shadow: inset 0 0 0 1px #F5DDBF, 0 4px 12px rgba(0, 0, 0, 0.06); }
-.servo-bar.bad { box-shadow: inset 0 0 0 1px rgba(215, 0, 21, 0.18), 0 4px 12px rgba(0, 0, 0, 0.06); }
+.servo-bar { margin: 0 0 12px; box-shadow: inset 0 0 0 1px var(--hair-strong), 0 4px 12px rgba(0, 0, 0, 0.06); }
+.servo-bar.bad { box-shadow: inset 0 0 0 1px var(--danger), 0 4px 12px rgba(0, 0, 0, 0.06); }
 .servo-bar a { margin-left: auto; }
 .servo-bar .sb-acts { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
 .servo-bar .sb-acts a { margin-left: 0; }
 .servo-bar .sb-more { flex-basis: 100%; font-size: 13px; }
 .sv-handback { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: 8px; }
 .sv-handback .btn-danger { height: auto; min-height: 32px; padding: 4px 14px; white-space: normal; text-align: left; }
-/* 确认框（confirm.js 的 ConfirmBox）：多行说明 + 先不 / 确定两个按钮；WiFi 切换用它。不另造颜色，沿用警告底色 */
-.confirm-box { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 12px; background: #FFF7EC; box-shadow: inset 0 0 0 1px #F5DDBF; font-size: 14px; line-height: 1.6; }
+
+.confirm-box { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: var(--radius); background: var(--warn-soft); box-shadow: inset 0 0 0 1px var(--hair-strong); font-size: 14px; line-height: 1.6; }
 .confirm-box p { margin: 0; }
 .confirm-box .confirm-acts { display: flex; flex-wrap: wrap; gap: 8px; }
 .confirm-box .btn-danger, .confirm-box .btn-light { height: auto; min-height: 38px; padding: 6px 16px; white-space: normal; text-align: left; }
 @media (max-width: 700px) { .confirm-box .btn-danger, .confirm-box .btn-light { min-height: 44px; } }
 
-/* 两步确认（confirm.js，审查 D4）：确认按钮在原按钮旁边新出现，不在原地变 */
 .two-step { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .two-step .two-step-ask { height: auto; min-height: 32px; padding: 4px 14px; white-space: normal; text-align: left; }
-/* 手机顶栏的「调舵机中」小徽章（手机上顶栏那行小字藏了：审查 D6） */
-.sv-badge { display: none; flex: none; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: #FFF1DC; color: var(--warn); }
 
-/* ---- 徽标：三种状态三种符号 ---- */
+.sv-badge { display: none; flex: none; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: var(--radius); background: var(--warn-soft); color: var(--warn); }
+
 .badge { flex: 0 0 auto; width: 16px; height: 16px; border-radius: 50%; color: #FFF; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
 .badge.warn { background: var(--warn); }
 .badge.bad { background: var(--danger); }
 
-/* ---- 白板 ---- */
 .board { background: var(--board); border-radius: var(--radius-board); box-shadow: inset 0 0 0 1px var(--board-edge); }
 
 .microphone-settings { padding: 16px 20px; }
 .microphone-settings h2 { margin: 0 0 10px; font-size: 16px; }
 .microphone-sources { display: flex; flex-wrap: wrap; gap: 6px; }
-.microphone-sources button { min-height: 36px; padding: 5px 12px; border: 1px solid var(--board-edge); border-radius: 9px; background: var(--page); color: var(--text); font-size: 14px; }
+.microphone-sources button { min-height: 36px; padding: 5px 12px; border: 1px solid var(--board-edge); border-radius: var(--radius); background: var(--page); color: var(--text); font-size: 14px; }
 .microphone-sources button[aria-pressed=true] { background: var(--blue); color: white; }
 .microphone-sources button:disabled { opacity: .6; }
 .microphone-settings p, .microphone-settings details { margin: 8px 0 0; font-size: 13px; color: var(--text-2); }
 .microphone-settings [role=alert] { color: var(--danger); overflow-wrap: anywhere; }
 .microphone-settings summary { color: var(--link); cursor: pointer; }
 
-/* ---- 舞台 ---- */
 .stage { position: relative; border-radius: var(--radius-stage); overflow: hidden; background: var(--stage-bg); box-shadow: var(--stage-edge); color: var(--stage-fg); }
 .stage-ov { height: 416px; }
-/* 断线横幅盖在舞台上（审查 O10：插在舞台上面会把下面的手柄区块整体推下去，手指正要按的地方就换成了别的键） */
+
 .stage .stage-banner { position: absolute; z-index: 3; left: 16px; right: 16px; top: 12px; margin: 0; color: var(--text); }
 .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-/* 总览舞台：单指留给页面滚动、两指转视角（审查 O2）。duck3d 也在行内设了；写在这里是兜底（代码审查 C6） */
+
 .stage-ov canvas { touch-action: pan-y; }
-.stage canvas.stage-stale { filter: grayscale(1); opacity: .5; }    /* 数据旧了：去色、半透明 */
+.stage canvas.stage-stale { filter: grayscale(1); opacity: .5; }    
 .stage .copy { position: absolute; z-index: 1; left: 48px; top: 0; bottom: 0; width: 440px; max-width: calc(100% - 96px); display: flex; flex-direction: column; justify-content: center; pointer-events: none; }
 .stage .copy > * { pointer-events: auto; }
-.stage h1 { margin: 0; font-size: 40px; line-height: 48px; font-weight: 600; color: var(--stage-fg); }
-.stage .sub { margin: 12px 0 0; font-size: 17px; line-height: 26px; color: var(--stage-fg-2); }
+.stage h1 { margin: 0; font-size: 40px; line-height: 48px; font-weight: 600; color: #f6f6f2; }
+.stage .sub { margin: 12px 0 0; font-size: 17px; line-height: 26px; color: #c3c3bb; }
 .stage .btns { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 12px; }
-.stage .btn1 { height: 48px; padding: 0 28px; border: 0; border-radius: 999px; background: var(--stage-btn-bg); color: var(--stage-btn-fg); font-size: 17px; font-weight: 600; }
-.stage .btn2 { height: 48px; padding: 0 22px; border: 0; border-radius: 999px; background: var(--stage-btn2-bg); color: var(--stage-btn2-fg); font-size: 17px; font-weight: 500; }
+.stage .btn1 { height: 48px; padding: 0 28px; border: 0; border-radius: var(--radius); background: var(--accent); color: #111110; font-size: 17px; font-weight: 600; cursor: pointer; }
+.stage .btn2 { height: 48px; padding: 0 22px; border: 1px solid var(--hair-strong); border-radius: var(--radius); background: rgba(255, 255, 245, 0.12); color: #f6f6f2; font-size: 17px; font-weight: 500; cursor: pointer; }
+.stage .btn2:hover { background: rgba(255, 255, 245, 0.22); }
 .stage button:disabled { opacity: 0.45; }
 .stage .tip { margin-top: 12px; font-size: 13px; color: var(--stage-fg-2); }
-.stage .reset-view { position: absolute; z-index: 2; right: 20px; top: 16px; height: 30px; padding: 0 14px; border: 0; border-radius: 999px;
+.stage .reset-view { position: absolute; z-index: 2; right: 20px; top: 16px; height: 30px; padding: 0 14px; border: 0; border-radius: var(--radius);
   background: var(--stage-btn2-bg); color: var(--stage-btn2-fg); font-size: 13px; }
-.stage .age { position: absolute; right: 24px; bottom: 20px; padding: 4px 12px; border-radius: 999px; background: var(--stage-btn2-bg); color: var(--stage-btn2-fg); font-size: 13px; }
+.stage .age { position: absolute; right: 24px; bottom: 20px; padding: 4px 12px; border-radius: var(--radius); background: var(--stage-btn2-bg); color: var(--stage-btn2-fg); font-size: 13px; }
 
-/* ---- 仪表带、待办 ---- */
-/* 七格：宽屏一行，普通桌面4+3，手机两列、最后主板占满一行。 */
 .band { margin-top: 16px; min-height: 104px; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .band > * { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 12px 24px; color: var(--text); text-decoration: none; }
 .band > * + * { box-shadow: inset 1px 0 0 #E5E5EA; }
@@ -170,7 +160,7 @@ button:disabled { cursor: default; }
 .band .band-cpu .small { display: flex; align-items: center; gap: 6px; }
 .band .band-sensor[data-state="online"] .word { color: var(--ok); }
 .band .band-sensor[data-state="error"] .word { color: var(--warn); }
-/* 仪表带吸在顶栏（和舵机提示条）下面（用户 10-19：往下滑电池、舵机、IMU、手柄、主板一直看得到）。手机上它两三行高，不吸 */
+
 @media (min-width: 701px) {
   .overview > .band { position: sticky; top: calc(56px + var(--bar-h, 0px)); z-index: 28;
     box-shadow: inset 0 0 0 1px var(--board-edge), 0 4px 12px rgba(0, 0, 0, 0.06); }
@@ -181,7 +171,7 @@ button:disabled { cursor: default; }
   .band > :nth-child(n+5) { grid-column: span 4; box-shadow: inset 1px 0 0 #E5E5EA, inset 0 1px 0 #E5E5EA; }
   .band > :nth-child(5) { box-shadow: inset 0 1px 0 #E5E5EA; }
 }
-/* 待办给一个最小高度（两条的高度）：温度来回跨 80 °C、断线重连时它出现 / 消失，别把下面的手柄区块推上推下（审查 O10） */
+
 .todo { margin-top: 16px; min-height: 84px; display: flex; align-items: center; gap: 12px; padding: 8px 24px; }
 .todo .quiet { flex: 1; font-size: 15px; color: var(--text-2); }
 .todo .when { font-size: 13px; color: var(--text-2); }
@@ -190,7 +180,6 @@ button:disabled { cursor: default; }
 .todo .msg { font-size: 15px; }
 .todo .hint { flex: 1; font-size: 13px; color: var(--text-2); }
 
-/* ---- 上手清单（总览重排 §1.3、§5 O14）：五行 + 卡片头「连上鸭子」；全部完成收成一行 ---- */
 .onb { margin-top: 16px; padding: 12px 24px 8px; }
 .onb-h { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; min-height: 30px; font-size: 15px; }
 .onb-h .quiet { font-size: 15px; color: var(--text-2); }
@@ -202,14 +191,14 @@ button:disabled { cursor: default; }
 .onb-mark { flex: none; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
   font-size: 12px; font-weight: 700; background: #E5E5EA; color: var(--text-2); }
 .onb-mark.onb-ok { background: var(--ok); color: #FFFFFF; }
-.onb-mark.onb-todo { background: #FFF1DC; color: var(--warn); }
-.onb-mark.onb-no { background: #FFFFFF; color: var(--text-2); box-shadow: inset 0 0 0 1.5px #C7C7CC; }
+.onb-mark.onb-todo { background: var(--warn-soft); color: var(--warn); }
+.onb-mark.onb-no { background: var(--panel); color: var(--text-2); box-shadow: inset 0 0 0 1.5px #C7C7CC; }
 .onb-mark.onb-unk { background: #F2F2F7; color: var(--text-2); }
-/* 跳过了：灰色的 ↷，跟绿色的 ✓ 一眼分得开（用户 10-18：允许跳过） */
+
 .onb-mark.onb-skip { background: #E5E5EA; color: var(--text-2); font-size: 13px; }
 .onb-row.onb-skip .onb-text { color: var(--text-2); }
 .onb-noskip { color: var(--warn); }
-.onb-acts .onb-skip-arm { background: #FFE5E5; color: var(--danger); font-weight: 600; }   /* 测急停的跳过：再点一次才算 */
+.onb-acts .onb-skip-arm { background: #FFE5E5; color: var(--danger); font-weight: 600; }   
 .onb-acts .onb-redo { height: 28px; padding: 0 12px; font-size: 13px; }
 .onb-fold { display: inline-flex; align-items: center; gap: 10px; border: 0; background: none; padding: 0; font-size: 15px; color: var(--text); text-align: left; }
 .onb-fold .onb-more { font-size: 13px; color: var(--link); }
@@ -217,28 +206,26 @@ button:disabled { cursor: default; }
 .onb-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .onb-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: 15px; }
 .onb-title b { font-weight: 600; }
-.onb-tag { font-size: 12px; padding: 0 8px; border-radius: 999px; background: var(--text); color: #FFFFFF; }
+.onb-tag { font-size: 12px; padding: 0 8px; border-radius: var(--radius); background: var(--text); color: #FFFFFF; }
 .onb-when { font-size: 12px; color: var(--text-2); }
 .onb-text { font-size: 14px; line-height: 1.5; }
 .onb-row.onb-ok .onb-text { color: var(--text-2); }
 .onb-tip { font-size: 12px; line-height: 1.5; color: var(--text-2); }
 .onb-acts { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 46%; }
-/* 两步确认的确认按钮另起一行：这一行靠右对齐，确认按钮挤在同一行会把前面的「已完成」「去做」整体往左推，
-   双击「跳过」的第二下就落在「已完成」上（10-21 浏览器测试抓到）。另起一行，原来的按钮一个都不挪 */
+
 .onb-acts .two-step { display: contents; }
 .onb-acts .two-step-ask { order: 99; flex-basis: 100%; }
 .onb-acts .btn-dark { height: 32px; padding: 0 16px; font-size: 14px; }
 .onb-frozen .onb-rows { opacity: .5; }
 .onb-done { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 8px 24px; font-size: 15px; }
 
-/* ---- 第 3 步「写进主程序」（任务 11）：准备情况、预览、进度 ---- */
-.onb-commit { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; padding: 10px 12px; border-radius: 10px; background: #F7F7FA; }
+.onb-commit { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; padding: 10px 12px; border-radius: var(--radius); background: #F7F7FA; }
 .onb-commit-desc { font-size: 13px; line-height: 1.55; color: var(--text-2); }
 .onb-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .onb-checks li { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.45; }
 .onb-check-mark { flex: none; width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
 .onb-checks .ok .onb-check-mark { background: var(--ok); color: #FFFFFF; }
-.onb-checks .bad .onb-check-mark { background: #FFF1DC; color: var(--warn); }
+.onb-checks .bad .onb-check-mark { background: var(--warn-soft); color: var(--warn); }
 .onb-check-body { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 0 6px; }
 .onb-check-body b { font-weight: 600; }
 .onb-check-body span { color: var(--text-2); }
@@ -257,29 +244,27 @@ button:disabled { cursor: default; }
 .onb-preview-table th, .onb-preview-table td { padding: 3px 6px; text-align: left; border-bottom: 1px solid var(--line); }
 .onb-preview-table th { color: var(--text-2); font-weight: 500; }
 .onb-preview-toml summary { font-size: 12px; color: var(--link); cursor: pointer; }
-.onb-preview-toml pre { max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px; border-radius: 8px; background: #FFFFFF; font-size: 11px; line-height: 1.4; white-space: pre-wrap; word-break: break-all; }
+.onb-preview-toml pre { max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px; border-radius: 8px; background: var(--panel); font-size: 11px; line-height: 1.4; white-space: pre-wrap; word-break: break-all; }
 
-/* ---- 登录 ---- */
 .login { max-width: 400px; margin: 12vh auto 0; padding: 32px; display: flex; flex-direction: column; gap: 16px; }
 .login h1 { margin: 0; font-size: 28px; font-weight: 600; }
 .login label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--text-2); }
-.login input[type=password] { height: 44px; padding: 0 14px; border: 1px solid #D2D2D7; border-radius: 10px; font: inherit; font-size: 16px; color: var(--text); background: #FFF; }
+.login input[type=password] { height: 44px; padding: 0 14px; border: 1px solid #D2D2D7; border-radius: var(--radius); font: inherit; font-size: 16px; color: var(--text); background: #FFF; }
 .login .row { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
-.login button { height: 46px; border: 0; border-radius: 999px; background: var(--text); color: #FFF; font-size: 16px; font-weight: 600; }
+.login button { height: 46px; border: 0; border-radius: var(--radius); background: var(--text); color: #FFF; font-size: 16px; font-weight: 600; }
 .login .err { color: var(--danger); font-size: 14px; }
 
-/* ---- 手机 ---- */
 @media (max-width: 700px) {
   .nav { display: none; }
   .main { padding: 0 12px 96px; }
   .topbar { gap: 8px; }
-  .duckid .meta, .estop-wrap .why, .estop .kbd { display: none; }   /* 手机上让出地方给卸力按钮；手机没有空格键 */
+  .duckid .meta, .estop-wrap .why, .estop .kbd { display: none; }   
   .estop { padding: 0 18px; flex-shrink: 0; }
-  .stage-ov { height: 300px; }      /* 手机上舞台矮一点：第一屏露得出仪表带和清单（审查 O11） */
+  .stage-ov { height: 300px; }      
   .stage .copy { left: 20px; right: 20px; width: auto; max-width: none; top: auto; bottom: 20px; justify-content: flex-end; }
   .stage h1 { font-size: 24px; line-height: 30px; }
   .stage::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 45%; pointer-events: none;
-    background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.42)); }   /* 字在鸭子脚边，垫一层暗底保证看得清 */
+    background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.42)); }   
   .band { grid-template-columns: 1fr 1fr; }
   .band > * { padding: 14px 18px; }
   .band > * + * { box-shadow: none; }
@@ -290,10 +275,10 @@ button:disabled { cursor: default; }
   .band .band-bar { width: 64px !important; margin-left: 8px !important; }
   .band .big { font-size: 28px; line-height: 32px; }
   .todo.list { padding: 12px 18px; }
-  .todo .hint { flex-basis: 100%; padding-left: 30px; }   /* 手机上说明换到下一行 */
+  .todo .hint { flex-basis: 100%; padding-left: 30px; }   
   .topbar { margin: 0 -12px; padding: 0 12px; }
   .sv-badge { display: inline-block; }
-  .servo-bar { padding: 6px 12px; gap: 4px 8px; font-size: 13px; }       /* 吸顶的提示条在手机上矮一点 */
+  .servo-bar { padding: 6px 12px; gap: 4px 8px; font-size: 13px; }       
   .servo-bar .sb-more { font-size: 12px; line-height: 1.4; }
   .onb { padding: 10px 16px 6px; }
   .onb-row { flex-wrap: wrap; }
@@ -304,28 +289,30 @@ button:disabled { cursor: default; }
 }
 @media (min-width: 701px) { .tabbar { display: none; } }
 
-/* ---- 舵机页 ---- */
 .sv-page { display: flex; flex-direction: column; gap: 12px; padding-bottom: 24px; }
 .sv-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
 .sv-head h1 { margin: 0; font-size: 28px; font-weight: 600; }
 .sv-metrics { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 14px; color: var(--text-2); }
 .sv-metrics b { color: var(--text); font-weight: 600; }
 .sv-spacer { flex: 1; }
-.btn-dark { height: 38px; padding: 0 20px; border: 0; border-radius: 999px; background: var(--text); color: #FFF; font-size: 15px; font-weight: 600; }
+.btn-dark { height: 38px; padding: 0 20px; border: 0; border-radius: var(--radius); background: var(--text); color: #FFF; font-size: 15px; font-weight: 600; }
 .btn-dark:disabled { opacity: .45; }
 .sv-sub { font-size: 13px; color: var(--text-2); margin-top: -4px; }
 .sv-grid { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(540px, 1.25fr); gap: 16px; align-items: start; }
 .sv-left { display: flex; flex-direction: column; gap: 12px; }
 .sv-stage-wrap { display: flex; flex-direction: column; gap: 8px; }
-.sv-poses { display: flex; gap: 4px; padding: 3px; border-radius: 10px; background: #E5E5EA; align-self: flex-start; }
-.sv-poses button { height: 30px; padding: 0 14px; border: 0; border-radius: 8px; background: transparent; font-size: 14px; color: var(--text); }
-.sv-poses button.on { background: #FFF; box-shadow: 0 1px 3px rgba(0,0,0,.12); font-weight: 600; }
+.sv-poses { display: flex; gap: 4px; padding: 3px; border-radius: var(--radius); background: var(--panel-2); border: 1px solid var(--hair); align-self: flex-start; }
+.sv-poses button { height: 30px; padding: 0 14px; border: 0; border-radius: var(--radius); background: transparent; font-size: 13px; color: var(--fg-2); cursor: pointer; }
+.sv-poses button.on { background: var(--panel-elevated); color: var(--ink); border: 1px solid var(--hair-strong); font-weight: 600; }
+:root[data-theme="light"] .sv-poses { background: #E5E5EA; border-color: rgba(0,0,0,.08); }
+:root[data-theme="light"] .sv-poses button { color: #55534e; }
+:root[data-theme="light"] .sv-poses button.on { background: #FFF; color: #111110; border-color: rgba(0,0,0,.12); }
 .sv-stage { position: relative; height: 640px; border-radius: var(--radius-stage); overflow: hidden; background: var(--stage-bg); box-shadow: var(--stage-edge); }
 .sv-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .sv-stage .sv-lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.sv-note { position: absolute; left: 16px; bottom: 14px; padding: 4px 12px; border-radius: 999px; background: rgba(0,0,0,.35); color: #FFF; font-size: 12px; }
-.sv-tag { position: absolute; display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 10px 0 3px; border-radius: 9px; background: rgba(255,255,255,.96); box-shadow: 0 2px 8px rgba(0,0,0,.18); white-space: nowrap; pointer-events: none; }
-.sv-tag .id { min-width: 27px; height: 27px; border-radius: 6px; display: grid; place-items: center; color: #FFF; font-weight: 700; font-size: 14px; }
+.sv-note { position: absolute; left: 16px; bottom: 14px; padding: 4px 12px; border-radius: var(--radius); background: rgba(0,0,0,.35); color: #FFF; font-size: 12px; }
+.sv-tag { position: absolute; display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 10px 0 3px; border-radius: var(--radius); background: rgba(255,255,255,.96); box-shadow: 0 2px 8px rgba(0,0,0,.18); white-space: nowrap; pointer-events: none; }
+.sv-tag .id { min-width: 27px; height: 27px; border-radius: var(--radius); display: grid; place-items: center; color: #FFF; font-weight: 700; font-size: 14px; }
 .sv-tag .cn { font-size: 13px; font-weight: 600; line-height: 15px; color: var(--text); }
 .sv-tag .en { font-size: 10px; color: var(--text-2); line-height: 12px; }
 .sv-tag.R .id, .sv-id.R { background: #E5484D; } .sv-tag.L .id, .sv-id.L { background: #2F7CF6; } .sv-tag.H .id, .sv-id.H { background: #F5B400; color: #1D1D1F; }
@@ -336,29 +323,29 @@ button:disabled { cursor: default; }
 .sv-tabs { display: flex; gap: 4px; padding: 6px 14px 8px; }
 .sv-tabs button { height: 30px; padding: 0 14px; border: 0; border-radius: 8px; background: transparent; font-size: 14px; color: var(--text-2); }
 .sv-tabs button.on { background: var(--bg, #F2F2F7); color: var(--text); font-weight: 600; }
-.sv-hold-n { margin-left: 6px; font-size: 11px; padding: 1px 6px; border-radius: 6px; background: #1D1D1F; color: #FFF; }
+.sv-hold-n { margin-left: 6px; font-size: 11px; padding: 1px 6px; border-radius: var(--radius); background: #1D1D1F; color: #FFF; }
 .sv-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .sv-table th { text-align: left; font-weight: 500; font-size: 12px; color: var(--text-2); padding: 6px 10px; border-bottom: 1px solid #E5E5EA; }
 .sv-table td { padding: 5px 10px; border-bottom: 1px solid #F0F0F2; height: 32px; }
 .sv-table .r { text-align: right; }
 .sv-table tr.stale td { opacity: .45; }
-.sv-id { display: inline-grid; place-items: center; min-width: 26px; height: 22px; border-radius: 6px; color: #FFF; font-weight: 700; font-size: 12px; margin-right: 8px; vertical-align: middle; }
+.sv-id { display: inline-grid; place-items: center; min-width: 26px; height: 22px; border-radius: var(--radius); color: #FFF; font-weight: 700; font-size: 12px; margin-right: 8px; vertical-align: middle; }
 .sv-name { display: inline-flex; flex-direction: column; vertical-align: middle; line-height: 15px; font-weight: 600; }
 .sv-name small { font-size: 10px; font-weight: 400; color: var(--text-2); }
 .sv-deg { font-size: 16px; font-weight: 600; }
 .sv-table td.warn { color: var(--warn); font-weight: 600; } .sv-table td.bad { color: var(--danger); font-weight: 700; }
-.sv-torque { display: inline-block; min-width: 36px; text-align: center; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #E5E5EA; color: var(--text-2); }
+.sv-torque { display: inline-block; min-width: 36px; text-align: center; padding: 2px 8px; border-radius: var(--radius); font-size: 12px; background: #E5E5EA; color: var(--text-2); }
 .sv-torque.on { background: #1D1D1F; color: #FFF; }
 .sv-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .sv-dot.ok { background: #34C759; } .sv-dot.warn { background: #FF9F0A; } .sv-dot.bad { background: var(--danger); }
 .sv-comm { font-size: 12px; color: var(--text-2); }
-.sv-alarm { margin-left: 6px; font-size: 11px; padding: 1px 6px; border-radius: 6px; background: #FFF1F1; color: var(--danger); }
+.sv-alarm { margin-left: 6px; font-size: 11px; padding: 1px 6px; border-radius: var(--radius); background: var(--danger-soft); color: var(--danger); }
 .sv-closed { padding: 22px 26px; max-width: 760px; }
 .sv-closed h2 { margin: 0 0 10px; font-size: 18px; }
 .sv-closed p { margin: 6px 0; font-size: 15px; line-height: 1.7; }
 .sv-small { color: var(--text-2); font-size: 13px !important; }
 @media (max-width: 1100px) { .sv-grid { grid-template-columns: 1fr; } .sv-stage { height: 520px; } }
-.sv-stage .reset-view { position: absolute; z-index: 2; right: 16px; top: 14px; height: 30px; padding: 0 14px; border: 0; border-radius: 999px; background: var(--stage-btn2-bg); color: var(--stage-btn2-fg); font-size: 13px; }
+.sv-stage .reset-view { position: absolute; z-index: 2; right: 16px; top: 14px; height: 30px; padding: 0 14px; border: 0; border-radius: var(--radius); background: var(--stage-btn2-bg); color: var(--stage-btn2-fg); font-size: 13px; }
 .sv-table tbody tr { cursor: pointer; }
 .sv-table tbody tr:hover td { background: #F7F7F9; }
 .sv-table tr.sel td { background: #EEF3FD; }
@@ -367,7 +354,6 @@ button:disabled { cursor: default; }
 .sv-table tr.sel.H td:first-child { box-shadow: inset 3px 0 0 #F5B400; }
 .sv-stage canvas { cursor: pointer; }
 
-/* ---- 舵机页：每颗一行（滑块）+ 功能区 ---- */
 .sv-rows { padding: 4px 0 6px; }
 .sv-row { padding: 6px 14px 6px 12px; border-top: 1px solid #F0F0F2; cursor: pointer; }
 .sv-row:hover { background: #FAFAFB; }
@@ -385,7 +371,7 @@ button:disabled { cursor: default; }
 .sv-raw { width: 40px; text-align: right; font-size: 13px; }
 .sv-switch { display: inline-flex; align-items: center; cursor: pointer; }
 .sv-switch input { display: none; }
-.sv-switch span { min-width: 42px; text-align: center; padding: 3px 8px; border-radius: 999px; font-size: 12px; background: #E5E5EA; color: var(--text-2); user-select: none; }
+.sv-switch span { min-width: 42px; text-align: center; padding: 3px 8px; border-radius: var(--radius); font-size: 12px; background: #E5E5EA; color: var(--text-2); user-select: none; }
 .sv-switch.on span { background: #1D1D1F; color: #FFF; }
 .sv-mini { height: 24px; min-width: 28px; padding: 0 7px; border: 0; border-radius: 7px; background: #F2F2F7; font-size: 12px; color: var(--text); }
 .sv-mini:disabled, .btn-light:disabled, .btn-stop:disabled, .btn-danger:disabled { opacity: .45; }
@@ -395,14 +381,15 @@ button:disabled { cursor: default; }
 .sv-panel h3 { margin: 0 0 10px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
 .sv-wide { grid-column: 1 / -1; }
 .sv-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 8px 0; font-size: 14px; }
-.sv-line input[type=number], .sv-line input[type=text], .sv-line select { height: 30px; padding: 0 8px; border: 1px solid #D1D1D6; border-radius: 8px; background: #FFF; font-size: 14px; }
+.sv-line input[type=number], .sv-line input[type=text], .sv-line select { height: 30px; padding: 0 8px; border: 1px solid var(--hair-strong); border-radius: var(--radius); background: var(--panel-2); color: var(--ink); font-size: 14px; }
 .sv-check { display: inline-flex; align-items: center; gap: 6px; }
-.btn-light { height: 32px; padding: 0 14px; border: 0; border-radius: 999px; background: #E9E9EE; color: var(--text); font-size: 14px; }
-.btn-light:hover:not(:disabled) { background: #DEDEE3; }
-.btn-stop { height: 32px; padding: 0 16px; border: 1.5px solid var(--danger); border-radius: 999px; background: #FFF; color: var(--danger); font-weight: 600; font-size: 14px; }
-.btn-danger { height: 32px; padding: 0 14px; border: 0; border-radius: 999px; background: #FFE5E5; color: var(--danger); font-weight: 600; font-size: 14px; }
+.btn-light { height: 32px; padding: 0 14px; border: 1px solid var(--hair-strong); border-radius: var(--radius); background: var(--panel-2); color: var(--ink); font-size: 14px; cursor: pointer; transition: all 0.15s ease; }
+.btn-light:hover:not(:disabled) { background: var(--panel-elevated); border-color: var(--hair-strong); color: var(--ink-bright); }
+.btn-stop { height: 32px; padding: 0 16px; border: 1.5px solid var(--danger); border-radius: var(--radius); background: var(--panel); color: var(--danger); font-weight: 600; font-size: 14px; cursor: pointer; }
+.btn-danger { height: 32px; padding: 0 14px; border: 1px solid var(--danger); border-radius: var(--radius); background: var(--danger-soft); color: var(--danger); font-weight: 600; font-size: 14px; cursor: pointer; }
+.btn-danger:hover:not(:disabled) { background: var(--danger); color: #ffffff; }
 .sv-chips { gap: 6px; }
-.sv-chip { display: inline-flex; border-radius: 999px; background: #F2F2F7; overflow: hidden; }
+.sv-chip { display: inline-flex; border-radius: var(--radius); background: #F2F2F7; overflow: hidden; }
 .sv-chip button { border: 0; background: transparent; height: 30px; padding: 0 12px; font-size: 14px; }
 .sv-chip .x { padding: 0 10px; color: var(--text-2); border-left: 1px solid #E5E5EA; }
 .sv-warn { margin: 6px 0; font-size: 13px; color: var(--warn); }
@@ -424,7 +411,6 @@ button:disabled { cursor: default; }
 .sv-adv { margin-top: 10px; border-top: 1px solid #F0F0F2; padding-top: 8px; }
 .sv-adv summary { cursor: pointer; font-size: 13px; color: var(--text-2); }
 
-/* ======== 舵机页 v3 布局（用户 10-18：布局不好、没对齐）：所有行同一套列宽 ======== */
 .sv-page { max-width: 1480px; gap: 14px; }
 .sv-head { display: flex; align-items: center; gap: 28px; flex-wrap: wrap; }
 .sv-titles { flex: 1; min-width: 280px; }
@@ -437,7 +423,7 @@ button:disabled { cursor: default; }
 .sv-stats b small { font-size: 12px; font-weight: 500; color: var(--text-2); }
 .sv-stats span { font-size: 11px; color: var(--text-2); }
 .sv-main { display: grid; grid-template-columns: minmax(380px, 5fr) minmax(580px, 6fr); gap: 16px; align-items: start; }
-.sv-left { position: sticky; top: calc(68px + var(--bar-h, 0px)); display: flex; flex-direction: column; gap: 12px; }   /* 顶栏吸顶了（56 px）：贴在它下面 */
+.sv-left { position: sticky; top: calc(68px + var(--bar-h, 0px)); display: flex; flex-direction: column; gap: 12px; }   
 .sv-stage { height: min(60vh, 600px); }
 .sv-stage .sv-poses { position: absolute; z-index: 2; left: 12px; top: 12px; background: rgba(255,255,255,.88); backdrop-filter: blur(6px); }
 .sv-card { padding: 14px 18px; }
@@ -451,7 +437,6 @@ button:disabled { cursor: default; }
 .sv-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--text-2); }
 .sv-inline input[type=number] { width: 58px; }
 
-/* 15 颗：表头 + 三组，列宽固定 */
 .sv-list { padding: 4px 0 8px; }
 .sv-list .sv-row { display: grid; grid-template-columns: 28px 78px minmax(120px, 1fr) 104px 60px 48px 54px 46px 12px;
   align-items: center; column-gap: 10px; padding: 7px 16px; border-top: 1px solid #F2F2F5; box-shadow: none; }
@@ -459,18 +444,18 @@ button:disabled { cursor: default; }
 .sv-list .sv-name { display: block; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 18px; }
 .sv-list .sv-id { margin: 0; min-width: 28px; }
 .sv-list .sv-slider { width: 100%; min-width: 0; }
-/* 新舵机编号：还没编号的那颗标出来 */
+
 .sv-numbering { grid-column: 1 / -1; order: -1; }
 .sv-found .sv-chip { padding: 4px 10px; font-size: 14px; border: 1px solid transparent; }
 .sv-found .sv-chip.new { background: #FFF4E5; border-color: #F5B400; color: #8A5A00; font-weight: 600; }
-/* 读数两边的「−」「+」 */
+
 .sv-numbox { display: flex; align-items: center; gap: 2px; min-width: 0; }
-.sv-nudge { flex: none; width: 26px; height: 26px; padding: 0; border: 1px solid #D1D1D6; border-radius: 6px;
+.sv-nudge { flex: none; width: 26px; height: 26px; padding: 0; border: 1px solid #D1D1D6; border-radius: var(--radius);
   background: #FFF; color: var(--text); font-size: 16px; line-height: 1; cursor: pointer; }
 .sv-nudge:hover:not(:disabled) { border-color: #2F7CF6; color: #2F7CF6; }
 .sv-nudge:disabled { opacity: .4; cursor: default; }
-/* 读数那一格能输数字：平时看着跟原来的数字一样，点进去才像输入框 */
-.sv-list .sv-num { width: 100%; min-width: 0; height: 24px; padding: 0 2px; border: 1px solid transparent; border-radius: 6px;
+
+.sv-list .sv-num { width: 100%; min-width: 0; height: 24px; padding: 0 2px; border: 1px solid transparent; border-radius: var(--radius);
   background: transparent; color: inherit; font: inherit; -moz-appearance: textfield; appearance: textfield; }
 .sv-list .sv-num::-webkit-outer-spin-button, .sv-list .sv-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .sv-list .sv-num:hover:not(:disabled) { border-color: #D1D1D6; background: #FFF; }
@@ -490,7 +475,6 @@ button:disabled { cursor: default; }
 .sv-more { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; padding: 8px 0 2px 38px; font-size: 12px; color: var(--text-2); }
 .sv-more b { color: var(--text); font-weight: 600; }
 
-/* 更多（折叠） */
 .sv-more-area { padding: 12px 18px; }
 .sv-more-area > summary { cursor: pointer; font-size: 14px; font-weight: 600; color: var(--text-2); }
 .sv-more-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 14px; }
@@ -501,22 +485,22 @@ button:disabled { cursor: default; }
   .sv-stage { height: 440px; }
 }
 .sv-pick { min-width: 150px; }
-/* 舵机页 v5：左 3D、右功能（照 servo-web） */
+
 .sv-main { grid-template-columns: minmax(360px, 4fr) minmax(620px, 6fr); }
 .sv-left .sv-stage { height: calc(100vh - 150px); min-height: 520px; max-height: 900px; }
 .sv-right { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .sv-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; }
-.btn-ok { height: 32px; padding: 0 14px; border: 0; border-radius: 999px; background: #E3F6EA; color: #1E7B3A; font-weight: 600; font-size: 14px; }
+.btn-ok { height: 32px; padding: 0 14px; border: 0; border-radius: var(--radius); background: #E3F6EA; color: #1E7B3A; font-weight: 600; font-size: 14px; }
 .btn-ok:disabled { opacity: .45; }
 .sv-calib .sv-form { grid-template-columns: 70px minmax(0, 1fr); }
-/* 窄屏（平板竖着、手机）：上下排。上面 v5 那条写在 1100px 规则后面把它盖掉了，手机上整页能左右滑 */
+
 @media (max-width: 1100px) {
   .sv-main { grid-template-columns: minmax(0, 1fr); }
   .sv-left .sv-stage { height: 440px; min-height: 0; }
 }
 @media (max-width: 700px) {
   .sv-left .sv-stage { height: 340px; }
-  /* 手机：一行九列放不下（约 590 px）→ 两行：编号 名字 角度 扭矩 中位 灯 / 滑块 温度 读数 */
+  
   .sv-list .sv-headrow { display: none !important; }
   .sv-list .sv-row { grid-template-columns: 28px minmax(0, 1fr) 56px 54px 46px 10px; row-gap: 6px; padding: 8px 12px; }
   .sv-list .sv-row > :nth-child(1) { grid-area: 1 / 1; }
@@ -531,7 +515,7 @@ button:disabled { cursor: default; }
   .sv-list .sv-row > .sv-more { grid-column: 1 / -1; }
 }
 .sv-left .sv-stage { height: calc(100vh - 230px); min-height: 480px; }
-/* 舵机页 v6 页头（用户画框）：左 标题 + 读取状态；右 操作按钮 + 交还主程序 */
+
 .sv-head { align-items: flex-start; gap: 12px 24px; }
 .sv-titles { flex: 0 1 auto; min-width: 0; }
 .sv-titleline { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
@@ -545,4 +529,195 @@ button:disabled { cursor: default; }
 .sv-port { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; }
 .sv-port select { height: 26px; border: 1px solid #D1D1D6; border-radius: 7px; background: #FFF; font-size: 12px; max-width: 260px; }
 .sv-port .btn-light { height: 26px; padding: 0 10px; font-size: 12px; }
-.sv-loading { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 6px 14px; border-radius: 999px; background: rgba(0,0,0,.35); color: #FFF; font-size: 13px; pointer-events: none; }
+.sv-loading { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 6px 14px; border-radius: var(--radius); background: rgba(0,0,0,.35); color: #FFF; font-size: 13px; pointer-events: none; }
+
+
+/* Armature Header & Theme Toggle */
+.arm-nav-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 10px 16px;
+  border-bottom: 1px solid var(--hair);
+  margin-bottom: 10px;
+}
+.arm-nav-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.arm-nav-title {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  line-height: 1.1;
+  color: var(--ink-bright);
+}
+.arm-nav-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+.arm-theme-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--hair);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.arm-theme-btn:hover {
+  border-color: var(--hair-strong);
+  color: var(--ink);
+}
+
+/* Armature 3D Engineering HUD */
+.arm-3d-hud {
+  position: absolute;
+  z-index: 4;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  pointer-events: none;
+}
+.arm-3d-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: rgb(17 17 16 / 82%);
+  border: 1px solid var(--hair);
+  border-radius: var(--radius);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+:root[data-theme="light"] .arm-3d-group {
+  background: rgb(255 255 255 / 88%);
+}
+.arm-3d-btn {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.arm-3d-btn:hover {
+  color: var(--ink);
+  background: var(--panel-2);
+}
+.arm-3d-btn[aria-pressed="true"] {
+  color: var(--paper);
+  background: var(--accent);
+  font-weight: 700;
+}
+.arm-3d-pick {
+  position: absolute;
+  z-index: 4;
+  top: 12px;
+  right: 12px;
+  padding: 6px 10px;
+  background: rgb(17 17 16 / 86%);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+  pointer-events: none;
+}
+
+/* 3D Viewport HUD & Controls */
+.stage .stage-hud,
+.stage-hud,
+.sv-hud {
+  position: absolute;
+  z-index: 10;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+.stage-hud-group {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius);
+  background: rgba(23, 23, 22, 0.88);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--hair-strong);
+}
+.hud-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.hud-btn:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.08);
+}
+.hud-btn.on,
+.hud-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: #111110;
+  font-weight: 700;
+}
+.hud-hover {
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(23, 23, 22, 0.88);
+  border: 1px solid var(--hair);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+:root[data-theme="light"] .stage-hud-group,
+:root[data-theme="light"] .sv-hud {
+  background: rgba(245, 243, 238, 0.92);
+  border-color: rgba(0, 0, 0, 0.12);
+}
+:root[data-theme="light"] .hud-btn {
+  color: #55534e;
+}
+:root[data-theme="light"] .hud-btn:hover {
+  color: #111110;
+  background: rgba(0, 0, 0, 0.06);
+}
+:root[data-theme="light"] .hud-btn.on,
+:root[data-theme="light"] .hud-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: #ffffff;
+}
+:root[data-theme="light"] .hud-hover {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #111110;
+}
+

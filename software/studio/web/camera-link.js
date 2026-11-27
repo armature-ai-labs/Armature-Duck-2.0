@@ -19,7 +19,6 @@ export class CameraLink {
 
   update(patch) { this.state = { ...this.state, ...patch }; this.onState(this.state); }
 
-  // 把四个回调挂到一个刚建好的 WebSocket 上。label 只用在报错文案里（端口 8443 或 /media-ws）
   _attach(ws, generation, label) {
     this.chain = Promise.resolve();
     this.queuedMessages = 0;
@@ -27,68 +26,62 @@ export class CameraLink {
     ws.onmessage = event => {
       if (!this.current(generation)) return;
       if (typeof event.data !== 'string' || event.data.length > MAX_MESSAGE || ++this.queuedMessages > 256) {
-        this.fail('摄像头信令数据超出限制。'); return;
+        this.fail('Camera signaling payload exceeded limit.'); return;
       }
       this.chain = this.chain.then(async () => {
         if (this.current(generation)) await this.message(JSON.parse(event.data), generation);
-      }).catch(error => { if (this.current(generation)) this.fail(`摄像头协商失败：${error.message || '数据无效'}`); })
+      }).catch(error => { if (this.current(generation)) this.fail(`Camera negotiation failed: ${error.message || 'invalid payload'}`); })
         .finally(() => { if (this.current(generation)) this.queuedMessages--; });
     };
-    ws.onerror = () => { if (this.current(generation)) this.fail(`连不上摄像头信令${label}，请检查 mediad 和局域网连接。`); };
-    ws.onclose = () => { if (this.current(generation)) this.fail('摄像头信令连接断开，请重新连接。'); };
+    ws.onerror = () => { if (this.current(generation)) this.fail(`Cannot reach camera signaling ${label}; check mediad and LAN.`); };
+    ws.onclose = () => { if (this.current(generation)) this.fail('Camera signaling disconnected; reconnect to retry.'); };
     this.lastFrameAt = this.startedAt = this.now();
     this.watch(generation);
   }
 
-  /**
-   * 连摄像头信令。默认直连 mediad 的端口（8443）；传了 path 就走「同域 + 同协议」的反代路径。
-   * 为什么还要 path：https 页面里连 ws://host:8443 是明文，浏览器会把它当混合内容直接挡掉，
-   * 所以 https 下必须走同域的 /media-ws（nginx 转发到本机 8443），画面才出得来。
-   */
   start(port = 8443, path = null) {
     if (path) return this.startProxy(path);
     this.stop();
     const generation = this.generation;
     this.state = { state: 'connecting', error: null, width: null, height: null, frames: 0, metadata: null, producer: null };
     this.update({});
-    if (!this.WebSocket || !this.RTCPeerConnection) return this.fail('这个浏览器不支持 WebRTC 预览。');
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return this.fail('摄像头信令端口无效。');
+    if (!this.WebSocket || !this.RTCPeerConnection) return this.fail('WebRTC preview is not supported in this browser.');
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return this.fail('Invalid camera signaling port.');
     try {
       const hostname = this.location.hostname;
       const host = hostname.includes(':') && !hostname.startsWith('[') ? `[${hostname}]` : hostname;
       const scheme = this.location.protocol === 'https:' ? 'wss' : 'ws';
-      this._attach(this.ws = new this.WebSocket(`${scheme}://${host}:${port}`), generation, `端口 ${port}`);
-    } catch (error) { this.fail(`摄像头连接失败：${error.message}`); }
+      this._attach(this.ws = new this.WebSocket(`${scheme}://${host}:${port}`), generation, `port ${port}`);
+    } catch (error) { this.fail(`Camera connection failed: ${error.message}`); }
   }
 
-  /** 走同域的反代路径（不带端口），比如 /media-ws。http 和 https 下都能这么连 */
   startProxy(path = '/media-ws') {
     this.stop();
     const generation = this.generation;
     this.state = { state: 'connecting', error: null, width: null, height: null, frames: 0, metadata: null, producer: null };
     this.update({});
-    if (!this.WebSocket || !this.RTCPeerConnection) return this.fail('这个浏览器不支持 WebRTC 预览。');
-    if (typeof path !== 'string' || !path.startsWith('/')) return this.fail('摄像头信令路径无效。');
+    if (!this.WebSocket || !this.RTCPeerConnection) return this.fail('WebRTC preview is not supported in this browser.');
+    if (typeof path !== 'string' || !path.startsWith('/')) return this.fail('Invalid camera signaling path.');
     try {
       const scheme = this.location.protocol === 'https:' ? 'wss' : 'ws';
       this._attach(this.ws = new this.WebSocket(`${scheme}://${this.location.host}${path}`), generation, path);
-    } catch (error) { this.fail(`摄像头连接失败：${error.message}`); }
+    } catch (error) { this.fail(`Camera connection failed: ${error.message}`); }
   }
 
   current(generation, pc = null) { return this.generation === generation && !!this.ws && (!pc || this.pc === pc); }
   send(message) { if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(message)); }
 
   async message(msg, generation) {
-    if (!msg || typeof msg !== 'object') throw Error('信令数据无效');
+    if (!msg || typeof msg !== 'object') throw Error('Invalid signaling payload');
     if (msg.type === 'welcome') { this.send({ type: 'list' }); return; }
     if (msg.type === 'list') {
       if (this.sessionId || this.starting) return;
-      if (!Array.isArray(msg.producers) || msg.producers.length > 64) throw Error('视频来源列表无效');
+      if (!Array.isArray(msg.producers) || msg.producers.length > 64) throw Error('Invalid producer list');
       const producers = msg.producers.filter(p => validId(p?.id) && p.meta &&
         typeof p.meta.release === 'string' && /^\d+$/.test(String(p.meta.api_version || '')) &&
         (!p.meta.kind || p.meta.kind === 'microduck'));
       if (producers.length !== 1) {
-        this.fail(producers.length ? '发现多个视频来源，无法确认这只鸭子的画面。' : '没有可识别的本机视频来源，请检查 mediad。'); return;
+        this.fail(producers.length ? 'Multiple video producers found; cannot disambiguate.' : 'No local video producer found; check mediad.'); return;
       }
       this.starting = true;
       this.update({ producer: producers[0].meta });
@@ -97,7 +90,7 @@ export class CameraLink {
     }
     if (msg.type === 'sessionStarted') {
       if (!this.starting || this.sessionId) return;
-      if (!validId(msg.sessionId)) throw Error('会话编号无效');
+      if (!validId(msg.sessionId)) throw Error('Invalid sessionId');
       this.starting = false;
       this.sessionId = msg.sessionId;
       this.update({ state: 'negotiating' });
@@ -108,7 +101,7 @@ export class CameraLink {
       const pc = this.pc;
       if (!pc || msg.sessionId !== this.sessionId) return;
       if (msg.sdp) {
-        if (msg.sdp.type !== 'offer' || typeof msg.sdp.sdp !== 'string' || msg.sdp.sdp.length > 128 * 1024) throw Error('SDP 无效');
+        if (msg.sdp.type !== 'offer' || typeof msg.sdp.sdp !== 'string' || msg.sdp.sdp.length > 128 * 1024) throw Error('Invalid SDP');
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp.sdp });
         if (!this.current(generation, pc)) return;
         for (const transceiver of pc.getTransceivers?.() || []) {
@@ -126,16 +119,16 @@ export class CameraLink {
       } else if (msg.ice) {
         const ice = msg.ice;
         if (typeof ice.candidate !== 'string' || ice.candidate.length > 8192 ||
-          !Number.isInteger(ice.sdpMLineIndex) || ice.sdpMLineIndex < 0 || ice.sdpMLineIndex > 32 || ++this.iceCount > 256) throw Error('ICE 无效');
+          !Number.isInteger(ice.sdpMLineIndex) || ice.sdpMLineIndex < 0 || ice.sdpMLineIndex > 32 || ++this.iceCount > 256) throw Error('Invalid ICE');
         const candidate = { candidate: ice.candidate, sdpMLineIndex: ice.sdpMLineIndex };
         if (pc.remoteDescription) await pc.addIceCandidate(candidate);
         else this.pendingIce.push(candidate);
       }
       return;
     }
-    if (msg.type === 'endSession' && this.sessionId && msg.sessionId === this.sessionId) this.fail('摄像头结束了视频会话，请重新连接。');
-    else if (msg.type === 'sessionRejected') this.fail('摄像头拒绝了视频会话，请稍后重新连接。');
-    else if (msg.type === 'error') this.fail('摄像头信令服务报告错误，请重新连接。');
+    if (msg.type === 'endSession' && this.sessionId && msg.sessionId === this.sessionId) this.fail('Camera ended the video session; reconnect.');
+    else if (msg.type === 'sessionRejected') this.fail('Camera rejected the video session; try again.');
+    else if (msg.type === 'error') this.fail('Camera signaling reported an error; reconnect.');
   }
 
   createPeer(generation) {
@@ -149,13 +142,13 @@ export class CameraLink {
     };
     pc.onconnectionstatechange = () => {
       if (!this.current(generation, pc)) return;
-      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) this.fail('视频连接已断开，请重新连接。');
+      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) this.fail('Video connection lost; reconnect.');
     };
     pc.ontrack = event => {
       if (!this.current(generation, pc)) { event.track.stop(); return; }
       if (event.track.kind !== 'video') { event.track.stop(); return; }
       this.tracks.add(event.track);
-      event.track.onended = () => { if (this.current(generation, pc)) this.fail('摄像头视频轨道已结束。'); };
+      event.track.onended = () => { if (this.current(generation, pc)) this.fail('Camera video track ended.'); };
       this.hasTrack = true;
       this.lastFrameAt = this.now();
       this.video.srcObject = event.streams?.[0] || new this.MediaStream([event.track]);
@@ -163,7 +156,7 @@ export class CameraLink {
       if (this.playing) this.video.removeEventListener('playing', this.playing);
       this.playing = () => { if (this.current(generation, pc)) this.samplePlayback(); };
       this.video.addEventListener('playing', this.playing);
-      this.video.play()?.catch(() => { if (this.current(generation, pc)) this.fail('浏览器没有开始播放，请点击重新连接。'); });
+      this.video.play()?.catch(() => { if (this.current(generation, pc)) this.fail('Playback did not start; click Reconnect.'); });
     };
     pc.ondatachannel = event => {
       if (!this.current(generation, pc) || this.channel) { event.channel.close(); return; }
@@ -209,7 +202,7 @@ export class CameraLink {
     this.timer = this.setTimeout(() => {
       if (!this.current(generation)) return;
       this.samplePlayback();
-      if (this.now() - this.lastFrameAt >= 10000) this.fail(this.hasTrack ? '接收画面超时，视频已停止更新。' : '等待摄像头画面超时，请检查视频来源。');
+      if (this.now() - this.lastFrameAt >= 10000) this.fail(this.hasTrack ? 'Video frame timeout; stream stalled.' : 'Timed out waiting for camera frames.');
       else this.watch(generation);
     }, 1000);
   }
@@ -223,7 +216,7 @@ export class CameraLink {
     if (ws) {
       ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
       if (ws.readyState === 1 && this.sessionId) {
-        try { ws.send(JSON.stringify({ type: 'endSession', sessionId: this.sessionId })); } catch { /* Closing an already lost socket. */ }
+        try { ws.send(JSON.stringify({ type: 'endSession', sessionId: this.sessionId })); } catch { /* Closing lost socket. */ }
       }
       try { ws.close(); } catch { /* Already closed. */ }
     }

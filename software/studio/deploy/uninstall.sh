@@ -1,20 +1,20 @@
 #!/bin/sh
-# 卸掉 Studio 的 root 小助手、robotd 的保护 drop-in、sudoers 那一行。
-# 用法：sudo sh uninstall.sh [--purge]   （--purge 连操作记录 /var/lib/microduck-helper 一起删）
-# Studio 正占着舵机总线（旗在）时拒绝：先在 Studio 里交还，或者重启。
+# Uninstall Studio root helper, robotd guard drop-in, and sudoers rule.
+# Usage: sudo sh uninstall.sh [--purge]   (--purge also removes /var/lib/microduck-helper)
+# Refuses if Studio currently holds the servo bus (bus-held flag present).
 set -eu
-[ "$(id -u)" -eq 0 ] || { echo "要 root：sudo sh uninstall.sh" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || { echo "Requires root: sudo sh uninstall.sh" >&2; exit 1; }
 if [ -e /run/microduck-helper/bus-held ]; then
-    echo "Studio 正占着舵机总线（/run/microduck-helper/bus-held 在）：先在 Studio 里交还主程序，再卸" >&2
+    echo "Studio is holding the servo bus (/run/microduck-helper/bus-held present): hand back to robotd first" >&2
     exit 1
 fi
 if [ -e /etc/systemd/system/robotd.service.d/zzzzzz-studio-imu-recalibrate.conf ]; then
-    echo "初次 IMU 校准重做会话还在：先在 Studio 完成或取消，再卸载（保留会话和备份）" >&2
+    echo "IMU recalibration session is still active: finish or cancel in Studio first" >&2
     exit 1
 fi
 if [ -e /var/lib/microduck-helper/imu-recalibrate/manifest.json ]; then
     /usr/bin/python3 -IS -c 'import json,sys;sys.exit(1 if json.load(open("/var/lib/microduck-helper/imu-recalibrate/manifest.json"))["active"] else 0)' || {
-        echo "初次 IMU 校准会话未结束或读不回：先恢复会话，再卸载" >&2
+        echo "Unfinished or unreadable IMU recalibration session: recover session before uninstalling" >&2
         exit 1
     }
 fi
@@ -25,4 +25,4 @@ rm -f /usr/local/sbin/microduck-helper /usr/local/sbin/microduck-maintenance /us
 systemctl stop microduck-bus-hold 2>/dev/null || true
 rm -rf /run/microduck-helper /run/microduck-handover
 if [ "${1:-}" = "--purge" ]; then rm -rf /var/lib/microduck-helper; fi
-echo "卸好了。robotd 没重启；systemctl show robotd -p DropInPaths 里应该没有 zzzz-studio-bus.conf 了。"
+echo "Uninstalled. robotd was not restarted; verify zzzz-studio-bus.conf is absent from DropInPaths."

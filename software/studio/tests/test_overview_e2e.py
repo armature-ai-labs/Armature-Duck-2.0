@@ -1,14 +1,14 @@
-"""总览重排（overview-merge-plan.md §5，审查 overview-merge-review.md）的端到端：假 robotd + 真 Studio + 无头 Edge。
+"""item (overview-merge-plan.md §5, item overview-merge-review.md)item: item robotd + item Studio + item Edge.
 
-tests/overview_e2e.mjs 在总览上看主板温度格、上手清单、手柄区块，再做几件会出事的操作（按着摇杆时切页 / 滚走、
-在舞台上滚滚轮、手机上从手柄图空白处 / 动作按钮 / 图上的 A 起手往下刷），把假 robotd 每一步收到的东西打出来；
-这里核对（审查 O1、O2、O5、O8、O13、O14、O17、O18）。分两段跑：main（没有记录的 Studio）；done（Studio 带着
-「6 步都做过」的 onboarding.json 重启，清单收成一行）。
+tests/overview_e2e.mjs item, item, item, item (item / item, 
+item, Phoneitem / item / item A item), item robotd item
+item (item O1, O2, O5, O8, O13, O14, O17, O18).item: main (item Studio)itemdone (Studio item
+'6 item'item onboarding.json item, item).
 
-要电脑上有 Node（≥ 22）和 Edge；没有（比如鸭子上）就跳过。设 STUDIO_E2E=0 也跳过。
-端口默认 Studio 18090、假 robotd 17021 / configd 17022、Edge 调试口 9343，被占了就换空闲的（不碰别人在跑的）。
-OVERVIEW_E2E_DIR=目录：日志、Edge 的 profile、假 robotd 的记录放这里（默认临时目录，跑完删）；OVERVIEW_SHOTS=目录：顺手截图。
-单独跑：
+itemPCitem Node (≥ 22)item Edgeitem (item)itemSkip.item STUDIO_E2E=0 itemSkip.
+item Studio 18090, item robotd 17021 / configd 17022, Edge item 9343, item (item).
+OVERVIEW_E2E_DIR=item: item, Edge item profile, item robotd item (item, item)itemOVERVIEW_SHOTS=item: item.
+item: 
     py -3.13 -I -c "import sys;sys.path[:0]=['deps','.','dev'];import unittest;unittest.main(module=None,argv=['x','-v','tests.test_overview_e2e'])"
 """
 import json
@@ -32,7 +32,7 @@ XBOX = "78:86:2E:BB:13:28"
 
 
 def all_done_records():
-    """「5 步都做过」的记录：指纹按假 robotd 回放的那份标定算（跟 Studio 里 onboard.py 同一套函数）。"""
+    """'5 item'item: item robotd item (item Studio item onboard.py item)."""
     from fake_robotd import FakeRobotd
     from studio import onboard as O
     from studio.imu import mount_of
@@ -41,14 +41,14 @@ def all_done_records():
     now = time.time()
     fp = O.full_fp(f.bus, f.calib)
     return {"v": 1, "confirm_servo": {"at": now - 3600, "fp": O.joints_fp(f.calib), "by": "e2e"},
-            # IMU 这一步是跳过的（用户 10-18：「以前标定过，应该跳过就行」）：收起时写「（跳过 1 步）」
+            # IMU Skip ( 10-18: ', Skip'): ' (Skip 1 )'
             "skipped": {"imu": {"at": now - 3000, "by": "e2e", "fp": O.mount_fp(src, mount["quat"])}},
             "estop": {"at": now - 2400, "ms": 186, "mac": XBOX, "name": "Xbox Wireless Controller", "build": f.bus["build"]},
             "stood": {"at": now - 1800, "fp": fp}, "walked": {"at": now - 1700, "fp": fp}}
 
 
 @unittest.skipUnless(_node_ok() and EDGE and os.environ.get("STUDIO_E2E", "1") != "0",
-                     "没有 Node ≥ 22 或者 Edge（或者设了 STUDIO_E2E=0）：跳过总览的端到端测试")
+                     "item Node ≥ 22 item Edge (item STUDIO_E2E=0): Skipitem")
 class OverviewE2E(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -68,7 +68,7 @@ class OverviewE2E(unittest.TestCase):
         def studio(tag):
             procs["studio"] = subprocess.Popen(
                 [sys.executable, "-I", str(ROOT / "run.py"), "--listen", f"127.0.0.1:{p_web}", "--robotd", f"tcp:127.0.0.1:{p_rd}",
-                 "--configd", f"tcp:127.0.0.1:{p_cfg}", "--duck-label", "② 二号鸭", "--dev-autologin", "--servo-sim",
+                 "--configd", f"tcp:127.0.0.1:{p_cfg}", "--duck-label", "② item", "--dev-autologin", "--servo-sim",
                  "--state-dir", str(state), "--log-dir", str(cls.dir / "logs")],
                 cwd=ROOT, env=env, stdout=out(f"studio-{tag}.out"), stderr=subprocess.STDOUT)
             _wait_http(f"http://127.0.0.1:{p_web}/healthz", "Studio")
@@ -81,12 +81,12 @@ class OverviewE2E(unittest.TestCase):
             r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", timeout=400, cwd=ROOT)
             (cls.dir / f"overview_e2e-{phase}.err").write_text(r.stderr or "", encoding="utf-8")
             if r.returncode != 0:
-                raise AssertionError(f"Node 脚本（{phase}）出错（日志在 {cls.dir}）：{(r.stderr or '')[-3000:]}")
+                raise AssertionError(f"Node item ({phase})item (item {cls.dir}): {(r.stderr or '')[-3000:]}")
             (cls.dir / f"overview_e2e-{phase}.json").write_text(r.stdout, encoding="utf-8")
             return json.loads(r.stdout)
 
         try:
-            # 「准备好走」：摇杆、动作、技能都能按（看「不该发」的那几步，要先证明平时是会发的）
+            # '': , ,  ('', )
             procs["fake"] = subprocess.Popen(
                 [sys.executable, "-I", str(ROOT / "dev" / "fake_robotd.py"), "--fixture", str(FIXTURE),
                  "--robotd-port", str(p_rd), "--configd-port", str(p_cfg), "--posture", "policy", "--record", str(rec)],
@@ -96,13 +96,13 @@ class OverviewE2E(unittest.TestCase):
                 [EDGE, "--headless=new", "--disable-gpu", f"--remote-debugging-port={p_cdp}", f"--user-data-dir={cls.dir / 'edge'}",
                  "--no-first-run", "--no-default-browser-check", "about:blank"],
                 stdout=out("edge.out"), stderr=subprocess.STDOUT)
-            _wait_http(f"http://127.0.0.1:{p_cdp}/json/version", "无头 Edge 的调试口")
+            _wait_http(f"http://127.0.0.1:{p_cdp}/json/version", "item Edge item")
             cls.out = node("main")
-            # 第二段：Studio 带着「5 步都做过」的记录重启；实体手柄连着（测急停记录里就是这只手柄）
+            # : Studio '5 ' ()
             _kill(procs.pop("studio"))
             (state / "onboarding.json").write_text(json.dumps(all_done_records(), ensure_ascii=False), encoding="utf-8")
             import socket
-            for _ in range(20):           # 上一段最后让假 robotd「重启」了一下（0.3 秒拒绝连接）：没回话就再来
+            for _ in range(20):           # item robotd'item'item (0.3 item): item
                 try:
                     with socket.create_connection(("127.0.0.1", p_cfg), 3) as s:
                         s.sendall(b'{"jsonrpc":"2.0","id":1,"method":"fake.set","params":{"pad_connected":true}}\n')
@@ -112,7 +112,7 @@ class OverviewE2E(unittest.TestCase):
                     pass
                 time.sleep(0.2)
             else:
-                raise AssertionError("假 configd 没接受「手柄连着」")
+                raise AssertionError("item configd item'item'")
             studio("done")
             cls.done = node("done")
         finally:
@@ -130,39 +130,39 @@ class OverviewE2E(unittest.TestCase):
 
     def test_overview_layout(self):
         d = self.out["desk"]
-        self.assertEqual(d["cells"], 7)                                  # 增加摄像头与ToF，最后主板
+        self.assertEqual(d["cells"], 7)                                  # itemToF, item
         self.assertIn("°C", d["cpu"])
-        self.assertEqual(d["rows"], 6)                                   # 清单 6 行（任务 11 加了「写进主程序」）
-        self.assertFalse(d["padActive"])                                 # 首页顶上：手柄那一块不在屏幕上
-        self.assertEqual(d["nav"], "总览")
-        self.assertEqual(d["now"], "1 舵机零位")                         # 现在该做：第一个没完成的
+        self.assertEqual(d["rows"], 6)                                   # item 6 item (item 11 item'item')
+        self.assertFalse(d["padActive"])                                 # item: item
+        self.assertEqual(d["nav"], "item")
+        self.assertEqual(d["now"], "1 item")                         # item: item
         self.assertEqual(d["marks"][:3], ["●", "●", "✓"])
-        tops = self.out["d1100"]["tops"]                                 # 1100 宽：4 + 3
+        tops = self.out["d1100"]["tops"]                                 # 1100 item: 4 + 3
         self.assertEqual(len(set(tops[:4])), 1)
         self.assertGreater(tops[4], tops[0])
         self.assertEqual(len(set(tops[4:])), 1)
         for k in ("d1100", "phone", "phone_pad"):
-            self.assertLessEqual(self.out[k]["sw"], self.out[k]["cw"], f"{k}：能左右滑")
+            self.assertLessEqual(self.out[k]["sw"], self.out[k]["cw"], f"{k}: item")
 
     def test_wheel_on_stage_scrolls_page(self):
-        self.assertGreater(self.out["wheel"], 100, "在舞台上滚滚轮，页面没动（被 3D 缩放吃掉了）")
+        self.assertGreater(self.out["wheel"], 100, "item, item (item 3D item)")
 
     def test_pad_anchor(self):
         n = self.out["padNav"]
         self.assertTrue(n["active"])
-        self.assertEqual(n["nav"], "手柄")
-        self.assertEqual(n["topbar"], 0)                                 # 顶栏吸顶（卸力一直在屏幕上：O3）
-        # 仪表带吸在顶栏下面、侧栏吸住（用户 10-19：往下滑一直看得到）；滚到手柄那一块，停在仪表带下面、不被它盖住
+        self.assertEqual(n["nav"], "item")
+        self.assertEqual(n["topbar"], 0)                                 # item (E-Stopitem: O3)
+        # ,  ( 10-19: ), , 
         self.assertEqual(n["band"][0], 56, n)
         self.assertEqual(n["navTop"], 0, n)
         self.assertTrue(n["band"][1] <= n["top"] <= n["band"][1] + 30, n)
 
     def assert_released(self, st):
-        self.assertTrue(any(nonzero(p) for p in moves(st["before"])), "按着摇杆时应该在走（不然这一步没测到东西）")
+        self.assertTrue(any(nonzero(p) for p in moves(st["before"])), "item (item)")
         self.assertIn({"vx": 0, "vy": 0, "vyaw": 0}, moves(st["atLeave" if "atLeave" in st else "atScroll"]))
-        self.assertFalse(any(nonzero(p) for p in moves(st["after"])), "离开手柄区以后手还按着也不该再走")
+        self.assertFalse(any(nonzero(p) for p in moves(st["after"])), "item")
         self.assertFalse(st["active"])
-        self.assertTrue(st["offLogged"], "Studio 日志里没看到「离开了手柄区」（drive off）")
+        self.assertTrue(st["offLogged"], "Studio item'item' (drive off)")
 
     def test_route_change_while_holding_stick_stops_and_drives_off(self):
         self.assert_released(self.out["steps"]["route_leave"])
@@ -178,74 +178,74 @@ class OverviewE2E(unittest.TestCase):
         self.assertEqual(g["imu"], "#/imu")
 
     def test_swipes_on_phone_send_nothing(self):
-        """O2：从手柄图空白处、动作按钮、图上的 A 起手往上刷是在滚页面，robotd 一条都收不到；按住不动 / 点一下才发（对照）。"""
+        """O2: item, item, item A item, robotd item / item (item)."""
         for step in ("swipe_pad_blank", "swipe_action", "press_right_after_scroll", "swipe_svg_a"):
             with self.subTest(step=step):
                 self.assertEqual([r for r in self.recs(step) if r["method"] in ("robot.move", "robot.head", "robot.do", "robot.mouth",
                                                                                   "robot.sound", "robot.pose")], [])
-        self.assertTrue(any(r["method"] == "robot.head" for r in self.recs("hold_action")), "按住「点头」不动，头没动")
+        self.assertTrue(any(r["method"] == "robot.head" for r in self.recs("hold_action")), "item'item'item, item")
         self.assertIn({"method": "robot.do", "params": {"skill": "ground_pick"}, "notify": False}, self.recs("tap_svg_a"))
 
     def test_board_temperature(self):
         c = self.out["cpu"]
         self.assertTrue(c["throttled"]["bad"])
-        self.assertIn("降频了：1008 / 1800 MHz", c["throttled"]["text"])
-        self.assertIn("主板过热降频了", c["throttled"]["todo"])
-        self.assertIn("有点热", c["hot"])
-        self.assertIn("—", c["stale"])                                   # health 过期：写「—」，不写「正常」（O5）
-        self.assertNotIn("正常", c["stale"])
+        self.assertIn("item: 1008 / 1800 MHz", c["throttled"]["text"])
+        self.assertIn("item", c["throttled"]["todo"])
+        self.assertIn("item", c["hot"])
+        self.assertIn("—", c["stale"])                                   # health item: item'—', item'Normal' (O5)
+        self.assertNotIn("Normal", c["stale"])
 
     def test_unknown_shows_question_marks(self):
-        self.assertEqual(self.out["unknown"][:4], ["?", "?", "?", "?"])   # 舵机、IMU、写进主程序、配手柄
-        self.assertIn("读不到 configd", self.out["unknownText"])
+        self.assertEqual(self.out["unknown"][:4], ["?", "?", "?", "?"])   # item, IMU, item, item
+        self.assertIn("item configd", self.out["unknownText"])
 
     def test_c3_keyboard_repeat_after_leaving_does_not_drive(self):
-        """代码审查 C3：按住 W 滚出手柄区会停；滚回来（W 还按着、焦点还在）浏览器的自动重复不能让它接着走。"""
+        """item C3: item W item (W item, item)item."""
         k = self.out["steps"]["kbd_repeat"]
-        self.assertTrue(any(nonzero(p) for p in moves(k["held"])), "按住 W 时应该在走（不然这一步没测到东西）")
+        self.assertTrue(any(nonzero(p) for p in moves(k["held"])), "item W item (item)")
         self.assertIn({"vx": 0, "vy": 0, "vyaw": 0}, moves(k["out"]))
         self.assertTrue(k["activeBack"] and k["focus"])
-        self.assertFalse(any(nonzero(p) for p in moves(k["back"])), "滚回来以后自动重复的按下让鸭子又走了")
+        self.assertFalse(any(nonzero(p) for p in moves(k["back"])), "item")
 
     def test_c6_stage_canvas_keeps_pan_y_on_phone(self):
         self.assertEqual(self.out["phoneCanvas"]["computed"], "pan-y", self.out["phoneCanvas"])
 
     def test_c7_no_hold_after_fast_press_release_press(self):
-        """代码审查 C7：回执拖 300 ms，快速按下、松开、再按下：最后松手以后 2 秒里一条 action_hold 都没有。"""
+        """item C7: item 300 ms, item, item, item: item 2 item action_hold item."""
         h = self.out["steps"]["hold_race"]
-        self.assertGreater(h["holdsDuring"], 0, h)                     # 按着的时候是在续命的（对照）
+        self.assertGreater(h["holdsDuring"], 0, h)                     # item (item)
         self.assertEqual(h["holdsAfter"], 0, h)
 
     def test_servo_session_kept_with_bar_on_other_pages(self):
-        """用户 10-18：「舵机这个页面出去的时候应该保持住使能」：有舵机保持着，离开不交还、不弹确认框；别的页顶上有提示条，
-        刷新以后照样有；「交还主程序」两步确认；交还后提示条换成「已交还……sudo systemctl start robotd」，主程序连上后消失。"""
+        """item 10-18: 'item': item, item, item, 
+        item'item'item'item……sudo systemctl start robotd', item."""
         b = self.out["servoBar"]
-        self.assertIn("调舵机中 · 2 颗保持着 · 主程序停着（手柄、遥控、站走都不能用）", b["text"])
-        self.assertIn("回舵机页", b["text"])
+        self.assertIn("item · 2 item · item (item, item, item)", b["text"])
+        self.assertIn("item", b["text"])
         self.assertEqual(b["dialogs"], 0)
         self.assertTrue(b["afterReload"])
-        self.assertIn("交还：马上把 15 颗全部松开，鸭子会软下来——先扶住或放平", b["armed"])      # 审查 D7
-        self.assertIn("急停用顶上红按钮或空格（手柄 Select 这时不管用）", b["text"])                # 审查 D6
-        self.assertIn("别手动起 robotd，先点「交还主程序」", b["text"])                               # 审查 D9
-        self.assertTrue(b["sticky"]["visible"], b["sticky"])                                         # 滚到手柄区还在（吸顶）
-        self.assertTrue(b["visualFits"], "有舵机提示条时，姿态和视频仍能一起显示或正常滚动")
+        self.assertIn("item: item 15 item, item——item", b["armed"])      # item D7
+        self.assertIn("item (item Select item)", b["text"])                # item D6
+        self.assertIn("item robotd, item'item'", b["text"])                               # item D9
+        self.assertTrue(b["sticky"]["visible"], b["sticky"])                                         # item (item)
+        self.assertTrue(b["visualFits"], "item, itemNormalitem")
         p = b["phone"]
-        self.assertTrue(p["visible"], p)                                                             # 手机滚到遥控卡也看得到
-        self.assertEqual(p["badge"], "调舵机中")
+        self.assertTrue(p["visible"], p)                                                             # Phoneitem
+        self.assertEqual(p["badge"], "item")
         self.assertTrue(p["remote"])
         self.assertLessEqual(p["sw"], p["cw"])
-        self.assertTrue(b["dbl"]["stillOpen"])                                                       # 双击不交还（审查 D4）
+        self.assertTrue(b["dbl"]["stillOpen"])                                                       # item (item D4)
         self.assertTrue(b["dbl"]["armed"])
-        self.assertTrue(b["dbl"]["disarmed"])                                                        # 3 秒复原
-        self.assertTrue(b["earlyIgnored"])                                                           # 700 ms 内点确认不算
-        self.assertTrue(b["stillThere"])                                                             # 主程序没连上，「已交还」一直在
-        self.assertTrue(b["stillOpen"])                                # 点一下不交还
+        self.assertTrue(b["dbl"]["disarmed"])                                                        # 3 item
+        self.assertTrue(b["earlyIgnored"])                                                           # 700 ms item
+        self.assertTrue(b["stillThere"])                                                             # item, 'item'item
+        self.assertTrue(b["stillOpen"])                                # item
         self.assertIn("sudo systemctl start robotd", b["after"])
         self.assertTrue(b["gone"])
 
     def test_pad_3d_left_of_sticks_and_pauses_out_of_view(self):
-        """用户 10-24：宽屏左侧3D与摄像头整体吸顶，卡片不相互覆盖；滚出去停画；
-        3D 卡不算「在手柄区」（滚回顶上以后 active 是 false）。手机：3D 在遥控上面、矮、不 sticky，不能左右滑。"""
+        """item 10-24: item3Ditem, item
+        3D item'item' (item active item false).Phone: 3D item, item, item sticky, item."""
         d = self.out["pad3d"]
         self.assertGreaterEqual(d["visFrac"], 0.6, d)
         self.assertTrue(d["left"], d)
@@ -262,55 +262,55 @@ class OverviewE2E(unittest.TestCase):
         self.assertEqual(p["sticky"], "static")
 
     def test_all_done_collapses_to_one_line(self):
-        self.assertIn("上手 6 步都完成了（跳过 1 步）", self.done["done"])
+        self.assertIn("item 6 item (Skip 1 item)", self.done["done"])
 
     def test_all_done_line_expands_and_remembers(self):
         e = self.done["expanded"]
         self.assertEqual(e["rows"], 6)
-        self.assertEqual(e["redo"], 5)                                # 5 行 ✓ 都有「重新做」
+        self.assertEqual(e["redo"], 5)                                # 5 item ✓ item'item'
         self.assertEqual(e["skip"], 1)
-        self.assertIn("收起", e["head"])
-        self.assertEqual(self.done["expandedAfterReload"], 6)        # 展开状态存在 localStorage
+        self.assertIn("item", e["head"])
+        self.assertEqual(self.done["expandedAfterReload"], 6)        # item localStorage
         self.assertTrue(self.done["collapsedAfterReload"])
 
     def test_every_row_has_three_buttons(self):
-        """用户 10-20：每一行任何时候都有「去做」「已完成」「跳过」（✓ 的行只有「重新做」）。"""
+        """item 10-20: item'item''item''Skip' (✓ item'item')."""
         rows = self.out["threeButtons"]
         self.assertGreaterEqual(len(rows), 3, rows)
         for r in rows:
             with self.subTest(step=r["step"]):
                 self.assertEqual(len(r["labels"]), 3, r)
-                self.assertEqual(r["labels"][1:], ["已完成", "跳过"], r)
+                self.assertEqual(r["labels"][1:], ["item", "Skip"], r)
 
     def test_skip_unskip_and_redo(self):
-        """舵机「已完成」→ ✓「你标了已完成（时间）」，有「重新做」「取消」；IMU 跳过 → 「跳过了」（灰 ↷），现在该做到第 4 行；
-        取消跳过复原；✓ 行的「重新做」去舵机页；「取消」复原。"""
+        """item'item'→ ✓'item (item)', item'item''item'itemIMU Skip → 'Skipitem' (item ↷), item 4 item
+        itemSkipitem✓ item'item'item'item'item."""
         m = self.out["marked"]
-        self.assertTrue(m["text"].startswith("你标了已完成（"), m)
-        self.assertEqual(m["buttons"], ["重新做", "取消"])
+        self.assertTrue(m["text"].startswith("item ("), m)
+        self.assertEqual(m["buttons"], ["item", "item"])
         sk = self.out["skip"]
         self.assertEqual(sk["imu"], "onb-skip")
         self.assertEqual(sk["mark"], "↷")
-        self.assertIn("跳过了（先不做）", sk["imuText"])
+        self.assertIn("Skipitem (item)", sk["imuText"])
         self.assertEqual(sk["now"], "pad")
         self.assertEqual(self.out["unskip"], {"imu": "onb-todo", "now": "imu"})
         self.assertEqual(self.out["redoHash"], "#/servos")
         self.assertEqual(self.out["undone"], "onb-todo")
 
     def test_estop_skip_needs_two_clicks_within_3s(self):
-        self.assertIn("确定跳过", self.out["estopOnce"]["text"])
-        self.assertEqual(self.out["estopOnce"]["skipStill"], ["跳过"])  # 原按钮不在原地变（审查 D4），确认按钮是另一个
-        self.assertEqual(self.out["estopOnce"]["state"], "onb-no")    # 点一次不生效
-        self.assertEqual(self.out["estopDbl"], {"state": "onb-no", "armed": True},   # 真鼠标双击：不跳过，只是冒出确认
+        self.assertIn("itemSkip", self.out["estopOnce"]["text"])
+        self.assertEqual(self.out["estopOnce"]["skipStill"], ["Skip"])  # item (item D4), item
+        self.assertEqual(self.out["estopOnce"]["state"], "onb-no")    # item
+        self.assertEqual(self.out["estopDbl"], {"state": "onb-no", "armed": True},   # item: itemSkip, item
                          {k: self.out.get(k) for k in ("estopDblGap", "estopArmed300", "estopClicks", "estopTargets", "estopArms", "dblAtRects")})
-        self.assertEqual(self.out["estopTimeout"], {"text": "跳过", "state": "onb-no"})   # 3 秒没再点：复原
+        self.assertEqual(self.out["estopTimeout"], {"text": "Skip", "state": "onb-no"})   # 3 item: item
         self.assertEqual(self.out["estopTwice"], "onb-skip")
 
     def test_imu_unverified_skip_needs_two_clicks(self):
-        """主程序明说 IMU 方向没确认：以前跳过灰着；现在能点，第一下冒出写着后果的确认按钮，不点就不跳。"""
+        """item IMU item: itemSkipitem, item, item."""
         b = self.out["imuBlocked"]
         self.assertFalse(b["disabled"])
-        self.assertEqual(b["ask"], "确定跳过？主程序没确认 IMU 方向：跳过了鸭子也站不起来")
+        self.assertEqual(b["ask"], "itemSkipitem IMU item: Skipitem")
         self.assertEqual(b["state"], "onb-no")
         self.assertEqual(b["after"], "onb-no")
 
