@@ -2,6 +2,7 @@
 
 [![Author](https://img.shields.io/badge/Author-Ronie%20Joseph-blue?logo=github)](https://github.com/roniejosephv-star)
 [![Organization](https://img.shields.io/badge/Org-Armature%20AI%20Labs-orange)](https://github.com/armature-ai-labs)
+[![Firmware Release](https://img.shields.io/badge/Firmware-Official%20v2.0.0-blue.svg)](https://github.com/armature-ai-labs/Armature-Duck-2.0-Firmware/releases/latest)
 [![AI Handoff](https://img.shields.io/badge/Handoff-AI%20%26%20Agent%20Guide-teal)](HANDOFF.md)
 [![Resume Setup](https://img.shields.io/badge/Resume-Setup%20Guide-orange)](RESUME_GUIDE.md)
 [![Getting Started](https://img.shields.io/badge/Guide-Getting%20Started-blue)](GETTING_STARTED.md)
@@ -26,7 +27,7 @@ Check the model printed on the board. **Radxa ZERO 3W** and **Radxa Cubie A7Z** 
 
 | Board | Image download | First use |
 |---|---|---|
-| **Radxa ZERO 3W** | [ZERO 3W · 20261112 RC4 test image](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-replica-image-zero3w-20261112-rc4) · [Previous stable image](https://github.com/fanhao375/microduck-replica/releases/tag/microduck-replica-image-20261027) | [ZERO 3W flashing and setup](software/image/烧录和第一次使用.md) |
+| **Radxa ZERO 3W** | [Armature Duck 2.0 Official Firmware v2.0.0](https://github.com/armature-ai-labs/Armature-Duck-2.0-Firmware/releases/tag/v2.0.0) · [Firmware Repo](https://github.com/armature-ai-labs/Armature-Duck-2.0-Firmware) | [ZERO 3W flashing and setup](https://github.com/armature-ai-labs/Armature-Duck-2.0-Firmware#flashing-instructions) |
 | **Radxa Cubie A7Z** | [Cubie A7Z preview image](https://github.com/Liangjin5437/microduck-replica/releases/tag/a7z-duck-image-20261109-preview1) | [A7Z flashing and setup](radxa-cubie-a7z/image/README.md) |
 
 **The Feetech HD-1910 build has passed real hardware validation: standing, walking, a forward roll and standing back up.** Our main build uses **15 Feetech HD-1910 servos**. We provide a **ready-to-flash system image** and the **Microduck Studio web console** for Wi-Fi setup, calibration, and remote control from a phone or computer browser.

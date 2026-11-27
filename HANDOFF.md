@@ -9,6 +9,8 @@
 
 - **Project Name**: Armature Duck 2.0 (Indie Duck)
 - **GitHub Repository**: [`https://github.com/armature-ai-labs/Armature-Duck-2.0`](https://github.com/armature-ai-labs/Armature-Duck-2.0)
+- **Official Firmware Repository**: [`https://github.com/armature-ai-labs/Armature-Duck-2.0-Firmware`](https://github.com/armature-ai-labs/Armature-Duck-2.0-Firmware)
+- **Official Release (v2.0.0)**: [`v2.0.0 Release with 795MB Image`](https://github.com/armature-ai-labs/Armature-Duck-2.0-Firmware/releases/tag/v2.0.0)
 - **Author & Creator**: **Ronie Joseph** ([@roniejosephv-star](https://github.com/roniejosephv-star))  
   Email: `roniejosephv@gmail.com`
 - **Publishing Organization**: **[Armature AI Labs](https://github.com/armature-ai-labs)** (`armature-ai-labs`)  
